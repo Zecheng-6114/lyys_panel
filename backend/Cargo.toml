@@ -10,8 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 axum = { version = "0.8", features = ["macros", "multipart"] }
-tokio = { version = "1", features = ["full"] }
-tower = "0.5"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "process", "sync", "time"] }
 tower-http = { version = "0.6", features = ["compression-br", "compression-gzip", "cors", "trace"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -25,22 +24,23 @@ rand = "0.8"
 rust-embed = "8"
 mime_guess = "2"
 anyhow = "1"
-thiserror = "1"
 time = { version = "0.3", features = ["formatting"] }
-# AI 助手调用模型服务用（同步客户端，调用处放在 spawn_blocking 里）
-ureq = { version = "2", default-features = false, features = ["tls"] }
-# 情绪识别：本地跑 ONNX 分类模型。
-# 关掉默认特性：download-binaries 会在构建时去 GitHub 下运行库（本机与服务器都连不上），
-# 用 load-dynamic —— 运行时再指定 libonnxruntime 的路径。
-ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }
-# 分词：要核心 + 一个正则后端（必须二选一，选纯 Rust 的 fancy-regex 免得引入系统库）
-regex = "1"
-tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
-tokio-stream = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# ---------- AI 助手功能暂时停用（用户决定 2026-09-24）----------
+# 以下依赖仅被已注释的 ai/aimemory/aitools/emotion/websearch 模块使用。
+# 停用期间从编译中移除以显著缩减二进制与依赖树；恢复 AI 时，需连同
+# main.rs 里的模块注释一起放开下面 5 行。
+# ureq = { version = "2", default-features = false, features = ["tls"] }        # AI 调模型服务的同步 HTTP 客户端
+# ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }  # 情绪识别 ONNX 运行时
+# regex = "1"                                                                    # 仅 websearch 用
+# tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }   # AI 分词
+# tokio-stream = "0.1"                                                           # AI SSE 流式响应
 
 [profile.release]
 opt-level = 3
 lto = true
+codegen-units = 1
+panic = "abort"
 strip = true

@@ -31,6 +31,10 @@ export default defineConfig({
   define: {
     __APP_VERSION__: JSON.stringify(cargoVersion()),
   },
+  // 生产构建去掉 console/debugger 调用（esbuild 压缩阶段生效）
+  esbuild: {
+    drop: ["console", "debugger"],
+  },
   server: {
     port: 5173,
     proxy: {
