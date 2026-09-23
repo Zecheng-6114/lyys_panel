@@ -1,0 +1,101 @@
+#!/bin/sh
+# lyys-panel commit-msg hook — mechanically enforces CONTRIBUTING.md.
+# Install with: sh scripts/install-hooks.sh
+#
+# Rejects the commit (non-zero exit) unless the message matches:
+#   <subsystem>: <Imperative description, <=72 cols, no trailing period>
+#   <blank line>
+#   <body: at least one non-empty line, describing what & why>
+#   <blank line>
+#   Signed-off-by: Name <email>
+
+set -e
+
+MSG_FILE="$1"
+
+# Strip comment lines, trailing whitespace, and trailing blank lines.
+TMP="$(mktemp)"
+trap 'rm -f "$TMP"' EXIT
+sed 's/[[:space:]]*$//' "$MSG_FILE" | grep -v '^[[:space:]]*#' |
+  awk 'BEGIN{b=0} /^$/{b=b+1; next} {if(b>0){for(i=0;i<b;i++)print "";b=0} print}' > "$TMP"
+
+fail() {
+  echo "" >&2
+  echo "=== lyys-panel commit-msg: REJECTED ===" >&2
+  echo "$1" >&2
+  echo "See CONTRIBUTING.md (section 2) for the required format." >&2
+  echo "======================================" >&2
+  exit 1
+}
+
+[ -s "$TMP" ] || fail "Empty commit message."
+
+SUBJECT="$(sed -n '1p' "$TMP")"
+
+# --- Subject checks ---
+
+# subsystem: must be lowercase letters/digits/_/-/ and start with a letter.
+if ! printf '%s' "$SUBJECT" | grep -Eq '^[a-z][a-z0-9_/-]*: '; then
+  fail "Subject must start with a lowercase subsystem followed by ': ' (e.g. 'api: Add ...').
+Got: $SUBJECT"
+fi
+
+# Reject Conventional Commits style 'type(scope): ...'
+if printf '%s' "$SUBJECT" | grep -Eq '^[a-z]+\([^)]+\): '; then
+  fail "Do not use Conventional Commits 'type(scope):' form. Use 'subsystem: Description'."
+fi
+
+# Description after ': ' must start uppercase.
+DESC="$(printf '%s' "$SUBJECT" | sed -E 's/^[a-z][a-z0-9_/-]*: //')"
+first_char="$(printf '%s' "$DESC" | cut -c1)"
+case "$first_char" in
+  [A-Z0-9]) : ;;
+  *) fail "Description after 'subsystem: ' must start with an uppercase letter.
+Got: $DESC" ;;
+esac
+
+# No trailing period.
+case "$DESC" in
+  *. | .* ) fail "Subject must not end with a period." ;;
+esac
+
+# Length <= 72.
+if [ "$(printf '%s' "$SUBJECT" | wc -m)" -gt 72 ]; then
+  fail "Subject longer than 72 characters."
+fi
+
+# Common non-imperative / vague openers.
+if printf '%s' "$DESC" | grep -Eiq '^(added|fixed|removed|updated|changed|refactored|improved|support(ed)?|wip|update|fixes)\b'; then
+  fail "Subject must use the imperative mood ('Add', 'Fix', 'Remove', ...), not past/continuous tense."
+fi
+if printf '%s' "$DESC" | grep -Eiq '^(bug fix|some changes|misc|stuff|temp|asdf|test)$'; then
+  fail "Subject is too vague to describe a logical change."
+fi
+
+# --- Body check ---
+# Everything after the subject (which must be followed by a blank line).
+LINE2="$(sed -n '2p' "$TMP")"
+if [ -n "$LINE2" ]; then
+  fail "A blank line is required between the subject and the body."
+fi
+
+# Body = lines 3..end, minus trailer block, minus trailing blank lines.
+BODY="$(sed -n '3,$p' "$TMP" | grep -Ev '^Signed-off-by: ' |
+  awk 'BEGIN{b=0} /^$/{b=b+1; next} {if(b>0){for(i=0;i<b;i++)print "";b=0} print}')"
+if [ -z "$BODY" ]; then
+  fail "Commit body is required: explain WHAT changed and WHY (at least one line)."
+fi
+
+# Body lines <= 72 columns.
+if printf '%s\n' "$BODY" | awk 'length > 72 {print; found=1} END{exit !found}' | grep -q .; then
+  long_line="$(printf '%s\n' "$BODY" | awk 'length > 72 {print; exit}')"
+  fail "Body line exceeds 72 columns (wrap manually):
+$long_line"
+fi
+
+# --- Trailer check ---
+if ! grep -Eq '^Signed-off-by: .+ <[^<>]+@[^<>]+>' "$TMP"; then
+  fail "Missing 'Signed-off-by: Name <email>' trailer. Use 'git commit -s'."
+fi
+
+exit 0

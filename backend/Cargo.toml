@@ -1,0 +1,46 @@
+[package]
+name = "lyys-panel"
+version = "0.1.0"
+edition = "2021"
+description = "服务器运维面板后端"
+
+[[bin]]
+name = "lyys-panel"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.8", features = ["macros", "multipart"] }
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["compression-br", "compression-gzip", "cors", "trace"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sysinfo = "0.32"
+rusqlite = { version = "0.32", features = ["bundled"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.25"
+jsonwebtoken = "9"
+argon2 = "0.5"
+rand = "0.8"
+rust-embed = "8"
+mime_guess = "2"
+anyhow = "1"
+thiserror = "1"
+time = { version = "0.3", features = ["formatting"] }
+# AI 助手调用模型服务用（同步客户端，调用处放在 spawn_blocking 里）
+ureq = { version = "2", default-features = false, features = ["tls"] }
+# 情绪识别：本地跑 ONNX 分类模型。
+# 关掉默认特性：download-binaries 会在构建时去 GitHub 下运行库（本机与服务器都连不上），
+# 用 load-dynamic —— 运行时再指定 libonnxruntime 的路径。
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }
+# 分词：要核心 + 一个正则后端（必须二选一，选纯 Rust 的 fancy-regex 免得引入系统库）
+regex = "1"
+tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
+tokio-stream = "0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true

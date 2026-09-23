@@ -1,0 +1,21 @@
+# Rust
+/backend/target/
+*.rs.bk
+
+# Node
+/frontend/node_modules/
+/frontend/dist/
+
+# 数据库与本地配置
+*.db
+*.db-journal
+/backend/data/
+.env
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+
+# 构建日志
+/build.log
