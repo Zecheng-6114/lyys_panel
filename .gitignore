@@ -16,6 +16,7 @@
 .vscode/
 .idea/
 .DS_Store
+.trae/
 
 # 构建日志
 /build.log
