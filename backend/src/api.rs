@@ -717,6 +717,65 @@ fn parse_docker_action(s: &str) -> Result<crate::docker::Action, ApiError> {
         .map_err(|_| ApiError::bad(format!("未知操作：{s}")))
 }
 
+// ---------- 主题定制 ----------
+
+/// settings 表中主题配置的键名（值为前端序列化的 JSON 字符串）
+const THEME_KEY: &str = "theme_config";
+/// 配置 JSON 的字节上限。背景图以 data URL 内嵌，2MB 图片 base64 后约 2.7MB，
+/// 留一点余量取 3MB；防误传超大文件撑爆数据库。
+const THEME_MAX_BYTES: usize = 3 * 1024 * 1024;
+
+/// 读取主题配置；未定制过时返回 null，前端据此使用默认样式
+async fn theme_get(
+    State(state): State<AppState>,
+    _user: AuthUser,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let raw = state
+        .db
+        .get_setting_async(THEME_KEY)
+        .await
+        .map_err(ApiError::file_err)?;
+    let value = match raw {
+        Some(s) => serde_json::from_str::<serde_json::Value>(&s)
+            .unwrap_or(serde_json::Value::Null),
+        None => serde_json::Value::Null,
+    };
+    Ok(Json(serde_json::json!({ "config": value })))
+}
+
+/// 保存主题配置。请求体为原样 JSON（后端不解析具体字段，只做合法性与大小校验）；
+/// 传 null 表示删除配置、恢复默认。
+async fn theme_set(
+    State(state): State<AppState>,
+    _user: AuthUser,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if body.len() > THEME_MAX_BYTES {
+        return Err(ApiError::bad(format!(
+            "主题配置过大（上限 {}MB）",
+            THEME_MAX_BYTES / 1024 / 1024
+        )));
+    }
+    let text =
+        String::from_utf8(body.to_vec()).map_err(|_| ApiError::bad("主题配置必须是 UTF-8 JSON"))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|_| ApiError::bad("主题配置 JSON 无法解析"))?;
+    if value.is_null() {
+        state
+            .db
+            .set_setting_async(THEME_KEY, "")
+            .await
+            .map_err(ApiError::file_err)?;
+    } else {
+        state
+            .db
+            .set_setting_async(THEME_KEY, &value.to_string())
+            .await
+            .map_err(ApiError::file_err)?;
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 // ---------- AI 助手（暂时停用）----------
 //
 // 用户决定：当前版本不需要 AI 助手功能，先注释掉。恢复时把下面整段
@@ -1299,7 +1358,14 @@ pub fn router(state: AppState) -> Router {
         .route("/docker/images", get(docker_images))
         .route("/docker/image/action", post(docker_image_action))
         .route("/docker/compose", get(docker_compose))
-        .route("/docker/compose/action", post(docker_compose_action));
+        .route("/docker/compose/action", post(docker_compose_action))
+        // 主题定制：GET 读取、POST 保存。背景图以 data URL 内嵌，需放宽默认 2MB 请求体上限
+        .route(
+            "/theme",
+            get(theme_get)
+                .post(theme_set)
+                .layer(DefaultBodyLimit::max(THEME_MAX_BYTES)),
+        );
         // AI 助手路由暂时停用（与文件头部 AI 处理函数段一起注释，恢复时去掉本注释并补回链式调用）
         /*
         .route("/ai/config", get(ai_config_get).post(ai_config_set))

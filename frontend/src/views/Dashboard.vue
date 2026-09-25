@@ -110,18 +110,22 @@ async function refreshHistory() {
 
 function renderChart() {
   if (!chart || !chartEl.value) return;
-  const isDark = document.documentElement.classList.contains("dark");
-  const line = isDark ? "#f2f2f2" : "#111111";
-  const sub = isDark ? "#8f8f8f" : "#777777";
-  const grid = isDark ? "#262626" : "#ebebeb";
+  // 颜色从 CSS 变量运行时读取：主题定制（改主色/文本色/背景）后图表跟随，
+  // 不再硬编码默认主题的灰阶值。canvas 不受 CSS 级联影响，只能这样取值。
+  const css = getComputedStyle(document.documentElement);
+  const v = (name: string) => css.getPropertyValue(name).trim();
+  const line = v("--el-text-color-primary") || "#111111";
+  const sub = v("--el-text-color-secondary") || "#777777";
+  const grid = v("--el-fill-color-dark") || "#ebebeb";
+  const cardBg = v("--el-bg-color") || "#ffffff";
   chart.setOption({
     backgroundColor: "transparent",
     // 统一调色板为灰阶（tooltip 标记等默认色也走这里）
     color: [line, sub],
     tooltip: {
       trigger: "axis",
-      backgroundColor: isDark ? "#1b1b1b" : "#ffffff",
-      borderColor: isDark ? "#2e2e2e" : "#e5e5e5",
+      backgroundColor: v("--el-bg-color-overlay") || cardBg,
+      borderColor: grid,
       textStyle: { color: line },
     },
     legend: { data: ["CPU %", "内存 %"], textStyle: { color: sub } },
@@ -206,7 +210,7 @@ onBeforeUnmount(() => {
 .card,
 .chart-card {
   background: var(--el-bg-color);
-  border-radius: 6px;
+  border-radius: var(--radius);
   padding: 16px;
 }
 .card-label {
@@ -221,7 +225,7 @@ onBeforeUnmount(() => {
 }
 .bar {
   height: 4px;
-  border-radius: 2px;
+  border-radius: var(--radius);
   background: var(--el-fill-color);
   overflow: hidden;
 }
@@ -229,7 +233,7 @@ onBeforeUnmount(() => {
   display: block;
   height: 100%;
   background: var(--el-text-color-primary);
-  border-radius: 2px;
+  border-radius: var(--radius);
 }
 .chart-title {
   font-size: 14px;

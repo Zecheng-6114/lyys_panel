@@ -364,7 +364,7 @@ onMounted(() => load("/"));
 .crumb {
   cursor: pointer;
   padding: 3px 2px;
-  border-radius: 4px;
+  border-radius: var(--radius);
   color: var(--el-text-color-regular);
 }
 .crumb:hover {

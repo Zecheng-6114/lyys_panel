@@ -72,7 +72,7 @@ onMounted(loadFiles);
 <style scoped>
 .logbox {
   background: var(--el-bg-color);
-  border-radius: 6px;
+  border-radius: var(--radius);
   padding: 12px 16px;
   height: var(--panel-table-height);
   overflow: auto;

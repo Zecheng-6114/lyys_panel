@@ -39,30 +39,12 @@
           <button
             class="mini-btn icon-btn"
             type="button"
-            :aria-label="theme.isDark ? '切换到亮色' : '切换到暗色'"
-            :title="theme.isDark ? '切换到亮色' : '切换到暗色'"
-            @click="theme.toggle()"
+            aria-label="界面设置"
+            title="界面设置"
+            @click="settingsOpen = true"
           >
-            <!-- 图标而非文字：太阳/月亮本身就能表达切换方向，加文字反而啰嗦。
-                 用内联 SVG 而不是 ☀ / ☾ 字符 —— 那两个字符在部分字体下会渲染成
-                 星号之类毫不相干的形状。 -->
+            <!-- 齿轮图标 -->
             <svg
-              v-if="theme.isDark"
-              viewBox="0 0 24 24"
-              width="17"
-              height="17"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-            >
-              <circle cx="12" cy="12" r="4.2" />
-              <path
-                d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M18.7 5.3l-1.4 1.4M6.7 17.3l-1.4 1.4"
-              />
-            </svg>
-            <svg
-              v-else
               viewBox="0 0 24 24"
               width="17"
               height="17"
@@ -72,7 +54,10 @@
               stroke-linecap="round"
               stroke-linejoin="round"
             >
-              <path d="M20 14.2A8.5 8.5 0 0 1 9.8 4 8.5 8.5 0 1 0 20 14.2z" />
+              <circle cx="12" cy="12" r="3" />
+              <path
+                d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"
+              />
             </svg>
           </button>
           <button class="mini-btn" type="button" @click="logout">退出</button>
@@ -82,18 +67,27 @@
         <router-view />
       </section>
     </div>
+    <SettingsDialog v-model="settingsOpen" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useThemeStore } from "../stores/theme";
+import SettingsDialog from "../components/SettingsDialog.vue";
 
 const route = useRoute();
 const router = useRouter();
 const theme = useThemeStore();
 const appVersion = __APP_VERSION__;
+
+// 界面设置弹窗（主题定制）
+const settingsOpen = ref(false);
+// 进入布局（已登录）时拉取服务端主题定制配置
+onMounted(() => {
+  theme.load();
+});
 
 /// 窄屏下侧边栏是抽屉，默认收起。宽屏时 CSS 忽略这个状态。
 const menuOpen = ref(false);
@@ -178,7 +172,8 @@ function logout() {
   background: var(--el-fill-color-light);
 }
 .side-menu :deep(.el-menu-item.is-active) {
-  background: var(--el-text-color-primary);
+  /* 反色块用主色而非文本色：定制只改文本色时不该把选中块一起染色 */
+  background: var(--el-color-primary);
   color: var(--el-bg-color);
 }
 /* 版本号贴在侧边栏左下角：左内边距与菜单项文字对齐（菜单项本身 padding 0 12px） */

@@ -161,7 +161,7 @@ onMounted(load);
 }
 .dnsbox {
   background: var(--el-bg-color);
-  border-radius: 6px;
+  border-radius: var(--radius);
   padding: 12px 16px;
 }
 .dnsrow {

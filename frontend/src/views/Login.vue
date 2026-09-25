@@ -78,7 +78,7 @@ async function submit() {
   max-width: 320px;
   box-sizing: border-box;
   background: var(--el-bg-color);
-  border-radius: 6px;
+  border-radius: var(--radius);
   padding: 32px;
 }
 @media (max-width: 768px) {

@@ -378,8 +378,7 @@ where
 /// 保留同步版本是因为启动阶段（`Db::open` / `ensure_admin`）本就运行在
 /// runtime 之外，那里不需要异步包装。
 impl Db {
-    // get_setting_async / set_setting_async 仅 AI 段使用，随 AI 停用一起注释（恢复时放开）
-    /*
+    // 主题定制（/api/theme）使用；AI 段恢复时同样依赖这两个包装
     pub async fn get_setting_async(&self, key: &str) -> Result<Option<String>> {
         let db = self.clone();
         let key = key.to_string();
@@ -392,7 +391,6 @@ impl Db {
         let value = value.to_string();
         blocking(move || db.set_setting(&key, &value)).await
     }
-    */
 
     pub async fn find_user_async(&self, username: &str) -> Result<Option<(i64, String, String)>> {
         let db = self.clone();
