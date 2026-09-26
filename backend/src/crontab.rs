@@ -89,10 +89,9 @@ async fn write_raw(text: &str) -> anyhow::Result<()> {
     drop(child.stdin.take());
     let out = child.wait_with_output().await.context("等待 crontab 失败")?;
     if !out.status.success() {
-        anyhow::bail!(
-            "写入 crontab 失败：{}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        // P1-3：命令 stderr 只进日志，响应体不回显（防内部细节泄露）
+        tracing::warn!("crontab stderr：{}", String::from_utf8_lossy(&out.stderr).trim());
+        anyhow::bail!("写入 crontab 失败，详见服务端日志");
     }
     Ok(())
 }

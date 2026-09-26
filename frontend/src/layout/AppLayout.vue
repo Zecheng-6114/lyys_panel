@@ -74,6 +74,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import http from "../api/http";
 import { useThemeStore } from "../stores/theme";
 import SettingsDialog from "../components/SettingsDialog.vue";
 
@@ -110,7 +111,21 @@ const titles: Record<string, string> = {
 };
 const pageTitle = computed(() => titles[route.path] ?? "LYYS Panel");
 
-function logout() {
+// 登出（P1-1）：先请求服务端吊销当前 token（旧 token 立即失效），
+// 再清本地凭证。吊销请求失败（如后端已不可达）不阻断本地登出，
+// token 本身有 24h 过期兜底。
+async function logout() {
+  const token = localStorage.getItem("panel_token");
+  if (token) {
+    try {
+      await http.post("/logout", null, {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 3000,
+      });
+    } catch {
+      // 忽略：本地照常登出
+    }
+  }
   localStorage.removeItem("panel_token");
   router.push("/login");
 }

@@ -2,6 +2,7 @@ use anyhow::Context;
 use serde::Serialize;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::UNIX_EPOCH;
 
 #[cfg(unix)]
@@ -13,6 +14,32 @@ const MAX_READ_SIZE: u64 = 1024 * 1024;
 const MAX_DOWNLOAD_SIZE: u64 = 50 * 1024 * 1024;
 /// 二进制探测时读取的头部字节数
 const PROBE_SIZE: usize = 8192;
+
+/// 面板数据目录（panel.db / JWT 密钥文件 / 初始密码文件所在），进程启动时
+/// 设置一次。该目录内的文件包含凭证等敏感数据，一律禁止经文件管理接口读写
+/// （P0-2：防止已登录用户经面板自身功能「拖库提权」的纵深防御）。
+static PROTECTED_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// 设置受保护的数据目录（main.rs 启动时调用，需传入 canonicalize 后的绝对路径）
+pub fn set_protected_dir(dir: PathBuf) {
+    let _ = PROTECTED_DIR.set(dir);
+}
+
+/// 判断路径是否受保护：位于数据目录内，或本身是 SQLite 数据库文件
+/// （`*.db` / `*.db-wal` / `*.db-shm`，后者是 SQLite 写前日志与共享内存伴生文件）。
+fn is_protected(p: &Path) -> bool {
+    if let Some(dir) = PROTECTED_DIR.get() {
+        if p.starts_with(dir) {
+            return true;
+        }
+    }
+    let name = p
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    name.ends_with(".db") || name.ends_with(".db-wal") || name.ends_with(".db-shm")
+}
 
 /// 判断一段字节是否为文本内容：含 NUL 字节或不是合法 UTF-8 即视为二进制。
 /// 二进制文件按文本读取再回写会损坏原文件，编辑前必须拦截。
@@ -59,6 +86,9 @@ pub struct DirListing {
 /// `exists` 为 true 时 canonicalize 出真实路径再返回（这样后续读写跟随的是
 /// 规范化后的位置，符号链接与 `..` 都已消解）；为 false 时用于新建/重命名
 /// 目标等尚不存在的路径，此时只做词法校验并原样返回。
+///
+/// 额外拦截数据目录与数据库文件（P0-2），所有文件管理操作都以本函数为
+/// 路径入口，一处拦截即全量生效。
 fn resolve(path: &str, exists: bool) -> anyhow::Result<PathBuf> {
     if !path.starts_with('/') {
         anyhow::bail!("必须使用绝对路径");
@@ -67,8 +97,13 @@ fn resolve(path: &str, exists: bool) -> anyhow::Result<PathBuf> {
         anyhow::bail!("路径中不允许包含 ..");
     }
     let p = PathBuf::from(path);
-    if exists {
-        return p.canonicalize().context("路径不存在");
+    let p = if exists {
+        p.canonicalize().context("路径不存在")?
+    } else {
+        p
+    };
+    if is_protected(&p) {
+        anyhow::bail!("该路径属于面板数据目录或数据库文件，禁止通过文件接口访问");
     }
     Ok(p)
 }
@@ -130,9 +165,9 @@ pub async fn list_dir(path: &str) -> anyhow::Result<DirListing> {
     tokio::task::spawn_blocking(move || -> anyhow::Result<DirListing> {
         let dir = resolve(&path, true)?;
         let mut entries: Vec<Entry> = Vec::new();
-        let rd = std::fs::read_dir(&dir).with_context(|| format!("读取目录失败：{}", path))?;
+        let rd = std::fs::read_dir(&dir).context("读取目录失败")?;
         for e in rd {
-            let e = e?;
+            let e = e.context("读取目录项失败")?;
             if let Some(entry) = build_entry(&e) {
                 entries.push(entry);
             }
@@ -203,7 +238,8 @@ pub async fn write_file(path: &str, content: &str) -> anyhow::Result<()> {
         if p.exists() && looks_binary(&p) {
             anyhow::bail!("目标疑似二进制文件，拒绝覆盖写入");
         }
-        std::fs::write(&p, content).with_context(|| format!("写入文件失败：{}", path))?;
+        // P1-3：错误消息不回显路径/errno，完整原因进 tracing 日志（见 ApiError）
+        std::fs::write(&p, content).context("写入文件失败")?;
         Ok(())
     })
     .await
@@ -215,7 +251,7 @@ pub async fn mkdir(path: &str) -> anyhow::Result<()> {
     let path = path.to_string();
     tokio::task::spawn_blocking(move || {
         let p = resolve(&path, false)?;
-        std::fs::create_dir(&p).with_context(|| format!("创建目录失败：{}", path))?;
+        std::fs::create_dir(&p).context("创建目录失败")?;
         Ok(())
     })
     .await
@@ -232,9 +268,9 @@ pub async fn remove(path: &str) -> anyhow::Result<()> {
         }
         let meta = std::fs::symlink_metadata(&p).context("读取目标失败")?;
         if meta.is_dir() && !meta.is_symlink() {
-            std::fs::remove_dir_all(&p).with_context(|| format!("删除目录失败：{}", path))?;
+            std::fs::remove_dir_all(&p).context("删除目录失败")?;
         } else {
-            std::fs::remove_file(&p).with_context(|| format!("删除失败：{}", path))?;
+            std::fs::remove_file(&p).context("删除文件失败")?;
         }
         Ok(())
     })
@@ -252,8 +288,7 @@ pub async fn rename(from: &str, to: &str) -> anyhow::Result<()> {
         if dst.exists() {
             anyhow::bail!("目标已存在");
         }
-        std::fs::rename(&src, &dst)
-            .with_context(|| format!("重命名失败：{} -> {}", from, to))?;
+        std::fs::rename(&src, &dst).context("重命名失败")?;
         Ok(())
     })
     .await
@@ -312,6 +347,11 @@ pub async fn save_upload(dir: &str, filename: &str, bytes: Vec<u8>) -> anyhow::R
                     break;
                 }
             }
+        }
+        // P0-2：目标目录虽已校验，但文件名本身仍可能是 *.db（含 WAL/SHM 伴生文件），
+        // 最终落点单独再拦一道，防止上传创建数据库文件
+        if is_protected(&target) {
+            anyhow::bail!("不允许上传为数据库文件（.db）");
         }
         std::fs::write(&target, bytes).context("保存上传文件失败")?;
         Ok(to_string_path(&target))

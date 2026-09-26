@@ -10,10 +10,9 @@ async fn json_cmd(program: &str, args: &[&str]) -> anyhow::Result<Value> {
         .await
         .with_context(|| format!("调用 {program} 失败"))?;
     if !out.status.success() {
-        anyhow::bail!(
-            "{program} 执行失败：{}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        // P1-3：命令 stderr 只进日志，响应体不回显（防内部细节泄露）
+        tracing::warn!("{program} stderr：{}", String::from_utf8_lossy(&out.stderr).trim());
+        anyhow::bail!("{program} 执行失败，详见服务端日志");
     }
     let v: Value =
         serde_json::from_slice(&out.stdout).with_context(|| format!("解析 {program} 输出失败"))?;
@@ -38,10 +37,9 @@ pub async fn connections() -> anyhow::Result<Vec<Value>> {
         .await
         .context("调用 ss 失败")?;
     if !out.status.success() {
-        anyhow::bail!(
-            "ss 执行失败：{}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        // P1-3：命令 stderr 只进日志，响应体不回显
+        tracing::warn!("ss stderr：{}", String::from_utf8_lossy(&out.stderr).trim());
+        anyhow::bail!("ss 执行失败，详见服务端日志");
     }
     let text = String::from_utf8_lossy(&out.stdout);
     let mut list = Vec::new();

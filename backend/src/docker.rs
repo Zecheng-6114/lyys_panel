@@ -93,7 +93,7 @@ const LIST_TIMEOUT: u64 = 20;
 /// 可能长时间运行的操作（安装、拉取镜像、compose up）的超时（秒）
 const LONG_TIMEOUT: u64 = 900;
 
-/// 执行命令并返回 stdout。失败时把 stderr 一并带进错误信息。
+/// 执行命令并返回 stdout。失败时 stderr 只写入日志，不进错误消息（P1-3）。
 async fn run(program: &str, args: &[&str], secs: u64, what: &str) -> Result<String> {
     let fut = Command::new(program).args(args).output();
     let res = timeout(Duration::from_secs(secs), fut)
@@ -101,8 +101,9 @@ async fn run(program: &str, args: &[&str], secs: u64, what: &str) -> Result<Stri
         .map_err(|_| anyhow::anyhow!("{what}超时（{} 秒）", secs))?;
     let out = res.context(format!("调用 {program} 失败，请确认已安装并启动 Docker"))?;
     if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        bail!("{}", if err.is_empty() { format!("{what}失败") } else { err });
+        // P1-3：命令 stderr 只进日志，响应体不回显（防内部细节泄露）
+        tracing::warn!("{what}失败，{program} stderr：{}", String::from_utf8_lossy(&out.stderr).trim());
+        anyhow::bail!("{what}失败，详见服务端日志");
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -502,8 +503,9 @@ pub async fn compose_action(name: &str, act: Action) -> Result<String> {
         .map_err(|_| anyhow::anyhow!("compose 操作超时（{} 秒）", LONG_TIMEOUT))?
         .context("调用 compose 失败")?;
     if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        bail!("{}", if err.is_empty() { "compose 操作失败".to_string() } else { err });
+        // P1-3：命令 stderr 只进日志，响应体不回显
+        tracing::warn!("compose 操作失败，stderr：{}", String::from_utf8_lossy(&out.stderr).trim());
+        anyhow::bail!("compose 操作失败，详见服务端日志");
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -594,7 +596,9 @@ pub async fn install() -> Result<String> {
     log.push_str("\n=== 启动 docker 服务 ===\n");
     log.push_str(&String::from_utf8_lossy(&out.stdout));
     if !out.status.success() {
-        bail!("启动 docker 服务失败：{}", String::from_utf8_lossy(&out.stderr).trim());
+        // P1-3：命令 stderr 只进日志，响应体不回显
+        tracing::warn!("启动 docker 服务失败，systemctl stderr：{}", String::from_utf8_lossy(&out.stderr).trim());
+        anyhow::bail!("启动 docker 服务失败，详见服务端日志");
     }
 
     // 装完自检：CLI 与 daemon 都在才算成功，否则明确告诉用户缺什么
