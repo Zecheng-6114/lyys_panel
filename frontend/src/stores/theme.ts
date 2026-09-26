@@ -84,61 +84,90 @@ function pushColorVars(lines: string[], name: string, hex: string, fade: string)
   if (tri) lines.push(`--el-color-${name}-rgb: ${tri};`);
 }
 
-/// 把主题配置翻译成注入用的 CSS 文本；空配置返回空串（不注入）
+/// 颜色白名单：#rrggbb（6 位十六进制）——其余值一律不进 CSS（P1-2，
+/// 与后端 validate_theme 规则一致，双端校验）
+function isHexColor(s: unknown): s is string {
+  return typeof s === "string" && /^#[0-9a-fA-F]{6}$/.test(s);
+}
+
+/// 圆角白名单：有限数值 clamp 到 0..64，其余视为未提供（P1-2）
+function safeRadius(r: unknown): number | null {
+  if (typeof r !== "number" || !Number.isFinite(r)) return null;
+  return Math.min(64, Math.max(0, r));
+}
+
+/// 背景图白名单（P1-2）：仅允许 data:image/ 前缀的 data URL，且不含
+/// 引号/右括号/反斜杠/控制字符 —— 这些字符可闭合 CSS 的 url("...")
+/// 字符串构成样式注入逃逸，出现即整个字段丢弃。
+function safeBgImage(s: unknown): string | null {
+  if (typeof s !== "string" || !s.startsWith("data:image/")) return null;
+  if (/[")\\]/.test(s) || /[\x00-\x1f]/.test(s)) return null;
+  return s;
+}
+
+/// 把主题配置翻译成注入用的 CSS 文本；空配置返回空串（不注入）。
+/// P1-2：所有字段注入前过白名单，非法值直接丢弃（该条 CSS 变量不生成），
+/// 防止服务端或导入主题包里的恶意值进入样式上下文。
 export function buildThemeCss(cfg: ThemeConfig): string {
   const lines: string[] = [];
-  if (typeof cfg.radius === "number") {
-    lines.push(`--radius: ${cfg.radius}px;`);
+  const radius = safeRadius(cfg.radius);
+  if (radius !== null) {
+    lines.push(`--radius: ${radius}px;`);
   }
-  const c = cfg.colors;
+  const c = cfg.colors ?? {};
+  const primary = isHexColor(c.primary) ? c.primary : null;
+  const bgCard = isHexColor(c.bg_card) ? c.bg_card : null;
+  const bgPage = isHexColor(c.bg_page) ? c.bg_page : null;
+  const text = isHexColor(c.text) ? c.text : null;
   // 主题明暗由卡片底色判断：决定所有派生色的淡出方向
-  const isDark = !!c?.bg_card && luminance(c.bg_card) < 128;
+  const isDark = !!bgCard && luminance(bgCard) < 128;
   const fade = isDark ? "#000000" : "#ffffff";
 
-  if (c?.bg_card) {
-    lines.push(`--el-bg-color: ${c.bg_card};`);
-    lines.push(`--el-bg-color-overlay: ${c.bg_card};`);
-    lines.push(`--el-fill-color-blank: ${c.bg_card};`);
+  if (bgCard) {
+    lines.push(`--el-bg-color: ${bgCard};`);
+    lines.push(`--el-bg-color-overlay: ${bgCard};`);
+    lines.push(`--el-fill-color-blank: ${bgCard};`);
   }
-  if (c?.bg_page) {
-    lines.push(`--el-bg-color-page: ${c.bg_page};`);
-  } else if (c?.bg_card && c?.text) {
+  if (bgPage) {
+    lines.push(`--el-bg-color-page: ${bgPage};`);
+  } else if (bgCard && text) {
     // 没单独给页面底色时，从卡片色向文本色微微偏移派生
-    lines.push(`--el-bg-color-page: ${mix(c.bg_card, c.text, 0.04)};`);
+    lines.push(`--el-bg-color-page: ${mix(bgCard, text, 0.04)};`);
   }
-  if (c?.text) {
-    lines.push(`--el-text-color-primary: ${c.text};`);
+  if (text) {
+    lines.push(`--el-text-color-primary: ${text};`);
     // 派生文本层级（regular/secondary/placeholder/disabled）：
     // 从文本色向卡片底色逐级混合。不派生的话，暗色主题下这些
     // 亮色基底值（#333/#777/#999…）会和深底糊在一起或糊成一片。
-    if (c?.bg_card) {
-      lines.push(`--el-text-color-regular: ${mix(c.text, c.bg_card, 0.2)};`);
-      lines.push(`--el-text-color-secondary: ${mix(c.text, c.bg_card, 0.45)};`);
-      lines.push(`--el-text-color-placeholder: ${mix(c.text, c.bg_card, 0.58)};`);
-      lines.push(`--el-text-color-disabled: ${mix(c.text, c.bg_card, 0.72)};`);
+    if (bgCard) {
+      lines.push(`--el-text-color-regular: ${mix(text, bgCard, 0.2)};`);
+      lines.push(`--el-text-color-secondary: ${mix(text, bgCard, 0.45)};`);
+      lines.push(`--el-text-color-placeholder: ${mix(text, bgCard, 0.58)};`);
+      lines.push(`--el-text-color-disabled: ${mix(text, bgCard, 0.72)};`);
       // 填充色阶（表头/hover/输入框底）：从卡片底色向文本色逐级混合
-      lines.push(`--el-fill-color-lighter: ${mix(c.bg_card, c.text, 0.03)};`);
-      lines.push(`--el-fill-color-light: ${mix(c.bg_card, c.text, 0.06)};`);
-      lines.push(`--el-fill-color: ${mix(c.bg_card, c.text, 0.1)};`);
-      lines.push(`--el-fill-color-dark: ${mix(c.bg_card, c.text, 0.14)};`);
-      lines.push(`--el-fill-color-darker: ${mix(c.bg_card, c.text, 0.18)};`);
+      lines.push(`--el-fill-color-lighter: ${mix(bgCard, text, 0.03)};`);
+      lines.push(`--el-fill-color-light: ${mix(bgCard, text, 0.06)};`);
+      lines.push(`--el-fill-color: ${mix(bgCard, text, 0.1)};`);
+      lines.push(`--el-fill-color-dark: ${mix(bgCard, text, 0.14)};`);
+      lines.push(`--el-fill-color-darker: ${mix(bgCard, text, 0.18)};`);
     }
   }
-  if (c?.primary) {
-    pushColorVars(lines, "primary", c.primary, fade);
+  if (primary) {
+    pushColorVars(lines, "primary", primary, fade);
     // 语义色默认与主色同值（黑白灰设计），定制主色时一并跟随，
     // 否则暗色主题下 danger/success 还是近黑，按钮直接隐形
-    pushColorVars(lines, "success", c.primary, fade);
-    pushColorVars(lines, "danger", c.primary, fade);
-    pushColorVars(lines, "error", c.primary, fade);
+    pushColorVars(lines, "success", primary, fade);
+    pushColorVars(lines, "danger", primary, fade);
+    pushColorVars(lines, "error", primary, fade);
   }
   // warning/info 默认是中灰（文本色向背景混合约 0.4），定制时同样派生
-  if (c?.text && c?.bg_card) {
-    const mid = mix(c.text, c.bg_card, 0.4);
+  if (text && bgCard) {
+    const mid = mix(text, bgCard, 0.4);
     pushColorVars(lines, "warning", mid, fade);
     pushColorVars(lines, "info", mid, fade);
   }
-  if (cfg.bg_image) lines.push(`--panel-bg-image: url("${cfg.bg_image}");`);
+  const bgImage = safeBgImage(cfg.bg_image);
+  if (bgImage) lines.push(`--panel-bg-image: url("${bgImage}");`);
   if (!lines.length) return "";
   return `:root {\n${lines.join("\n")}\n}`;
 }

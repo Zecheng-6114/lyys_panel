@@ -1,4 +1,6 @@
-use axum::extract::{ConnectInfo, DefaultBodyLimit, FromRequestParts, Multipart, Query, State};
+use axum::extract::{
+    ConnectInfo, DefaultBodyLimit, FromRequest, FromRequestParts, Multipart, Query, Request, State,
+};
 use axum::http::{header, request::Parts, StatusCode};
 // AI 助手功能暂时停用（见文件末尾 "AI 助手已停用" 说明），以下导入仅 AI 段使用
 // use axum::response::sse::{Event, Sse};
@@ -42,11 +44,24 @@ impl ApiError {
             message: msg.into(),
         }
     }
-    /// 将任意 Display 错误转为 400（文件模块用，携带完整错误链）
-    fn file_err(e: impl std::fmt::Display) -> Self {
+    /// 将业务层 anyhow 错误转为 400。
+    ///
+    /// P1-3 约定：错误链的最外层消息面向用户（各业务模块已保证不含
+    /// 路径/errno/命令 stderr），完整错误链（含底层细节）写入 tracing
+    /// 日志，方便服务端排查。
+    fn file_err(e: anyhow::Error) -> Self {
+        tracing::warn!("请求处理失败：{e:#}");
         Self {
             status: StatusCode::BAD_REQUEST,
             message: e.to_string(),
+        }
+    }
+
+    /// 内部错误（P1-3）：响应体统一通用文案，细节只进 tracing 日志
+    fn internal() -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: "内部错误，请稍后再试".into(),
         }
     }
 }
@@ -65,10 +80,13 @@ impl std::fmt::Debug for ApiError {
 }
 
 impl From<anyhow::Error> for ApiError {
+    /// P1-3 错误脱敏：500 响应统一通用文案；完整错误链（可能含路径、errno、
+    /// 命令输出等内部细节）只写入 tracing 日志，不回显给客户端。
     fn from(e: anyhow::Error) -> Self {
+        tracing::error!("内部错误：{e:#}");
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: format!("内部错误：{e:#}"),
+            message: "内部错误，请稍后再试".to_string(),
         }
     }
 }
@@ -82,11 +100,16 @@ impl IntoResponse for ApiError {
 /// 认证后的当前用户（从 Authorization: Bearer <token> 解析）
 ///
 /// 当前只区分「已登录」，handler 用它作为守卫参数即可。保留 `id` 是为了
-/// 后续按用户区分数据（多管理员、个人偏好）时不用改鉴权链路。
+/// 后续按用户区分数据（多管理员、个人偏好）时不用改鉴权链路；
+/// `jti`/`exp` 供登出接口吊销当前 token（P1-1）。
 #[allow(dead_code)]
 pub struct AuthUser {
     /// 用户 id（MVP 单管理员）
     pub id: i64,
+    /// 本枚 token 的唯一 id（登出时加入服务端吊销名单）
+    pub jti: String,
+    /// 本枚 token 的过期时间（Unix 秒，吊销有效期到点为止）
+    pub exp: usize,
 }
 
 impl FromRequestParts<AppState> for AuthUser {
@@ -101,9 +124,17 @@ impl FromRequestParts<AppState> for AuthUser {
         let token = header
             .strip_prefix("Bearer ")
             .ok_or_else(|| ApiError::unauthorized("认证头格式错误"))?;
-        let id = auth::verify_token(&state.jwt_secret, token)
+        let claims = auth::verify_token(&state.jwt_secret, token)
             .map_err(|_| ApiError::unauthorized("登录已过期，请重新登录"))?;
-        Ok(AuthUser { id })
+        // P1-1：已登出（吊销）的 token 一律拒绝
+        if state.revocations.is_revoked(&claims.jti) {
+            return Err(ApiError::unauthorized("登录已失效，请重新登录"));
+        }
+        Ok(AuthUser {
+            id: claims.sub,
+            jti: claims.jti,
+            exp: claims.exp,
+        })
     }
 }
 
@@ -150,10 +181,44 @@ impl FromRequestParts<AppState> for ClientIp {
     }
 }
 
+/// 统一 JSON 请求体提取器（P1-3）。
+///
+/// axum 内置 `Json` 的拒绝响应会把 serde 细节（类型名、枚举取值、行列号）
+/// 原样回显给客户端；这里包一层，保留原状态码（400/415/422 均为 4xx，
+/// 语义正确），但响应体统一为通用文案，细节只进 tracing 日志。
+struct SafeJson<T>(T);
+
+impl<S, T> FromRequest<S> for SafeJson<T>
+where
+    T: Send,
+    Json<T>: FromRequest<S>,
+    <Json<T> as FromRequest<S>>::Rejection: IntoResponse + Send,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        match Json::<T>::from_request(req, state).await {
+            Ok(Json(value)) => Ok(SafeJson(value)),
+            Err(rej) => {
+                let resp = rej.into_response();
+                let (parts, body) = resp.into_parts();
+                let bytes = axum::body::to_bytes(body, 4096).await.unwrap_or_default();
+                let detail = String::from_utf8_lossy(&bytes);
+                tracing::warn!("请求体解析失败（{}）：{}", parts.status, detail.trim());
+                Err(ApiError {
+                    status: parts.status,
+                    message: "请求体格式错误".into(),
+                })
+            }
+        }
+    }
+}
+
 async fn login(
     State(state): State<AppState>,
     ClientIp(ip): ClientIp,
-    Json(req): Json<LoginReq>,
+    SafeJson(req): SafeJson<LoginReq>,
 ) -> Result<Json<LoginResp>, ApiError> {
     let wait = state.throttle.retry_after(ip, &req.username);
     if !wait.is_zero() {
@@ -182,7 +247,11 @@ async fn login(
         auth::verify_password(&password, &hash_for_verify)
     })
     .await
-    .map_err(ApiError::file_err)?;
+    // 后台任务崩溃属服务端内部错误：细节进日志，客户端只收通用 500（P1-3）
+    .map_err(|e| {
+        tracing::error!("密码校验任务异常：{e}");
+        ApiError::internal()
+    })?;
     if !verified {
         let delay = state.throttle.record_failure(ip, &req.username);
         tracing::warn!(
@@ -195,12 +264,25 @@ async fn login(
     }
 
     state.throttle.record_success(ip, &req.username);
+    // P0-1：首次登录成功后删除初始密码文件（一次性文件方案）
+    auth::cleanup_initial_password(&state.data_dir);
     let token = auth::issue_token(&state.jwt_secret, id)?;
     tracing::info!("登录成功：user={} ip={}", req.username, ip);
     Ok(Json(LoginResp {
         token,
         username: req.username,
     }))
+}
+
+/// 登出（P1-1）：把当前 token 吊销到其自然过期为止，
+/// 之后该 token 再请求任何受保护接口都会被拒（401）。
+async fn logout(
+    State(state): State<AppState>,
+    user: AuthUser,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state.revocations.revoke(&user.jti, user.exp as i64);
+    tracing::info!("登出（token 已吊销）：user_id={}", user.id);
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 async fn system_state(
@@ -246,7 +328,7 @@ struct KillReq {
 async fn processes_kill(
     State(state): State<AppState>,
     _user: AuthUser,
-    Json(req): Json<KillReq>,
+    SafeJson(req): SafeJson<KillReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // 失败必须往外抛：早先的实现用 `.is_ok()` 取布尔后就丢弃了错误，
     // 导致杀进程失败（如权限不足）时前端仍显示成功。
@@ -274,7 +356,7 @@ struct ServiceActionReq {
 
 async fn services_action(
     _user: AuthUser,
-    Json(req): Json<ServiceActionReq>,
+    SafeJson(req): SafeJson<ServiceActionReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let out = opservice::action(&req.name, req.action)
         .await
@@ -297,7 +379,12 @@ async fn logs_journal(
     _user: AuthUser,
     Query(q): Query<JournalQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let text = crate::logs::journal(q.unit.as_deref(), q.lines).await?;
+    // P1-3：journal 按用户给的 unit 读取，失败多为参数问题 → 4xx + 通用文案，
+    // 细节（journalctl 输出等）只进日志
+    let text = crate::logs::journal(q.unit.as_deref(), q.lines).await.map_err(|e| {
+        tracing::warn!("日志读取失败（journal）：{e:#}");
+        ApiError::bad("日志读取失败（参数无效或 journal 服务不可用）")
+    })?;
     Ok(Json(serde_json::json!({ "text": text })))
 }
 
@@ -316,7 +403,12 @@ async fn logs_tail(
     _user: AuthUser,
     Query(q): Query<TailQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let text = crate::logs::tail_file(&q.path, q.lines).await?;
+    // P1-3：路径来自客户端，读取失败（不存在/无权限/非普通文件）属输入问题
+    // → 4xx + 通用文案，不回显路径与 errno
+    let text = crate::logs::tail_file(&q.path, q.lines).await.map_err(|e| {
+        tracing::warn!("日志读取失败（tail）：{e:#}");
+        ApiError::bad("无法读取该日志（不存在、无权限或非普通文件）")
+    })?;
     Ok(Json(serde_json::json!({ "text": text })))
 }
 
@@ -353,7 +445,7 @@ struct WriteReq {
 
 async fn files_write(
     _user: AuthUser,
-    Json(req): Json<WriteReq>,
+    SafeJson(req): SafeJson<WriteReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::files::write_file(&req.path, &req.content)
         .await
@@ -368,7 +460,7 @@ struct MkdirReq {
 
 async fn files_mkdir(
     _user: AuthUser,
-    Json(req): Json<MkdirReq>,
+    SafeJson(req): SafeJson<MkdirReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::files::mkdir(&req.path)
         .await
@@ -378,7 +470,7 @@ async fn files_mkdir(
 
 async fn files_delete(
     _user: AuthUser,
-    Json(req): Json<PathQuery>,
+    SafeJson(req): SafeJson<PathQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::files::remove(&req.path)
         .await
@@ -394,7 +486,7 @@ struct RenameReq {
 
 async fn files_rename(
     _user: AuthUser,
-    Json(req): Json<RenameReq>,
+    SafeJson(req): SafeJson<RenameReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::files::rename(&req.from, &req.to)
         .await
@@ -444,18 +536,30 @@ async fn files_upload(
     let mut dir = String::new();
     let mut fname = String::new();
     let mut fbytes: Vec<u8> = Vec::new();
-    while let Some(field) = mp.next_field().await.map_err(ApiError::file_err)? {
+    // P1-3：multipart 解析错误属客户端请求问题 → 4xx + 通用文案，细节只进日志
+    while let Some(field) = mp.next_field().await.map_err(|e| {
+        tracing::warn!("上传数据解析失败：{e}");
+        ApiError::bad("上传请求格式错误")
+    })? {
         match field.name().unwrap_or("") {
-            "dir" => dir = field.text().await.map_err(ApiError::file_err)?,
+            "dir" => {
+                dir = field.text().await.map_err(|e| {
+                    tracing::warn!("上传字段 dir 读取失败：{e}");
+                    ApiError::bad("上传请求格式错误")
+                })?
+            }
             "file" => {
                 fname = field.file_name().unwrap_or("upload.bin").to_string();
-                fbytes = field.bytes().await.map_err(ApiError::file_err)?.to_vec();
+                fbytes = field.bytes().await.map_err(|e| {
+                    tracing::warn!("上传字段 file 读取失败：{e}");
+                    ApiError::bad("上传数据读取失败")
+                })?.to_vec();
             }
             _ => {}
         }
     }
     if dir.is_empty() || fbytes.is_empty() {
-        return Err(ApiError::file_err("缺少 dir 或 file 字段"));
+        return Err(ApiError::bad("缺少 dir 或 file 字段"));
     }
     let size = fbytes.len();
     let saved = crate::files::save_upload(&dir, &fname, fbytes)
@@ -517,7 +621,7 @@ struct PkgActionReq {
 
 async fn packages_action(
     _user: AuthUser,
-    Json(req): Json<PkgActionReq>,
+    SafeJson(req): SafeJson<PkgActionReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let output = match req.action.as_str() {
         "update" => crate::packages::update_index().await,
@@ -544,7 +648,7 @@ struct CronReq {
 
 async fn cron_add(
     _user: AuthUser,
-    Json(req): Json<CronReq>,
+    SafeJson(req): SafeJson<CronReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::crontab::add(&req.entry)
         .await
@@ -555,7 +659,7 @@ async fn cron_add(
 async fn cron_update(
     _: State<AppState>,
     _user: AuthUser,
-    Json(req): Json<CronReq>,
+    SafeJson(req): SafeJson<CronReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let index = req.index.ok_or_else(|| ApiError::bad("缺少 index"))?;
     crate::crontab::update(index, &req.entry)
@@ -571,7 +675,7 @@ struct CronDeleteReq {
 
 async fn cron_delete(
     _user: AuthUser,
-    Json(req): Json<CronDeleteReq>,
+    SafeJson(req): SafeJson<CronDeleteReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::crontab::delete(req.index)
         .await
@@ -631,7 +735,7 @@ struct ContainerActionReq {
 
 async fn docker_container_action(
     _user: AuthUser,
-    Json(req): Json<ContainerActionReq>,
+    SafeJson(req): SafeJson<ContainerActionReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let act = parse_docker_action(&req.action)?;
     let output = crate::docker::container_action(&req.id, act)
@@ -674,7 +778,7 @@ struct ImageActionReq {
 
 async fn docker_image_action(
     _user: AuthUser,
-    Json(req): Json<ImageActionReq>,
+    SafeJson(req): SafeJson<ImageActionReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let output = match req.action.as_str() {
         "pull" => crate::docker::pull(&req.target).await,
@@ -702,7 +806,7 @@ struct ComposeActionReq {
 
 async fn docker_compose_action(
     _user: AuthUser,
-    Json(req): Json<ComposeActionReq>,
+    SafeJson(req): SafeJson<ComposeActionReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let act = parse_docker_action(&req.action)?;
     let output = crate::docker::compose_action(&req.name, act)
@@ -725,25 +829,96 @@ const THEME_KEY: &str = "theme_config";
 /// 留一点余量取 3MB；防误传超大文件撑爆数据库。
 const THEME_MAX_BYTES: usize = 3 * 1024 * 1024;
 
-/// 读取主题配置；未定制过时返回 null，前端据此使用默认样式
+/// 主题字段白名单校验（P1-2）：前端会在应用前再校验一次，这里做服务端闸门，
+/// 防止把恶意值存进库后经主题 CSS 注入攻击浏览器。
+///
+/// - 允许字段：version / name / radius / colors{primary,bg_page,bg_card,text} / bg_image
+/// - 颜色：必须为 `#rrggbb`（6 位十六进制，带 #）
+/// - radius：数值 0..=64
+/// - bg_image：必须以 `data:image/` 开头，且不含引号/括号/反斜杠/控制字符
+///   （这些字符可闭合 CSS 的 `url("...")` 字符串，构成样式注入逃逸）
+fn validate_theme(cfg: &serde_json::Value) -> Result<(), String> {
+    let obj = cfg
+        .as_object()
+        .ok_or_else(|| "主题配置必须是对象".to_string())?;
+    for (k, v) in obj {
+        match k.as_str() {
+            "version" => {
+                if v.as_number().is_none() {
+                    return Err("version 必须是数字".into());
+                }
+            }
+            "name" => {
+                let s = v.as_str().ok_or("name 必须是字符串")?;
+                if s.chars().count() > 64 {
+                    return Err("name 过长（上限 64 字符）".into());
+                }
+            }
+            "radius" => {
+                let r = v.as_f64().ok_or("radius 必须是数字")?;
+                if !(0.0..=64.0).contains(&r) {
+                    return Err("radius 必须在 0..64 之间".into());
+                }
+            }
+            "colors" => {
+                let colors = v.as_object().ok_or("colors 必须是对象")?;
+                for (ck, cv) in colors {
+                    if !matches!(
+                        ck.as_str(),
+                        "primary" | "bg_page" | "bg_card" | "text"
+                    ) {
+                        return Err(format!("未知颜色字段：{ck}"));
+                    }
+                    let s = cv.as_str().ok_or("颜色值必须是字符串")?;
+                    let b = s.as_bytes();
+                    let ok = b.len() == 7
+                        && b[0] == b'#'
+                        && b[1..].iter().all(|c| c.is_ascii_hexdigit());
+                    if !ok {
+                        return Err(format!("颜色 {ck} 必须是 #rrggbb 格式（6 位十六进制）"));
+                    }
+                }
+            }
+            "bg_image" => {
+                let s = v.as_str().ok_or("bg_image 必须是字符串")?;
+                if !s.starts_with("data:image/") {
+                    return Err("bg_image 仅允许 data:image/ 前缀的 data URL".into());
+                }
+                if s.chars().any(|c| c == '"' || c == ')' || c == '\\' || (c as u32) < 0x20) {
+                    return Err("bg_image 含有不允许的字符".into());
+                }
+            }
+            _ => return Err(format!("未知字段：{k}")),
+        }
+    }
+    Ok(())
+}
+
+/// 读取主题配置；未定制过时返回 null，前端据此使用默认样式。
+/// 库里存了历史遗留的非法配置时按无定制处理（前端另有二次校验兜底）。
 async fn theme_get(
     State(state): State<AppState>,
     _user: AuthUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let raw = state
-        .db
-        .get_setting_async(THEME_KEY)
-        .await
-        .map_err(ApiError::file_err)?;
+    // DB 失败属服务端内部错误 → 500 通用文案（P1-3）
+    let raw = state.db.get_setting_async(THEME_KEY).await?;
     let value = match raw {
-        Some(s) => serde_json::from_str::<serde_json::Value>(&s)
-            .unwrap_or(serde_json::Value::Null),
+        Some(s) => {
+            let v = serde_json::from_str::<serde_json::Value>(&s)
+                .unwrap_or(serde_json::Value::Null);
+            if !v.is_null() && validate_theme(&v).is_err() {
+                tracing::warn!("忽略库中未通过安全校验的主题配置");
+                serde_json::Value::Null
+            } else {
+                v
+            }
+        }
         None => serde_json::Value::Null,
     };
     Ok(Json(serde_json::json!({ "config": value })))
 }
 
-/// 保存主题配置。请求体为原样 JSON（后端不解析具体字段，只做合法性与大小校验）；
+/// 保存主题配置。请求体为原样 JSON，先做字段白名单校验（P1-2）再入库；
 /// 传 null 表示删除配置、恢复默认。
 async fn theme_set(
     State(state): State<AppState>,
@@ -760,19 +935,12 @@ async fn theme_set(
         String::from_utf8(body.to_vec()).map_err(|_| ApiError::bad("主题配置必须是 UTF-8 JSON"))?;
     let value: serde_json::Value =
         serde_json::from_str(&text).map_err(|_| ApiError::bad("主题配置 JSON 无法解析"))?;
-    if value.is_null() {
-        state
-            .db
-            .set_setting_async(THEME_KEY, "")
-            .await
-            .map_err(ApiError::file_err)?;
-    } else {
-        state
-            .db
-            .set_setting_async(THEME_KEY, &value.to_string())
-            .await
-            .map_err(ApiError::file_err)?;
+    if !value.is_null() {
+        // P1-2：服务端白名单校验，不通过不入库
+        validate_theme(&value).map_err(ApiError::bad)?;
     }
+    let stored = if value.is_null() { "" } else { &value.to_string() };
+    state.db.set_setting_async(THEME_KEY, stored).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -1322,6 +1490,7 @@ async fn health() -> &'static str {
 /// 组装路由：/api/* 下所有业务接口都需要认证，其余走前端 SPA
 pub fn router(state: AppState) -> Router {
     let protected = Router::new()
+        .route("/logout", post(logout))
         .route("/system/state", get(system_state))
         .route("/system/history", get(system_history))
         .route("/processes", get(processes_list).post(processes_kill))

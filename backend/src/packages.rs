@@ -48,10 +48,9 @@ async fn list_installed_deb(filter: Option<&str>, limit: usize) -> anyhow::Resul
     }
     let out = cmd.output().await.context("调用 dpkg-query 失败")?;
     if !out.status.success() {
-        anyhow::bail!(
-            "查询软件包失败：{}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        // P1-3：命令 stderr 只进日志，响应体不回显（防内部细节泄露）
+        tracing::warn!("dpkg-query stderr：{}", String::from_utf8_lossy(&out.stderr).trim());
+        anyhow::bail!("查询软件包失败，详见服务端日志");
     }
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     let mut list = Vec::new();
@@ -85,10 +84,9 @@ async fn list_installed_arch(filter: Option<&str>, limit: usize) -> anyhow::Resu
         .await
         .context("调用 pacman 失败")?;
     if !out.status.success() {
-        anyhow::bail!(
-            "查询软件包失败：{}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        // P1-3：命令 stderr 只进日志，响应体不回显
+        tracing::warn!("pacman stderr：{}", String::from_utf8_lossy(&out.stderr).trim());
+        anyhow::bail!("查询软件包失败，详见服务端日志");
     }
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     let mut list = Vec::new();
@@ -135,10 +133,9 @@ async fn upgradable_deb() -> anyhow::Result<Vec<PackageInfo>> {
         .await
         .context("调用 apt-get 失败")?;
     if !out.status.success() {
-        anyhow::bail!(
-            "检查升级失败：{}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        // P1-3：命令 stderr 只进日志，响应体不回显
+        tracing::warn!("apt-get stderr：{}", String::from_utf8_lossy(&out.stderr).trim());
+        anyhow::bail!("检查升级失败，详见服务端日志");
     }
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     let mut list = Vec::new();
@@ -176,10 +173,9 @@ async fn upgradable_arch() -> anyhow::Result<Vec<PackageInfo>> {
         .context("调用 pacman 失败")?;
     // pacman -Qu 在"无可升级包"时退出码为 1，属正常，需区分
     if !out.status.success() && out.status.code() != Some(1) {
-        anyhow::bail!(
-            "检查升级失败：{}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        // P1-3：命令 stderr 只进日志，响应体不回显
+        tracing::warn!("pacman stderr：{}", String::from_utf8_lossy(&out.stderr).trim());
+        anyhow::bail!("检查升级失败，详见服务端日志");
     }
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     let mut list = Vec::new();
@@ -379,18 +375,18 @@ pub async fn run_pkg_cmd(cmd: &mut Command, what: &str) -> anyhow::Result<String
     tmp.push(format!("lyys-pkg-{tag}.log"));
     let file = std::fs::File::create(&tmp).context("创建包管理输出临时文件失败")?;
     let cloned = tmp.clone();
-    cmd.stdout(Stdio::from(file.try_clone()?))
+    // try_clone 的错误若不包 context 会以裸 io 错误（含 errno）成为错误链最外层，
+    // 进而进入响应体（P1-3）
+    cmd.stdout(Stdio::from(file.try_clone().context("复制临时文件句柄失败")?))
         .stderr(Stdio::from(file))
         .stdin(Stdio::null());
     let status = cmd.status().await.context("调用包管理器失败")?;
     let output = tokio::fs::read_to_string(&cloned).await.unwrap_or_default();
     let _ = tokio::fs::remove_file(&cloned).await;
     if !status.success() {
-        anyhow::bail!(
-            "{what}失败（退出码 {}）：\n{}",
-            status.code().unwrap_or(-1),
-            output
-        );
+        // P1-3：完整命令输出（含 stderr）只进日志，响应体不回显
+        tracing::warn!("{what}失败，包管理器输出：\n{output}");
+        anyhow::bail!("{what}失败（退出码 {}），详见服务端日志", status.code().unwrap_or(-1));
     }
     Ok(output)
 }

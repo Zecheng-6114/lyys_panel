@@ -103,6 +103,13 @@ impl Db {
         Ok(())
     }
 
+    /// 删除配置项（P0-2 迁移用：把遗留的 JWT 密钥从 settings 表移除）
+    pub fn remove_setting(&self, key: &str) -> Result<u64> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let n = conn.execute("DELETE FROM settings WHERE key = ?1", [key])?;
+        Ok(n as u64)
+    }
+
     /// 统计用户数量
     pub fn user_count(&self) -> Result<i64> {
         let conn = self.pool.get().context("获取数据库连接失败")?;
