@@ -1402,6 +1402,235 @@ async fn theme_set(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+// ---------- 3.1 备份管理（admin）----------
+
+#[derive(Deserialize)]
+struct BackupNameQuery {
+    name: String,
+}
+
+async fn backups_list(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+) -> Result<Json<Vec<crate::backup::BackupInfo>>, ApiError> {
+    let data_dir = state.data_dir.clone();
+    let list = tokio::task::spawn_blocking(move || crate::backup::list_backups(&data_dir))
+        .await
+        .map_err(|_| ApiError::internal())?
+        .map_err(ApiError::file_err)?;
+    Ok(Json(list))
+}
+
+async fn backups_create(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let db = state.db.clone();
+    let data_dir = state.data_dir.clone();
+    let name = tokio::task::spawn_blocking(move || crate::backup::create_backup(&db, &data_dir))
+        .await
+        .map_err(|_| ApiError::internal())?
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({ "ok": true, "name": name })))
+}
+
+async fn backup_download(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+    Query(q): Query<BackupNameQuery>,
+) -> Result<Response, ApiError> {
+    let data_dir = state.data_dir.clone();
+    let name = q.name.clone();
+    let name_for_check = q.name.clone();
+    let path = tokio::task::spawn_blocking(move || crate::backup::resolve_backup(&data_dir, &name_for_check))
+        .await
+        .map_err(|_| ApiError::internal())?
+        .map_err(ApiError::file_err)?;
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|_| ApiError::file_err(anyhow::anyhow!("读取备份文件失败")))?;
+    // 备份名是纯 ASCII 白名单格式，直接拼 Content-Disposition 即可
+    let resp = (
+        [
+            (header::CONTENT_TYPE, "application/octet-stream"),
+            (
+                header::CONTENT_DISPOSITION,
+                &format!("attachment; filename=\"{name}\""),
+            ),
+        ],
+        bytes,
+    )
+        .into_response();
+    Ok(resp)
+}
+
+async fn backup_delete(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+    SafeJson(req): SafeJson<BackupNameQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let data_dir = state.data_dir.clone();
+    tokio::task::spawn_blocking(move || crate::backup::delete_backup(&data_dir, &req.name))
+        .await
+        .map_err(|_| ApiError::internal())?
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// 登记恢复（重启服务后生效）。恢复会整体覆盖当前库，操作前请先下载备份留档。
+async fn backup_restore(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+    SafeJson(req): SafeJson<BackupNameQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let data_dir = state.data_dir.clone();
+    tokio::task::spawn_blocking(move || crate::backup::set_pending_restore(&data_dir, &req.name))
+        .await
+        .map_err(|_| ApiError::internal())?
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "message": "恢复已登记，重启面板服务后生效"
+    })))
+}
+
+// ---------- 3.2 面板自更新（admin）----------
+
+/// 上传二进制体积上限（release 产物约 10-40MB）
+const UPDATE_MAX_BYTES: usize = 80 * 1024 * 1024;
+
+async fn update_check(_: RequireRole<2>) -> Result<Json<crate::update::UpdateStatus>, ApiError> {
+    let client = reqwest::Client::new();
+    match crate::update::check(&client).await {
+        Ok(s) => Ok(Json(s)),
+        Err(e) => {
+            // 检查失败（离线/限流）不算接口错误：带回当前版本与失败说明
+            tracing::warn!("检查更新失败：{e:#}");
+            Ok(Json(crate::update::UpdateStatus {
+                current: crate::update::CURRENT_VERSION.into(),
+                latest: None,
+                has_update: false,
+                error: Some(e.to_string()),
+            }))
+        }
+    }
+}
+
+async fn update_install(_: RequireRole<2>) -> Result<Json<serde_json::Value>, ApiError> {
+    let client = reqwest::Client::new();
+    let (bytes, tag) = crate::update::download_github(&client)
+        .await
+        .map_err(ApiError::file_err)?;
+    tokio::task::spawn_blocking(move || crate::update::install_binary(&bytes))
+        .await
+        .map_err(|_| ApiError::internal())?
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "version": tag,
+        "message": "新版本已就位，重启面板服务后生效"
+    })))
+}
+
+/// 手动上传新二进制（内网无法访问 GitHub 时的旁路）
+async fn update_upload(
+    _: RequireRole<2>,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if body.is_empty() {
+        return Err(ApiError::bad("上传内容为空"));
+    }
+    let bytes = body.to_vec();
+    tokio::task::spawn_blocking(move || crate::update::install_binary(&bytes))
+        .await
+        .map_err(|_| ApiError::internal())?
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "message": "新版本已就位，重启面板服务后生效"
+    })))
+}
+
+// ---------- 3.3 告警通知（admin）----------
+
+async fn alerts_rules_get(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+) -> Result<Json<Vec<crate::alerts::AlertRule>>, ApiError> {
+    let db = state.db.clone();
+    let rules = tokio::task::spawn_blocking(move || crate::alerts::load_rules(&db))
+        .await
+        .map_err(|_| ApiError::internal())?;
+    Ok(Json(rules))
+}
+
+/// 全量保存规则集（前端提交完整列表）。规则变更最迟一小时后被采样循环感知。
+async fn alerts_rules_set(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+    SafeJson(rules): SafeJson<Vec<crate::alerts::AlertRule>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if rules.len() > 20 {
+        return Err(ApiError::bad("规则数量过多（上限 20 条）"));
+    }
+    for r in &rules {
+        crate::alerts::validate_rule(r).map_err(|e| ApiError::bad(e.to_string()))?;
+    }
+    let db = state.db.clone();
+    let owned = rules.clone();
+    tokio::task::spawn_blocking(move || crate::alerts::save_rules(&db, &owned))
+        .await
+        .map_err(|_| ApiError::internal())?
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct WebhookReq {
+    url: Option<String>,
+}
+
+async fn alerts_webhook_get(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let db = state.db.clone();
+    let url = tokio::task::spawn_blocking(move || crate::alerts::load_webhook(&db))
+        .await
+        .map_err(|_| ApiError::internal())?;
+    Ok(Json(serde_json::json!({ "url": url })))
+}
+
+async fn alerts_webhook_set(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+    SafeJson(req): SafeJson<WebhookReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let db = state.db.clone();
+    let url = req.url.clone();
+    // 校验失败必须以 400 反馈（save_webhook 内部会 validate）
+    if let Some(u) = &url {
+        if !u.is_empty() {
+            crate::alerts::validate_webhook_url(u).map_err(|e| ApiError::bad(e.to_string()))?;
+        }
+    }
+    tokio::task::spawn_blocking(move || crate::alerts::save_webhook(&db, url.as_deref()))
+        .await
+        .map_err(|_| ApiError::internal())?
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn alerts_events(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+    Query(q): Query<AuditQuery>,
+) -> Result<Json<Vec<crate::db::AlertEventRow>>, ApiError> {
+    let limit = q.limit.clamp(1, 500);
+    let offset = q.offset.max(0);
+    Ok(Json(state.db.alert_event_list_async(limit, offset).await?))
+}
+
 // ---------- AI 助手（暂时停用）----------
 //
 // 用户决定：当前版本不需要 AI 助手功能，先注释掉。恢复时把下面整段
@@ -2073,6 +2302,30 @@ pub fn router(state: AppState) -> Router {
                 .post(theme_set)
                 .layer(DefaultBodyLimit::max(THEME_MAX_BYTES)),
         )
+        // 3.1 备份管理（admin 专属）
+        .route(
+            "/backups",
+            get(backups_list).post(backups_create).delete(backup_delete),
+        )
+        .route("/backups/download", get(backup_download))
+        .route("/backups/restore", post(backup_restore))
+        // 3.2 自更新（admin 专属）。上传通道需放宽请求体上限
+        .route("/update/check", get(update_check))
+        .route("/update/install", post(update_install))
+        .route(
+            "/update/upload",
+            post(update_upload).layer(DefaultBodyLimit::max(UPDATE_MAX_BYTES)),
+        )
+        // 3.3 告警通知（admin 专属）
+        .route(
+            "/alerts/rules",
+            get(alerts_rules_get).post(alerts_rules_set),
+        )
+        .route(
+            "/alerts/webhook",
+            get(alerts_webhook_get).post(alerts_webhook_set),
+        )
+        .route("/alerts/events", get(alerts_events))
         // 2.3：审计中间件挂在受保护路由上，记录所有非 GET 业务请求
         // （from_fn 不支持 State 提取器，必须用 from_fn_with_state）
         .layer(middleware::from_fn_with_state(

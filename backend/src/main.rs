@@ -2,8 +2,10 @@
 // mod ai;
 // mod aimemory;
 // mod aitools;
+mod alerts;
 mod api;
 mod auth;
+mod backup;
 mod crontab;
 mod db;
 mod distro;
@@ -18,6 +20,7 @@ mod opservice;
 mod packages;
 mod rprocess;
 mod tls;
+mod update;
 // mod websearch; // 仅被 aitools（AI 工具）引用，随 AI 一起停用
 
 use std::path::PathBuf;
@@ -47,6 +50,8 @@ pub struct AppState {
     /// 数据目录：JWT 密钥文件、初始密码等敏感文件的存放根目录
     /// （P0-2 起承载安全职责，不再是 AI 专用；AI 助手恢复时可直接复用本字段）
     pub data_dir: Arc<PathBuf>,
+    /// 数据库文件路径（3.1 恢复流程在启动时需要原始路径字符串）
+    pub db_path: Arc<String>,
 }
 
 #[tokio::main]
@@ -84,6 +89,11 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&data_dir).context("创建数据目录失败")?;
     let data_dir = data_dir.canonicalize().context("解析数据目录失败")?;
 
+    // 3.1 恢复：打开数据库之前先应用恢复标记（若有），否则旧库会被直接打开
+    if backup::apply_pending_restore(&data_dir, &db_path)? {
+        tracing::warn!("本次启动已应用数据库恢复");
+    }
+
     let db = db::Db::open(&db_path).context("初始化数据库失败")?;
 
     // P0-2 迁移：旧版本把 JWT 密钥存在 settings 表里（可被文件接口拖库提取后
@@ -112,6 +122,7 @@ async fn main() -> anyhow::Result<()> {
         throttle: Arc::new(auth::LoginThrottle::new()),
         revocations: Arc::new(auth::TokenRevocations::new()),
         data_dir: Arc::new(data_dir),
+        db_path: Arc::new(db_path),
     };
 
     // 启动后台监控采样任务

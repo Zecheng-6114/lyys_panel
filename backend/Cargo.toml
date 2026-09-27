@@ -28,8 +28,15 @@ time = { version = "0.3", features = ["formatting"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # 1.3 HTTPS：rustls TLS 终结 + 首启自签证书生成（纯 Rust，无 OpenSSL 依赖）
-axum-server = { version = "0.7", features = ["tls-rustls"] }
+# 注意：必须用 tls-rustls-no-provider。默认 tls-rustls 强推 rustls/aws-lc-rs，
+# 而 reqwest 的 rustls-tls 走 ring；同进程出现两个 crypto provider 会让 rustls
+# 在握手时 panic（Could not automatically determine the CryptoProvider）。
+# no-provider 变体不绑定任何 provider，全树只剩 reqwest 拉进来的 ring，
+# rustls 自动选择唯一 provider，无需手动 install_default。
+axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
 rcgen = "0.13"
+# 3.2 自更新 / 3.3 告警：出站 HTTPS（GitHub API 与 webhook），复用 rustls 栈
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
 # ---------- AI 助手功能暂时停用（用户决定 2026-09-24）----------
 # 以下依赖仅被已注释的 ai/aimemory/aitools/emotion/websearch 模块使用。

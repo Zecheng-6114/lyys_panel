@@ -60,6 +60,16 @@ pub struct SessionRow {
     pub exp: i64,
 }
 
+/// 告警事件行
+#[derive(Serialize)]
+pub struct AlertEventRow {
+    pub ts: i64,
+    pub metric: String,
+    pub value: f64,
+    pub threshold: f64,
+    pub state: String,
+}
+
 impl Db {
     /// 打开（或创建）SQLite 数据库并执行初始化建表
     pub fn open(path: &str) -> Result<Self> {
@@ -92,6 +102,7 @@ impl Db {
         (3, "0003_users_rbac.sql", include_str!("../migrations/0003_users_rbac.sql")),
         (4, "0004_audit_log.sql", include_str!("../migrations/0004_audit_log.sql")),
         (5, "0005_sessions.sql", include_str!("../migrations/0005_sessions.sql")),
+        (6, "0006_alerts.sql", include_str!("../migrations/0006_alerts.sql")),
     ];
 
     /// 按版本号升序执行未应用的迁移。
@@ -124,6 +135,16 @@ impl Db {
                 .with_context(|| format!("提交迁移 {name} 失败"))?;
             tracing::info!("已应用数据库迁移 {name}（版本 {ver}）");
         }
+        Ok(())
+    }
+
+    /// 3.1 备份：VACUUM INTO 生成一致性快照（不锁写者、产物去碎片）
+    pub fn vacuum_into(&self, target: &Path) -> Result<()> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let path_str = target.to_string_lossy().replace('\'', "''");
+        conn
+            .execute_batch(&format!("VACUUM INTO '{path_str}'"))
+            .context("VACUUM INTO 备份失败")?;
         Ok(())
     }
 
@@ -350,6 +371,53 @@ impl Db {
     pub fn audit_prune(&self, before: i64) -> Result<u64> {
         let conn = self.pool.get().context("获取数据库连接失败")?;
         let n = conn.execute("DELETE FROM audit_log WHERE ts < ?1", [before])?;
+        Ok(n as u64)
+    }
+
+    // ---------- 告警事件（3.3） ----------
+
+    /// 写入一条告警事件（firing / resolved）
+    pub fn alert_event_add(
+        &self,
+        ts: i64,
+        metric: &str,
+        value: f64,
+        threshold: f64,
+        state: &str,
+    ) -> Result<()> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        conn.execute(
+            "INSERT INTO alert_events (ts, metric, value, threshold, state) VALUES (?1, ?2, ?3, ?4, ?5)",
+            (ts, metric, value, threshold, state),
+        )?;
+        Ok(())
+    }
+
+    /// 分页读取告警事件（按时间倒序）
+    pub fn alert_event_list(&self, limit: i64, offset: i64) -> Result<Vec<AlertEventRow>> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let mut stmt = conn.prepare(
+            "SELECT ts, metric, value, threshold, state
+             FROM alert_events ORDER BY ts DESC, id DESC LIMIT ?1 OFFSET ?2",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![limit, offset], |row| {
+                Ok(AlertEventRow {
+                    ts: row.get(0)?,
+                    metric: row.get(1)?,
+                    value: row.get(2)?,
+                    threshold: row.get(3)?,
+                    state: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// 清理早于 before 的告警事件
+    pub fn alert_event_prune(&self, before: i64) -> Result<u64> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let n = conn.execute("DELETE FROM alert_events WHERE ts < ?1", [before])?;
         Ok(n as u64)
     }
 
@@ -910,6 +978,28 @@ impl Db {
         blocking(move || db.audit_prune(before)).await
     }
 
+    pub async fn alert_event_add_async(
+        &self,
+        ts: i64,
+        metric: String,
+        value: f64,
+        threshold: f64,
+        state: String,
+    ) -> Result<()> {
+        let db = self.clone();
+        blocking(move || db.alert_event_add(ts, &metric, value, threshold, &state)).await
+    }
+
+    pub async fn alert_event_list_async(&self, limit: i64, offset: i64) -> Result<Vec<AlertEventRow>> {
+        let db = self.clone();
+        blocking(move || db.alert_event_list(limit, offset)).await
+    }
+
+    pub async fn alert_event_prune_async(&self, before: i64) -> Result<u64> {
+        let db = self.clone();
+        blocking(move || db.alert_event_prune(before)).await
+    }
+
     pub async fn insert_metric_async(&self, p: &crate::monitor::Snapshot) -> Result<()> {
         let db = self.clone();
         let p = p.clone();
@@ -1031,22 +1121,23 @@ mod tests {
             > 0
     }
 
-    /// 全新库：迁移建出全部表，版本号为最新（5）；再次打开幂等（不重复执行）
+    /// 全新库：迁移建出全部表，版本号为最新（6）；再次打开幂等（不重复执行）
     #[test]
     fn fresh_db_gets_baseline() {
         let path = temp_db_path("fresh");
         {
             let db = Db::open(&path).unwrap();
-            assert_eq!(db.schema_version().unwrap(), 5);
+            assert_eq!(db.schema_version().unwrap(), 6);
             assert!(table_exists(&db, "settings"));
             assert!(table_exists(&db, "users"));
             assert!(table_exists(&db, "metrics"));
             assert!(table_exists(&db, "metrics_hourly"));
             assert!(table_exists(&db, "audit_log"));
             assert!(table_exists(&db, "sessions"));
+            assert!(table_exists(&db, "alert_events"));
         }
         let db2 = Db::open(&path).unwrap();
-        assert_eq!(db2.schema_version().unwrap(), 5);
+        assert_eq!(db2.schema_version().unwrap(), 6);
         let _ = std::fs::remove_file(path);
     }
 
@@ -1070,7 +1161,7 @@ mod tests {
         }
         {
             let db = Db::open(&path).unwrap();
-            assert_eq!(db.schema_version().unwrap(), 5);
+            assert_eq!(db.schema_version().unwrap(), 6);
             assert_eq!(db.user_count().unwrap(), 1);
             assert!(db.find_user("admin").unwrap().is_some());
             // 旧库升级后 admin 自动获得默认角色 admin、不强制改密（避免锁死现有部署）
@@ -1099,7 +1190,7 @@ mod tests {
             .expect_err("半途失败应中止");
             drop(tx);
             assert!(!table_exists(&db, "t_half"), "回滚后不应残留半途建的表");
-            assert_eq!(db.schema_version().unwrap(), 5, "失败的迁移不得推进版本");
+            assert_eq!(db.schema_version().unwrap(), 6, "失败的迁移不得推进版本");
         }
         let _ = std::fs::remove_file(path);
     }

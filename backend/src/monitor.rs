@@ -147,11 +147,15 @@ pub struct ProcessInfo {
 }
 
 /// 后台采样任务：每 5 秒写入一条监控历史，每小时聚合降采样 + 清理过期数据
-/// （保留策略常量见 db.rs）
+/// （保留策略常量见 db.rs）；每小时评估告警规则、执行每日自动备份
 pub fn spawn_sampler(state: AppState) {
     tokio::spawn(async move {
         let db = state.db.clone();
         let monitor = state.monitor.clone();
+        let data_dir = state.data_dir.clone();
+        // 3.3 告警：规则每小时从 settings 重载一次，评估在每次采样进行
+        let mut rules = crate::alerts::load_rules(&db);
+        let mut engine = crate::alerts::AlertEngine::new(&rules);
         let mut ticks: u32 = 0;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -162,10 +166,53 @@ pub fn spawn_sampler(state: AppState) {
             if let Err(e) = db.insert_metric_async(&snap).await {
                 tracing::warn!("写入监控采样失败：{e}");
             }
+            // 3.3：评估告警规则（滞回状态机，只在翻转时出事件）
+            let metrics = crate::alerts::Metrics {
+                cpu: snap.cpu,
+                mem_used: snap.mem_used,
+                mem_total: snap.mem_total,
+                disk_used: snap.disk_used,
+                disk_total: snap.disk_total,
+            };
+            for ev in engine.evaluate(&rules, metrics) {
+                let metric = crate::alerts::metric_label(ev.metric).to_string();
+                let state_str = if ev.firing { "firing" } else { "resolved" };
+                let now = time::OffsetDateTime::now_utc().unix_timestamp();
+                if let Err(e) = db
+                    .alert_event_add_async(now, metric.clone(), ev.value, ev.threshold, state_str.into())
+                    .await
+                {
+                    tracing::warn!("写入告警事件失败：{e}");
+                }
+                let db2 = db.clone();
+                let msg = format!(
+                    "[LYYS 面板告警] {metric} {}：当前 {:.1}%，阈值 {:.0}%",
+                    if ev.firing { "超过" } else { "恢复到阈值以下" },
+                    ev.value,
+                    ev.threshold
+                );
+                let notify = rules
+                    .iter()
+                    .find(|r| r.metric == ev.metric)
+                    .map(|r| ev.firing || r.notify_resolve)
+                    .unwrap_or(ev.firing);
+                if notify {
+                    tokio::spawn(async move {
+                        if let Some(url) = crate::alerts::load_webhook(&db2) {
+                            let client = reqwest::Client::new();
+                            crate::alerts::send_webhook(&client, &url, &msg).await;
+                        }
+                    });
+                }
+                tracing::info!("告警事件：{metric} {:.1}% 阈值 {:.0}%（{state_str}）", ev.value, ev.threshold);
+            }
             // 每 720 次采样（约 1 小时）执行一次保留策略
             ticks += 1;
             if ticks >= 720 {
                 ticks = 0;
+                // 重载规则（设置页改动即时生效上限为 1 小时延迟）
+                rules = crate::alerts::load_rules(&db);
+                engine.resync(&rules);
                 let now = time::OffsetDateTime::now_utc().unix_timestamp();
                 if let Err(e) = db
                     .rollup_and_prune_async(
@@ -185,6 +232,24 @@ pub fn spawn_sampler(state: AppState) {
                     .await
                 {
                     tracing::warn!("清理过期审计日志失败：{e}");
+                }
+                // 3.3：告警事件同样保留 90 天
+                if let Err(e) = db
+                    .alert_event_prune_async(now - crate::db::AUDIT_RETENTION_SECS)
+                    .await
+                {
+                    tracing::warn!("清理过期告警事件失败：{e}");
+                }
+                // 3.1：每日自动备份（VACUUM 是重 IO 操作，放 spawn_blocking）
+                let db3 = db.clone();
+                let dir3 = data_dir.clone();
+                if let Err(e) =
+                    tokio::task::spawn_blocking(move || crate::backup::maybe_daily_backup(&db3, &dir3))
+                        .await
+                        .map_err(anyhow::Error::from)
+                        .and_then(|r| r)
+                {
+                    tracing::warn!("每日自动备份失败：{e}");
                 }
             }
         }
