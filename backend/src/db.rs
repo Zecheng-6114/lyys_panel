@@ -35,48 +35,60 @@ impl Db {
             .build(manager)
             .context("创建数据库连接池失败")?;
         let db = Self { pool };
-        db.init_schema()?;
+        db.migrate()?;
         Ok(db)
     }
 
-    fn init_schema(&self) -> Result<()> {
-        let conn = self.pool.get().context("获取数据库连接失败")?;
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS settings (
-                 key   TEXT PRIMARY KEY,
-                 value TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS users (
-                 id            INTEGER PRIMARY KEY,
-                 username      TEXT NOT NULL UNIQUE,
-                 password_hash TEXT NOT NULL,
-                 salt          TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS metrics (
-                 ts       INTEGER NOT NULL,
-                 cpu      REAL NOT NULL,
-                 mem_used INTEGER NOT NULL,
-                 net_in   INTEGER NOT NULL,
-                 net_out  INTEGER NOT NULL
-             );
-             CREATE INDEX IF NOT EXISTS idx_metrics_ts ON metrics (ts);
-             CREATE TABLE IF NOT EXISTS ai_memory (
-                 id        INTEGER PRIMARY KEY,
-                 ts        INTEGER NOT NULL,
-                 content   TEXT NOT NULL,
-                 embedding BLOB
-             );
-             CREATE TABLE IF NOT EXISTS ai_session (
-                 id        INTEGER PRIMARY KEY,
-                 created   INTEGER NOT NULL,
-                 updated   INTEGER NOT NULL,
-                 title     TEXT NOT NULL,
-                 msg_count INTEGER NOT NULL,
-                 messages  TEXT NOT NULL
-             );",
-        )
-        .context("初始化数据库表结构失败")?;
+    /// 迁移列表：(版本号, 文件名, SQL)。SQL 编译期内嵌进二进制，
+    /// 运行时不依赖磁盘上的 migrations 目录。
+    /// 新增迁移 = 在 backend/migrations/ 建 `NNNN_名字.sql` + 在此追加一行；
+    /// 版本号只增不减，已发布迁移的内容不得再修改。
+    const MIGRATIONS: &'static [(i64, &'static str, &'static str)] = &[
+        (1, "0001_baseline.sql", include_str!("../migrations/0001_baseline.sql")),
+    ];
+
+    /// 按版本号升序执行未应用的迁移。
+    ///
+    /// schema_version 表只记录已应用版本号；每个迁移在独立事务里执行，
+    /// 任一语句失败整个迁移回滚、启动中止，不会出现半套表结构。
+    /// 旧部署（表已存在、无 schema_version）依赖基线迁移全部
+    /// IF NOT EXISTS 的整体可重放性，升级路径见测试 legacy_db_upgrades。
+    fn migrate(&self) -> Result<()> {
+        let mut conn = self.pool.get().context("获取数据库连接失败")?;
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);")
+            .context("创建 schema_version 表失败")?;
+        let current: i64 = conn
+            .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |r| r.get(0))
+            .context("读取数据库版本号失败")?;
+        anyhow::ensure!(
+            Self::MIGRATIONS.windows(2).all(|w| w[0].0 < w[1].0),
+            "迁移版本号必须严格递增"
+        );
+        for (ver, name, sql) in Self::MIGRATIONS {
+            if *ver <= current {
+                continue;
+            }
+            let tx = conn.transaction().context("开启迁移事务失败")?;
+            tx.execute_batch(sql)
+                .with_context(|| format!("执行迁移 {name} 失败"))?;
+            tx.execute("INSERT INTO schema_version (version) VALUES (?1)", [*ver])
+                .with_context(|| format!("记录迁移 {name} 版本失败"))?;
+            tx.commit()
+                .with_context(|| format!("提交迁移 {name} 失败"))?;
+            tracing::info!("已应用数据库迁移 {name}（版本 {ver}）");
+        }
         Ok(())
+    }
+
+    /// 当前数据库结构版本（供 /api/health 等诊断场景使用）
+    pub fn schema_version(&self) -> Result<i64> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let v = conn.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(v)
     }
 
     /// 读取配置项
@@ -483,3 +495,96 @@ impl Db {
 
 /// rusqlite 没有 re-export this trait，这里引入供 `.optional()` 使用
 use rusqlite::OptionalExtension;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_db_path(tag: &str) -> String {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!("lyys_mig_test_{tag}_{}_{unique}", std::process::id()))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn table_exists(db: &Db, name: &str) -> bool {
+        let conn = db.pool.get().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+            [name],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+            > 0
+    }
+
+    /// 全新库：基线迁移建出全部表，版本号为 1；再次打开幂等（不重复执行）
+    #[test]
+    fn fresh_db_gets_baseline() {
+        let path = temp_db_path("fresh");
+        {
+            let db = Db::open(&path).unwrap();
+            assert_eq!(db.schema_version().unwrap(), 1);
+            assert!(table_exists(&db, "settings"));
+            assert!(table_exists(&db, "users"));
+            assert!(table_exists(&db, "metrics"));
+        }
+        let db2 = Db::open(&path).unwrap();
+        assert_eq!(db2.schema_version().unwrap(), 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 旧部署升级路径：表已存在但无 schema_version，数据必须原样保留
+    #[test]
+    fn legacy_db_upgrades_without_data_loss() {
+        let path = temp_db_path("legacy");
+        {
+            // 模拟 1697f2c 时代的库：手工建表 + 写入数据，没有 schema_version
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 CREATE TABLE users (
+                     id INTEGER PRIMARY KEY,
+                     username TEXT NOT NULL UNIQUE,
+                     password_hash TEXT NOT NULL,
+                     salt TEXT NOT NULL);
+                 INSERT INTO users (username, password_hash, salt) VALUES ('admin','h','s');",
+            )
+            .unwrap();
+        }
+        {
+            let db = Db::open(&path).unwrap();
+            assert_eq!(db.schema_version().unwrap(), 1);
+            assert_eq!(db.user_count().unwrap(), 1);
+            assert!(db.find_user("admin").unwrap().is_some());
+        }
+        // 二次打开幂等
+        let db2 = Db::open(&path).unwrap();
+        assert_eq!(db2.user_count().unwrap(), 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 迁移失败必须整体回滚：事务内半途失败时，已建表不得残留、版本不得推进
+    #[test]
+    fn failed_migration_rolls_back() {
+        let path = temp_db_path("rollback");
+        {
+            let db = Db::open(&path).unwrap();
+            let mut conn = db.pool.get().unwrap();
+            // 故意模拟 0002 迁移半途失败：建表后接一条必然报错的语句，同事务
+            let tx = conn.transaction().unwrap();
+            tx.execute_batch(
+                "CREATE TABLE t_half (x INTEGER); INSERT INTO no_such_table VALUES (1);",
+            )
+            .expect_err("半途失败应中止");
+            drop(tx);
+            assert!(!table_exists(&db, "t_half"), "回滚后不应残留半途建的表");
+            assert_eq!(db.schema_version().unwrap(), 1, "失败的迁移不得推进版本");
+        }
+        let _ = std::fs::remove_file(path);
+    }
+}

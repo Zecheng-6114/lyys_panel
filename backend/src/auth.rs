@@ -80,7 +80,7 @@ pub fn load_jwt_secret(data_dir: &Path) -> Result<Vec<u8>> {
     // 1) 环境变量
     if let Ok(s) = std::env::var("PANEL_JWT_SECRET") {
         anyhow::ensure!(
-            s.as_bytes().len() >= 32,
+            s.len() >= 32,
             "PANEL_JWT_SECRET 至少需要 32 字节"
         );
         tracing::info!("JWT 密钥已从环境变量 PANEL_JWT_SECRET 加载");
