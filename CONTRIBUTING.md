@@ -25,6 +25,7 @@ sh scripts/install-hooks.sh
 1. **完成一个逻辑单元**：一个功能、一个修复、一次重构或一处文档变更。
 2. **验证通过才允许提交**：
    - 后端：`cd backend && source $HOME/.cargo/env && cargo clippy --all-targets -- -D warnings`
+   - 后端测试：`cd backend && source $HOME/.cargo/env && cargo test`
    - 涉及前端：`cd frontend && npm run build`
    - 任何一项不通过，先修复，不得提交。
 3. **自查**：`git status` + `git diff` 确认改动范围与本逻辑单元一致，

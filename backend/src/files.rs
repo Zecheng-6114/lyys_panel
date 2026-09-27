@@ -359,3 +359,170 @@ pub async fn save_upload(dir: &str, filename: &str, bytes: Vec<u8>) -> anyhow::R
     .await
     .context("上传任务失败")?
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 在临时目录建一个唯一命名的沙盒目录，返回路径；调用方负责清理
+    fn temp_sandbox(tag: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "lyys_files_test_{tag}_{}_{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// resolve（纯同步入口校验）：非绝对路径与 `..` 穿越（含各种变体）一律拒绝
+    #[test]
+    fn resolve_rejects_relative_and_traversal() {
+        // 非绝对路径
+        assert!(resolve("etc/passwd", false).is_err());
+        assert!(resolve("./relative", false).is_err());
+        // `..` 作为独立路径段的穿越变体（词法层拦截，不依赖路径是否存在）
+        for p in [
+            "/etc/../etc/passwd",
+            "/etc/passwd/../../etc/shadow",
+            "/..",
+            "/etc/..",
+            "/tmp/x/../../..",
+        ] {
+            assert!(resolve(p, false).is_err(), "应拒绝穿越路径：{p}");
+        }
+        // 合法绝对路径放行（exists=false 只做词法校验）
+        assert!(resolve("/tmp/lyys-should-pass", false).is_ok());
+    }
+
+    /// is_protected（纯函数，不依赖全局）：任意位置的 SQLite 数据库及
+    /// WAL/SHM 伴生文件都被标记保护，大小写不敏感；普通文件不误伤
+    #[test]
+    fn db_file_suffixes_are_protected_anywhere() {
+        for p in [
+            "/tmp/panel.db",
+            "/tmp/panel.db-wal",
+            "/tmp/panel.db-shm",
+            "/var/lib/anything/other.sqlite.db",
+            "/tmp/UPPER.DB",
+            "/tmp/x.DB-WAL",
+        ] {
+            assert!(is_protected(Path::new(p)), "应保护：{p}");
+        }
+        for p in ["/tmp/notes.txt", "/tmp/data.sqlite", "/tmp/x.db.bak"] {
+            assert!(!is_protected(Path::new(p)), "不应误伤：{p}");
+        }
+        // 注意：隐藏文件 ".db" 按现有实现同样命中 ends_with(".db") 规则
+        assert!(is_protected(Path::new("/tmp/.db")));
+    }
+
+    /// 路径转字符串（测试内统一用 canonicalize 前的原始路径拼字符串）
+    fn s(p: &Path) -> String {
+        p.to_string_lossy().into_owned()
+    }
+
+    /// 受保护数据目录集成测试：`set_protected_dir` 写入进程级 OnceLock 全局，
+    /// 一旦设置无法撤销，因此目录内文件读写列目录删改上传的**全部**断言收敛在
+    /// 本测试内一次完成（串行友好设计，避免污染其他测试）。
+    #[tokio::test]
+    async fn protected_dir_blocks_all_operations() {
+        let sandbox = temp_sandbox("prot");
+        let data_dir = sandbox.join("panel_data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("panel.db"), b"secret").unwrap();
+        std::fs::write(data_dir.join("jwt_secret.key"), b"key").unwrap();
+        std::fs::create_dir_all(data_dir.join("sub")).unwrap();
+        // 数据目录之外、但同名规则的 db 文件（验证后缀拦截独立于目录）
+        std::fs::write(sandbox.join("loose.db"), b"db").unwrap();
+        // 正常可访问的对照文件
+        std::fs::write(sandbox.join("ok.txt"), b"hello").unwrap();
+
+        let sdir = data_dir.canonicalize().unwrap();
+        set_protected_dir(sdir.clone());
+
+        // 数据目录本身与目录内文件：列目录/读/下载/删除（exists=true 路径）全拒
+        for p in [&sdir, &sdir.join("panel.db"), &sdir.join("jwt_secret.key")] {
+            let ps = s(p);
+            assert!(list_dir(&ps).await.is_err(), "应禁止列目录：{ps}");
+            assert!(read_file(&ps).await.is_err(), "应禁止读取：{ps}");
+            assert!(download(&ps).await.is_err(), "应禁止下载：{ps}");
+            assert!(remove(&ps).await.is_err(), "应禁止删除：{ps}");
+        }
+        // 子目录同样在保护范围内（starts_with 前缀匹配）
+        assert!(list_dir(&s(&sdir.join("sub"))).await.is_err());
+
+        // 写/建目录/重命名（exists=false 路径，词法校验即拦）：目标在数据目录内全拒
+        assert!(write_file(&s(&sdir.join("evil.txt")), "x").await.is_err());
+        assert!(mkdir(&s(&sdir.join("evil_dir"))).await.is_err());
+        assert!(
+            rename(&s(&sdir.join("panel.db")), &s(&sdir.join("stolen.db")))
+                .await
+                .is_err()
+        );
+        // 从数据目录向外改名同样被拒（源路径校验）
+        assert!(
+            rename(&s(&sdir.join("panel.db")), &s(&sandbox.join("out.txt")))
+                .await
+                .is_err()
+        );
+        // 向数据目录上传同样被拒
+        assert!(save_upload(&s(&sdir), "payload.txt", b"x".to_vec())
+            .await
+            .is_err());
+
+        // 目录外的 *.db / -wal / -shm：读写列目录下载全拦
+        for name in ["loose.db", "loose.db-wal", "loose.db-shm"] {
+            let p = sandbox.join(name);
+            std::fs::write(&p, b"x").unwrap();
+            let ps = s(&p);
+            assert!(read_file(&ps).await.is_err(), "应禁止读 db 伴生文件：{ps}");
+            assert!(download(&ps).await.is_err(), "应禁止下载 db 伴生文件：{ps}");
+            assert!(
+                write_file(&ps, "y").await.is_err(),
+                "应禁止写 db 伴生文件：{ps}"
+            );
+        }
+        // 把目录本身命名为 *.db：连列目录都不行
+        let dbdir = sandbox.join("mydb.db");
+        std::fs::create_dir_all(&dbdir).unwrap();
+        assert!(list_dir(&s(&dbdir)).await.is_err());
+
+        // 上传文件名伪装成 *.db：最终落点单独拦截
+        let target = save_upload(&s(&sandbox), "evil.txt.db", b"x".to_vec()).await;
+        assert!(target.is_err(), "禁止上传为数据库文件");
+        assert!(!sandbox.join("evil.txt.db").exists());
+
+        // 对照：沙盒内普通文件仍可正常读（保护规则没有一刀切）
+        assert!(read_file(&s(&sandbox.join("ok.txt"))).await.is_ok());
+        assert!(list_dir(&s(&sandbox)).await.is_ok());
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    /// 路径穿越的端到端验证：即使拼接出指向数据目录的穿越路径，也在
+    /// resolve 词法校验一步被拒（`..` 段先于 canonicalize 拦截）
+    #[tokio::test]
+    async fn traversal_cannot_reach_protected_dir() {
+        let sandbox = temp_sandbox("trav");
+        let secret_file = sandbox.join("panel_data/panel.db");
+        std::fs::create_dir_all(sandbox.join("panel_data")).unwrap();
+        std::fs::write(&secret_file, b"top secret").unwrap();
+        std::fs::create_dir_all(sandbox.join("pub")).unwrap();
+
+        // 从公开目录出发，用 .. 拼出数据目录里的 db 路径
+        let sneaky = format!("{}/pub/../../panel_data/panel.db", s(&sandbox));
+        assert!(read_file(&sneaky).await.is_err());
+        assert!(download(&sneaky).await.is_err());
+        assert!(remove(&sneaky).await.is_err());
+        // 绝对路径直接指到数据目录同样被词法校验拒（含 .. 段）
+        assert!(read_file("/tmp/../etc/passwd").await.is_err());
+        // 不含 .. 的绝对路径逃逸（直接读 /etc/shadow）不在 resolve 的职责内
+        // （面板以 root 运行、无根目录限制是既有设计），此处仅确认 db 后缀兜底
+        assert!(is_protected(Path::new("/var/lib/panel/panel.db")));
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+}
