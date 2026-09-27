@@ -295,9 +295,13 @@ async fn system_state(
 
 #[derive(Deserialize)]
 struct HistoryQuery {
-    /// 返回最近多少个采样点，默认 120
+    /// 返回最近多少个采样点，默认 120（未传 from/to 时生效）
     #[serde(default = "default_limit")]
     limit: i64,
+    /// 可选时间窗口（Unix 秒）：from/to 同时给出时按窗口查询，
+    /// 起点超出原始保留窗口则自动切小时聚合表（1.2 保留策略）
+    from: Option<i64>,
+    to: Option<i64>,
 }
 
 fn default_limit() -> i64 {
@@ -310,7 +314,14 @@ async fn system_history(
     Query(q): Query<HistoryQuery>,
 ) -> Result<Json<Vec<crate::db::MetricPoint>>, ApiError> {
     let limit = q.limit.clamp(1, 2000);
-    Ok(Json(state.db.recent_metrics_async(limit).await?))
+    match (q.from, q.to) {
+        (Some(from), Some(to)) if from <= to => {
+            let now = time::OffsetDateTime::now_utc().unix_timestamp();
+            let raw_from = now - crate::db::RAW_RETENTION_SECS;
+            Ok(Json(state.db.history_async(from, to, raw_from, limit).await?))
+        }
+        _ => Ok(Json(state.db.recent_metrics_async(limit).await?)),
+    }
 }
 
 async fn processes_list(

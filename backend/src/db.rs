@@ -5,6 +5,11 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use serde::Serialize;
 
+/// 1.2 保留策略常量：原始 5 秒采样保留 7 天；小时聚合保留 1 年。
+/// 采样循环（monitor.rs）与历史查询选表（api.rs）共用，避免口径漂移。
+pub const RAW_RETENTION_SECS: i64 = 7 * 24 * 3600;
+pub const HOURLY_RETENTION_SECS: i64 = 365 * 24 * 3600;
+
 /// 数据库连接池封装
 #[derive(Clone)]
 pub struct Db {
@@ -45,6 +50,11 @@ impl Db {
     /// 版本号只增不减，已发布迁移的内容不得再修改。
     const MIGRATIONS: &'static [(i64, &'static str, &'static str)] = &[
         (1, "0001_baseline.sql", include_str!("../migrations/0001_baseline.sql")),
+        (
+            2,
+            "0002_metrics_hourly.sql",
+            include_str!("../migrations/0002_metrics_hourly.sql"),
+        ),
     ];
 
     /// 按版本号升序执行未应用的迁移。
@@ -195,6 +205,69 @@ impl Db {
         let conn = self.pool.get().context("获取数据库连接失败")?;
         let n = conn.execute("DELETE FROM metrics WHERE ts < ?1", [before])?;
         Ok(n as u64)
+    }
+
+    /// 1.2 保留策略：把早于 raw_before 的原始采样按小时聚合进
+    /// metrics_hourly（avg/max），删除这些原始行，并清理早于 hourly_before
+    /// 的聚合行。三条语句在一个事务里执行，避免「删了原始、聚合失败」丢数据。
+    /// 小时对齐按 UTC 整点（ts % 3600）：本地时区偏移为整小时时，
+    /// UTC 整点即本地整点，前端展示的小时边界一致。
+    pub fn rollup_and_prune(&self, raw_before: i64, hourly_before: i64) -> Result<()> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        conn.execute_batch("BEGIN")?;
+        let r = (|| -> Result<()> {
+            conn.execute(
+                "INSERT OR REPLACE INTO metrics_hourly
+                     (hour_ts, cpu_avg, cpu_max, mem_used_avg, mem_used_max,
+                      net_in_avg, net_in_max, net_out_avg, net_out_max)
+                 SELECT ts - (ts % 3600),
+                        AVG(cpu), MAX(cpu),
+                        AVG(mem_used), MAX(mem_used),
+                        AVG(net_in), MAX(net_in),
+                        AVG(net_out), MAX(net_out)
+                 FROM metrics WHERE ts < ?1 GROUP BY 1",
+                [raw_before],
+            )?;
+            conn.execute("DELETE FROM metrics WHERE ts < ?1", [raw_before])?;
+            conn.execute("DELETE FROM metrics_hourly WHERE hour_ts < ?1", [hourly_before])?;
+            Ok(())
+        })();
+        match r {
+            Ok(()) => conn.execute_batch("COMMIT")?,
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(e).context("聚合监控历史失败");
+            }
+        }
+        Ok(())
+    }
+
+    /// 历史查询（1.2：自动按时间跨度选表）。
+    /// 起点落在原始保留窗口内 → 查 5 秒原始表；更早 → 查小时聚合表。
+    /// 返回按时间升序、最多 limit 个点（取窗口尾部）。
+    pub fn history(&self, from: i64, to: i64, raw_from: i64, limit: i64) -> Result<Vec<MetricPoint>> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let sql = if from >= raw_from {
+            "SELECT ts, cpu, mem_used, net_in, net_out FROM metrics
+             WHERE ts >= ?1 AND ts <= ?2 ORDER BY ts DESC LIMIT ?3"
+        } else {
+            "SELECT hour_ts, cpu_avg, mem_used_avg, net_in_avg, net_out_avg FROM metrics_hourly
+             WHERE hour_ts >= ?1 AND hour_ts <= ?2 ORDER BY hour_ts DESC LIMIT ?3"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let mut rows = stmt
+            .query_map(rusqlite::params![from, to, limit], |row| {
+                Ok(MetricPoint {
+                    ts: row.get(0)?,
+                    cpu: row.get(1)?,
+                    mem_used: row.get(2)?,
+                    net_in: row.get(3)?,
+                    net_out: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.reverse();
+        Ok(rows)
     }
 
     // ---------- AI 记忆（AI 助手功能暂时停用，整段注释；恢复时连同下方 async 包装与结构体一起放开） ----------
@@ -433,6 +506,22 @@ impl Db {
         blocking(move || db.prune_metrics(before)).await
     }
 
+    pub async fn rollup_and_prune_async(&self, raw_before: i64, hourly_before: i64) -> Result<()> {
+        let db = self.clone();
+        blocking(move || db.rollup_and_prune(raw_before, hourly_before)).await
+    }
+
+    pub async fn history_async(
+        &self,
+        from: i64,
+        to: i64,
+        raw_from: i64,
+        limit: i64,
+    ) -> Result<Vec<MetricPoint>> {
+        let db = self.clone();
+        blocking(move || db.history(from, to, raw_from, limit)).await
+    }
+
     // ---------- AI 异步包装（AI 助手功能暂时停用，整段注释；恢复时与同步段一起放开） ----------
     /*
     pub async fn ai_memory_add_async(
@@ -522,19 +611,20 @@ mod tests {
             > 0
     }
 
-    /// 全新库：基线迁移建出全部表，版本号为 1；再次打开幂等（不重复执行）
+    /// 全新库：迁移建出全部表，版本号为最新（2）；再次打开幂等（不重复执行）
     #[test]
     fn fresh_db_gets_baseline() {
         let path = temp_db_path("fresh");
         {
             let db = Db::open(&path).unwrap();
-            assert_eq!(db.schema_version().unwrap(), 1);
+            assert_eq!(db.schema_version().unwrap(), 2);
             assert!(table_exists(&db, "settings"));
             assert!(table_exists(&db, "users"));
             assert!(table_exists(&db, "metrics"));
+            assert!(table_exists(&db, "metrics_hourly"));
         }
         let db2 = Db::open(&path).unwrap();
-        assert_eq!(db2.schema_version().unwrap(), 1);
+        assert_eq!(db2.schema_version().unwrap(), 2);
         let _ = std::fs::remove_file(path);
     }
 
@@ -558,7 +648,7 @@ mod tests {
         }
         {
             let db = Db::open(&path).unwrap();
-            assert_eq!(db.schema_version().unwrap(), 1);
+            assert_eq!(db.schema_version().unwrap(), 2);
             assert_eq!(db.user_count().unwrap(), 1);
             assert!(db.find_user("admin").unwrap().is_some());
         }
@@ -583,7 +673,80 @@ mod tests {
             .expect_err("半途失败应中止");
             drop(tx);
             assert!(!table_exists(&db, "t_half"), "回滚后不应残留半途建的表");
-            assert_eq!(db.schema_version().unwrap(), 1, "失败的迁移不得推进版本");
+            assert_eq!(db.schema_version().unwrap(), 2, "失败的迁移不得推进版本");
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 1.2 保留策略：超期原始数据按小时聚合（avg/max）后删除，聚合可重放幂等
+    #[test]
+    fn rollup_aggregates_and_prunes() {
+        let path = temp_db_path("rollup");
+        {
+            let db = Db::open(&path).unwrap();
+            let conn = db.pool.get().unwrap();
+            // 第 0 小时：两条 (cpu 10/20 → avg15 max20)；第 1 小时：一条 cpu 30
+            conn.execute_batch(
+                "INSERT INTO metrics (ts, cpu, mem_used, net_in, net_out) VALUES
+                 (0,    10, 100, 1, 2),
+                 (1800, 20, 200, 3, 4),
+                 (3600, 30, 300, 5, 6);",
+            )
+            .unwrap();
+            // raw_before=3600：仅前两行聚合；hourly_before=0：聚合行不被清
+            db.rollup_and_prune(3600, 0).unwrap();
+            // 原始表只剩第 3 行（ts=3600 未超期）
+            let raw: i64 = conn
+                .query_row("SELECT COUNT(*) FROM metrics", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(raw, 1, "超期原始行应被删除");
+            // 聚合表：hour 0 一行，avg=15 max=20
+            let (n, avg, max): (i64, f64, f64) = conn
+                .query_row(
+                    "SELECT COUNT(*), cpu_avg, cpu_max FROM metrics_hourly WHERE hour_ts=0",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(n, 1);
+            assert_eq!(avg, 15.0);
+            assert_eq!(max, 20.0);
+            // 幂等：再跑一次同样参数不新增/不报错（INSERT OR REPLACE）
+            db.rollup_and_prune(3600, 0).unwrap();
+            let n2: i64 = conn
+                .query_row("SELECT COUNT(*) FROM metrics_hourly", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n2, 1, "重放聚合不应产生重复小时行");
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 1.2 历史查询选表：窗口起点在保留期内查原始表，更早查小时聚合表
+    #[test]
+    fn history_switches_table_by_window() {
+        let path = temp_db_path("history");
+        {
+            let db = Db::open(&path).unwrap();
+            let conn = db.pool.get().unwrap();
+            conn.execute_batch(
+                "INSERT INTO metrics (ts, cpu, mem_used, net_in, net_out) VALUES
+                 (1000, 1, 1, 1, 1),
+                 (2000, 2, 2, 2, 2);",
+            )
+            .unwrap();
+            conn.execute_batch(
+                "INSERT INTO metrics_hourly (hour_ts, cpu_avg, cpu_max, mem_used_avg, mem_used_max, net_in_avg, net_in_max, net_out_avg, net_out_max)
+                 VALUES (0, 5, 5, 5, 5, 5, 5, 5, 5);",
+            )
+            .unwrap();
+            // raw_from=100000：起点 0 早于保留期 → 查聚合表，返回 hour_ts=0 那条
+            let old = db.history(0, 100000, 100000, 100).unwrap();
+            assert_eq!(old.len(), 1);
+            assert_eq!(old[0].cpu, 5.0, "应命中小时聚合表的值");
+            // 起点 1000 在保留期内（raw_from=500 ≤ 1000）→ 查原始表，返回两条
+            let fresh = db.history(1000, 100000, 500, 100).unwrap();
+            assert_eq!(fresh.len(), 2);
+            assert_eq!(fresh[0].ts, 1000, "结果按时间升序");
         }
         let _ = std::fs::remove_file(path);
     }

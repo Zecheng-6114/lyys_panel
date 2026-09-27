@@ -146,10 +146,8 @@ pub struct ProcessInfo {
     pub status: String,
 }
 
-/// 监控历史保留时长：7 天
-const RETENTION_SECS: i64 = 7 * 24 * 3600;
-
-/// 后台采样任务：每 5 秒写入一条监控历史，每小时清理过期数据
+/// 后台采样任务：每 5 秒写入一条监控历史，每小时聚合降采样 + 清理过期数据
+/// （保留策略常量见 db.rs）
 pub fn spawn_sampler(state: AppState) {
     tokio::spawn(async move {
         let db = state.db.clone();
@@ -164,15 +162,19 @@ pub fn spawn_sampler(state: AppState) {
             if let Err(e) = db.insert_metric_async(&snap).await {
                 tracing::warn!("写入监控采样失败：{e}");
             }
-            // 每 720 次采样（约 1 小时）清理一次过期历史
+            // 每 720 次采样（约 1 小时）执行一次保留策略
             ticks += 1;
             if ticks >= 720 {
                 ticks = 0;
                 let now = time::OffsetDateTime::now_utc().unix_timestamp();
-                match db.prune_metrics_async(now - RETENTION_SECS).await {
-                    Ok(n) if n > 0 => tracing::info!("清理过期监控历史 {n} 条"),
-                    Err(e) => tracing::warn!("清理监控历史失败：{e}"),
-                    _ => {}
+                if let Err(e) = db
+                    .rollup_and_prune_async(
+                        now - crate::db::RAW_RETENTION_SECS,
+                        now - crate::db::HOURLY_RETENTION_SECS,
+                    )
+                    .await
+                {
+                    tracing::warn!("监控历史聚合清理失败：{e}");
                 }
             }
         }
