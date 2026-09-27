@@ -45,8 +45,10 @@ LYYS Panel 面向单台 Linux 服务器的日常运维，把系统监控、进�
 - **登录限流**：同一「来源 IP + 用户名」连续登录失败会触发指数退避（1s、2s、4s…… 封顶 30s），
   触发期间返回 `429`。这是退避而非锁定，合法用户输错几次只会觉得变慢，不会被锁在门外。
   退避状态存于内存，重启即清空。
-- **仍需注意**：面板默认明文 HTTP，对外暴露前请置于反向代理并启用 TLS；
-  文件模块可访问整个文件系统，服务以 root 运行是管理 systemd / 进程所需 ——
+- **默认 HTTPS（自签证书）**：首次启动自动生成自签证书并以 HTTPS 提供服务（默认端口 3789），
+  浏览器提示证书不受信任属自签的正常现象；可用 `PANEL_TLS=custom` 挂载 CA 签发的正式证书，
+  也可 `PANEL_TLS=off` 回退纯 HTTP。
+- **仍需注意**：文件模块可访问整个文件系统，服务以 root 运行是管理 systemd / 进程所需 ——
   这两点决定了**只能在受信网络内使用**，不要暴露到公网。
 
 ## 技术栈
@@ -57,7 +59,29 @@ LYYS Panel 面向单台 Linux 服务器的日常运维，把系统监控、进�
 
 ## 快速开始
 
-### 前置要求
+### 一键安装（服务器部署，推荐）
+
+在目标服务器上以 root 执行，脚本会自动识别 x86_64 / aarch64 并下载对应架构的
+release 二进制，创建系统用户与目录、生成 env 模板（默认 HTTPS 自签证书）和
+systemd 单元并启动服务：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Zecheng-6114/lyys_panel/main/scripts/install.sh | sudo bash
+```
+
+常用选项（也可先下载脚本再执行 `sudo bash install.sh --help`）：
+
+```bash
+sudo bash install.sh --version v1.0.0     # 指定版本（默认最新 release）
+sudo bash install.sh --addr 127.0.0.1:3789
+sudo bash install.sh --no-tls             # 关闭 HTTPS，纯 HTTP
+sudo bash uninstall.sh                    # 卸载；--purge 连数据与用户一起删
+```
+
+重复执行 install.sh 即为升级（覆盖二进制与 systemd 单元，不改动已有配置与数据）。
+初始密码获取、证书警告等常见问题见下文 FAQ。
+
+### 前置要求（从源码构建）
 
 - Rust stable（含 rustfmt / clippy，见 `backend/rust-toolchain.toml`）
 - Node.js 20+ 与 npm
@@ -110,10 +134,17 @@ cd frontend && npm run dev
 | `PANEL_ADDR` | `127.0.0.1:3789` | 监听地址。`0.0.0.0:3789` 表示所有网卡 |
 | `PANEL_DB` | `data/panel.db` | SQLite 数据库路径 |
 | `PANEL_ADMIN_PASSWORD` | 随机生成 | 首次启动创建管理员时使用，**仅第一次生效** |
+| `PANEL_DATA_DIR` | `data` | 面板数据目录（数据库默认另由 `PANEL_DB` 指定；自签证书在 `<目录>/tls/`）。文件管理 API 屏蔽该目录 |
+| `PANEL_TLS` | `auto` | `auto`=首启生成自签证书启用 HTTPS；`custom`+`PANEL_TLS_CERT`/`PANEL_TLS_KEY`=已有证书；`off`=纯 HTTP |
+| `PANEL_HTTP_PORT` | 未设置 | 设置后额外监听一个纯 HTTP 端口，301 跳转到 HTTPS |
+| `PANEL_JWT_SECRET` | 自动生成 | JWT 签名密钥（≥32 字节）；未设置时使用数据目录下的 0600 密钥文件 |
 
 未设置 `PANEL_ADMIN_PASSWORD` 时会生成随机密码并打印到日志。
 
 ## 部署(systemd)
+
+> 服务器部署推荐直接使用 `scripts/install.sh`（见[快速开始](#快速开始)），
+> 以下为手动部署的完整步骤。
 
 以现有服务器配置为例，完整部署到 systemd：
 
@@ -165,9 +196,53 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now lyys-panel
 ```
 
-### 5. 反向代理（强烈建议）
+### 5. 证书与反代（可选）
 
-面板默认明文 HTTP，对外暴露前置于 Nginx / Caddy 等反向代理并启用 TLS。
+面板默认以自签证书提供 HTTPS；如需正式证书，设置 `PANEL_TLS=custom` 并指定
+`PANEL_TLS_CERT` / `PANEL_TLS_KEY`，或前置 Nginx / Caddy 反向代理统一管理 TLS。
+
+## FAQ
+
+**浏览器提示「证书不受信任」？**
+
+默认 HTTPS 使用首启自动生成的自签证书（位于 `PANEL_DATA_DIR` 下的 `tls/`
+目录），浏览器警告属正常现象，受信内网可点击继续访问。消除警告的方式：
+①挂 CA 签发的证书（`PANEL_TLS=custom` + `PANEL_TLS_CERT` / `PANEL_TLS_KEY`）；
+②前置已有域名与证书的反向代理。
+
+**初始 admin 密码在哪？**
+
+未设置 `PANEL_ADMIN_PASSWORD` 时，首次启动会生成随机密码写入数据目录下的
+`initial_admin_password.txt`（权限 0600，**不打印到日志**），首次登录成功后
+该文件自动删除。通过 install.sh 安装时位于 `/var/lib/lyys-panel/`：
+
+```bash
+cat /var/lib/lyys-panel/initial_admin_password.txt
+```
+
+首次登录会强制改密。
+
+**忘记密码怎么办？**
+
+admin 可在「账号管理」页重置任意用户的密码；admin 自己的密码走顶栏「改密」。
+若唯一的 admin 密码遗失且没有其他 admin 账号，只能停止服务后删除数据库文件
+重建（**会丢失全部数据**）——建议平时在「备份管理」页保持定期备份。
+
+**如何升级面板？**
+
+①「面板更新」页在线自更新：从 GitHub Release 下载、原子替换，重启服务生效；
+②在服务器上重新执行 `install.sh`（默认装最新版，覆盖二进制但不改动配置与数据）。
+
+**如何修改端口 / 只监听本机？**
+
+编辑 `/etc/lyys-panel/panel.env` 中的 `PANEL_ADDR`（如 `127.0.0.1:3789`），
+然后 `sudo systemctl restart lyys-panel`。
+
+**aarch64 机器能用吗？**
+
+可以。Release 提供 `lyys-panel-aarch64` 产物，`install.sh` 会按机器架构自动
+选择。注意内置「在线自更新」目前按固定资产名拉取 x86_64 二进制，aarch64 升级
+请使用「面板更新」页的手动上传通道，或重新执行 `install.sh`。
 
 ## 项目结构
 
@@ -199,7 +274,9 @@ lyys_panel/
 │       ├── stores/                主题等全局状态
 │       ├── api/                   axios 封装与拦截器
 │       └── styles/theme.css       Element Plus 变量覆盖（黑白主题）
-├── scripts/            git 钩子与安装脚本（提交信息机械校验）
+├── scripts/            git 钩子安装与 install / uninstall 一键部署脚本
+├── .github/workflows/  CI（PR 检查）与 Release（tag 多平台发布）工作流
+├── CHANGELOG.md        更新日志
 ├── screenshots/        界面预览截图
 └── build.sh            一键构建脚本
 ```
@@ -221,7 +298,6 @@ lyys_panel/
 
 **安全**
 
-- 面板默认明文 HTTP，对外暴露前建议置于反向代理并启用 TLS
 - 文件模块可访问整个文件系统（不设根目录约束）—— 仅限受信网络内使用
 - 登录限流基于内存，重启后清零；且未接入反向代理时按来源 IP 计数，
   若置于 NAT 之后，同一出口的多个用户会共享退避额度
@@ -232,12 +308,15 @@ lyys_panel/
 - Docker 的 Compose 项目在「独立 `docker-compose` 命令」这一路径下，会以容器 label 反推项目，
   容器被全部删除的项目不可见
 - `frontend/package.json` 声明了 `lint` / `format` 脚本，但仓库尚未提交对应的 ESLint / Prettier 配置，直接执行会失败
-- 前后端均无自动化测试；无 CI
-- 缺少「修改管理员密码」界面：遗忘密码需停服务删 `panel.db` 重建，**会丢失监控历史**
+- 自更新不区分 CPU 架构：aarch64 部署的升级请走「面板更新」页手动上传通道，或重跑 `install.sh`
+- 前端无自动化测试（后端已有核心路径集成测试）
 
 **已解决**
 
 - ~~登录接口无失败限流~~ → 已实现指数退避（`auth::LoginThrottle`）
+- ~~面板默认明文 HTTP~~ → 已默认 HTTPS（自签证书，支持挂正式证书与 HTTP 跳转）
+- ~~前后端均无自动化测试；无 CI~~ → 后端核心路径集成测试 + GitHub Actions CI（PR 检查、tag 多平台发布）
+- ~~缺少「修改管理员密码」界面~~ → 多用户 RBAC + 账号管理页（admin 可重置密码）+ 顶栏改密
 
 ## License
 
