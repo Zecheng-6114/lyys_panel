@@ -17,6 +17,8 @@
         <el-menu-item index="/cron">计划任务</el-menu-item>
         <el-menu-item index="/network">网络</el-menu-item>
         <el-menu-item index="/docker">Docker</el-menu-item>
+        <el-menu-item index="/sessions">在线会话</el-menu-item>
+        <el-menu-item v-if="auth.isAdmin()" index="/users">账号管理</el-menu-item>
         <!-- AI 助手功能暂时停用（用户决定），菜单项注释；恢复时放开下行 -->
         <!-- <el-menu-item index="/ai">AI 助手</el-menu-item> -->
       </el-menu>
@@ -36,7 +38,9 @@
         </button>
         <div class="page-title">{{ pageTitle }}</div>
         <div class="top-actions">
+          <button class="mini-btn" type="button" @click="openPwdDialog">改密</button>
           <button
+            v-if="auth.isAdmin()"
             class="mini-btn icon-btn"
             type="button"
             aria-label="界面设置"
@@ -68,27 +72,99 @@
       </section>
     </div>
     <SettingsDialog v-model="settingsOpen" />
+
+    <!-- 2.2 修改密码：首登强制改密（不可关闭）或用户主动改密 -->
+    <el-dialog
+      v-model="pwdOpen"
+      :title="auth.mustChange ? '修改初始密码' : '修改密码'"
+      width="400px"
+      :close-on-click-modal="!auth.mustChange"
+      :close-on-press-escape="!auth.mustChange"
+      :show-close="!auth.mustChange"
+    >
+      <el-form label-width="72px" size="small">
+        <el-form-item label="旧密码">
+          <el-input v-model="pwdForm.old" type="password" show-password autocomplete="current-password" />
+        </el-form-item>
+        <el-form-item label="新密码">
+          <el-input v-model="pwdForm.new1" type="password" show-password autocomplete="new-password" placeholder="至少 8 位" />
+        </el-form-item>
+        <el-form-item label="确认密码">
+          <el-input v-model="pwdForm.new2" type="password" show-password autocomplete="new-password" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button v-if="auth.mustChange" @click="logout">退出</el-button>
+        <el-button v-else @click="pwdOpen = false">取消</el-button>
+        <el-button :loading="pwdLoading" @click="submitPwd">确认修改</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import http from "../api/http";
 import { useThemeStore } from "../stores/theme";
+import { useAuthStore } from "../stores/auth";
 import SettingsDialog from "../components/SettingsDialog.vue";
 
 const route = useRoute();
 const router = useRouter();
 const theme = useThemeStore();
+const auth = useAuthStore();
 const appVersion = __APP_VERSION__;
 
 // 界面设置弹窗（主题定制）
 const settingsOpen = ref(false);
-// 进入布局（已登录）时拉取服务端主题定制配置
-onMounted(() => {
+// 进入布局（已登录）时拉取服务端主题定制配置与当前账号信息（角色/强制改密）
+onMounted(async () => {
   theme.load();
+  try {
+    await auth.load();
+  } catch {
+    /* 401 由拦截器跳转登录 */
+    return;
+  }
+  if (auth.mustChange) pwdOpen.value = true;
 });
+
+// 首登强制改密（2.2）；顶栏「改密」按钮也复用此弹窗
+const pwdOpen = ref(false);
+const pwdLoading = ref(false);
+const pwdForm = reactive({ old: "", new1: "", new2: "" });
+
+function openPwdDialog() {
+  pwdForm.old = pwdForm.new1 = pwdForm.new2 = "";
+  pwdOpen.value = true;
+}
+
+async function submitPwd() {
+  if (pwdForm.new1.length < 8) {
+    ElMessage.warning("新密码至少 8 位");
+    return;
+  }
+  if (pwdForm.new1 !== pwdForm.new2) {
+    ElMessage.warning("两次输入的新密码不一致");
+    return;
+  }
+  pwdLoading.value = true;
+  try {
+    await http.post("/account/password", {
+      old_password: pwdForm.old,
+      new_password: pwdForm.new1,
+    });
+    ElMessage.success("密码已修改");
+    pwdOpen.value = false;
+    pwdForm.old = pwdForm.new1 = pwdForm.new2 = "";
+    await auth.load();
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error ?? "修改失败");
+  } finally {
+    pwdLoading.value = false;
+  }
+}
 
 /// 窄屏下侧边栏是抽屉，默认收起。宽屏时 CSS 忽略这个状态。
 const menuOpen = ref(false);
@@ -107,6 +183,8 @@ const titles: Record<string, string> = {
   "/cron": "计划任务",
   "/network": "网络",
   "/docker": "Docker",
+  "/sessions": "在线会话",
+  "/users": "账号管理",
   // "/ai": "AI 助手", // 随 AI 助手停用
 };
 const pageTitle = computed(() => titles[route.path] ?? "LYYS Panel");
@@ -127,6 +205,7 @@ async function logout() {
     }
   }
   localStorage.removeItem("panel_token");
+  auth.clear();
   router.push("/login");
 }
 </script>

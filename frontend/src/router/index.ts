@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from "vue-router";
 import type { RouteRecordRaw } from "vue-router";
+import { useAuthStore } from "../stores/auth";
 
 const routes: RouteRecordRaw[] = [
   {
@@ -58,6 +59,18 @@ const routes: RouteRecordRaw[] = [
         name: "docker",
         component: () => import("../views/Docker.vue"),
       },
+      {
+        path: "sessions",
+        name: "sessions",
+        component: () => import("../views/Sessions.vue"),
+      },
+      {
+        // 2.2 账号管理：仅 admin
+        path: "users",
+        name: "users",
+        component: () => import("../views/Users.vue"),
+        meta: { adminOnly: true },
+      },
       // AI 助手功能暂时停用（用户决定），路由注释；恢复时放开下面 4 行
       // {
       //   path: "ai",
@@ -73,14 +86,27 @@ const router = createRouter({
   routes,
 });
 
-// 全局前置守卫：无 token 时重定向到登录页
-router.beforeEach((to) => {
+// 全局前置守卫：无 token 时重定向到登录页；adminOnly 路由按角色拦截（2.1）
+router.beforeEach(async (to) => {
   const token = localStorage.getItem("panel_token");
   if (!to.meta.public && !token) {
     return { name: "login" };
   }
   if (to.name === "login" && token) {
     return { name: "dashboard" };
+  }
+  if (to.meta.adminOnly && token) {
+    const auth = useAuthStore();
+    if (!auth.loaded) {
+      try {
+        await auth.load();
+      } catch {
+        /* 拉取失败交给 401 拦截器处理 */
+      }
+    }
+    if (auth.role !== "admin") {
+      return { name: "dashboard" };
+    }
   }
 });
 
