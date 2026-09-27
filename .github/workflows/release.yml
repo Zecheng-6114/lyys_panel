@@ -69,7 +69,10 @@ jobs:
         if: matrix.cross == 'yes'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+          # gcc-14-aarch64-linux-gnu 对 libc6-dev-arm64-cross 仅 Recommends，
+          # --no-install-recommends 下交叉 libc 头文件会缺失，导致 ring 的
+          # build script C 编译失败（exit 101），必须显式安装
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
 
       - name: Build release binary
         working-directory: backend
