@@ -9,6 +9,8 @@ use serde::Serialize;
 /// 采样循环（monitor.rs）与历史查询选表（api.rs）共用，避免口径漂移。
 pub const RAW_RETENTION_SECS: i64 = 7 * 24 * 3600;
 pub const HOURLY_RETENTION_SECS: i64 = 365 * 24 * 3600;
+/// 2.3：审计日志保留 90 天（写操作频率低，量级远小于指标采样）
+pub const AUDIT_RETENTION_SECS: i64 = 90 * 24 * 3600;
 
 /// 数据库连接池封装
 #[derive(Clone)]
@@ -24,6 +26,38 @@ pub struct MetricPoint {
     pub mem_used: i64,
     pub net_in: i64,
     pub net_out: i64,
+}
+
+/// 用户行（登录校验用，含密码字段，绝不外泄给 API 响应）
+pub struct UserRow {
+    pub id: i64,
+    pub password_hash: String,
+    pub salt: String,
+    pub role: String,
+    pub must_change: bool,
+}
+
+/// 审计日志行
+#[derive(Serialize)]
+pub struct AuditRow {
+    pub ts: i64,
+    pub user_id: Option<i64>,
+    pub username: String,
+    pub method: String,
+    pub path: String,
+    pub status: u16,
+    pub ip: String,
+}
+
+/// 在线会话行（jti 不外泄完整值，API 层裁剪后再返回）
+pub struct SessionRow {
+    pub jti: String,
+    pub user_id: i64,
+    pub username: String,
+    pub ua: String,
+    pub ip: String,
+    pub iat: i64,
+    pub exp: i64,
 }
 
 impl Db {
@@ -55,6 +89,9 @@ impl Db {
             "0002_metrics_hourly.sql",
             include_str!("../migrations/0002_metrics_hourly.sql"),
         ),
+        (3, "0003_users_rbac.sql", include_str!("../migrations/0003_users_rbac.sql")),
+        (4, "0004_audit_log.sql", include_str!("../migrations/0004_audit_log.sql")),
+        (5, "0005_sessions.sql", include_str!("../migrations/0005_sessions.sql")),
     ];
 
     /// 按版本号升序执行未应用的迁移。
@@ -152,7 +189,7 @@ impl Db {
         Ok(user)
     }
 
-    /// 创建用户
+    /// 创建用户（RBAC：带角色与强制改密标记）
     pub fn create_user(&self, username: &str, hash: &str, salt: &str) -> Result<()> {
         let conn = self.pool.get().context("获取数据库连接失败")?;
         conn.execute(
@@ -160,6 +197,248 @@ impl Db {
             (username, hash, salt),
         )?;
         Ok(())
+    }
+
+    /// 创建带角色的用户；must_change=1 表示首次登录需强制改密
+    pub fn create_user_role(
+        &self,
+        username: &str,
+        hash: &str,
+        salt: &str,
+        role: &str,
+        must_change: bool,
+    ) -> Result<i64> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        conn.execute(
+            "INSERT INTO users (username, password_hash, salt, role, must_change)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            (username, hash, salt, role, must_change as i64),
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// 按 id 查询用户（返回 id/username/role/must_change）
+    pub fn user_by_id(&self, id: i64) -> Result<Option<(String, String, bool)>> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let r = conn
+            .query_row(
+                "SELECT username, role, must_change FROM users WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? != 0)),
+            )
+            .optional()?;
+        Ok(r)
+    }
+
+    /// 按用户名查询用户（含 id/role/must_change，登录用）
+    pub fn find_user_full(&self, username: &str) -> Result<Option<UserRow>> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let r = conn
+            .query_row(
+                "SELECT id, password_hash, salt, role, must_change FROM users WHERE username = ?1",
+                [username],
+                |row| {
+                    Ok(UserRow {
+                        id: row.get(0)?,
+                        password_hash: row.get(1)?,
+                        salt: row.get(2)?,
+                        role: row.get(3)?,
+                        must_change: row.get::<_, i64>(4)? != 0,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(r)
+    }
+
+    /// 列出全部用户（不含密码/盐）
+    pub fn list_users(&self) -> Result<Vec<(i64, String, String, bool)>> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let mut stmt = conn.prepare(
+            "SELECT id, username, role, must_change FROM users ORDER BY id",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get::<_, i64>(3)? != 0))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// 更新密码（重设哈希与盐），并清除强制改密标记
+    pub fn set_password(&self, id: i64, hash: &str, salt: &str) -> Result<()> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        conn.execute(
+            "UPDATE users SET password_hash = ?2, salt = ?3, must_change = 0 WHERE id = ?1",
+            (id, hash, salt),
+        )?;
+        Ok(())
+    }
+
+    /// 修改用户名与角色（admin 管理他人账号用）
+    pub fn update_user(&self, id: i64, username: &str, role: &str) -> Result<()> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        conn.execute(
+            "UPDATE users SET username = ?2, role = ?3 WHERE id = ?1",
+            (id, username, role),
+        )?;
+        Ok(())
+    }
+
+    /// 删除用户
+    pub fn delete_user(&self, id: i64) -> Result<u64> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let n = conn.execute("DELETE FROM users WHERE id = ?1", [id])?;
+        Ok(n as u64)
+    }
+
+    /// 用户是否存在（删除/改名前的自保护检查用）
+    pub fn user_exists(&self, id: i64) -> Result<bool> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let n: i64 =
+            conn.query_row("SELECT COUNT(*) FROM users WHERE id = ?1", [id], |r| r.get(0))?;
+        Ok(n > 0)
+    }
+
+    // ---------- 审计日志（2.3） ----------
+
+    /// 写入一条审计记录
+    #[allow(clippy::too_many_arguments)]
+    pub fn audit(
+        &self,
+        ts: i64,
+        user_id: Option<i64>,
+        username: &str,
+        method: &str,
+        path: &str,
+        status: u16,
+        ip: &str,
+    ) -> Result<()> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        conn.execute(
+            "INSERT INTO audit_log (ts, user_id, username, method, path, status, ip)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            (ts, user_id, username, method, path, status as i64, ip),
+        )?;
+        Ok(())
+    }
+
+    /// 分页读取审计日志（按时间倒序）
+    pub fn audit_list(&self, limit: i64, offset: i64) -> Result<Vec<AuditRow>> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let mut stmt = conn.prepare(
+            "SELECT ts, user_id, username, method, path, status, ip
+             FROM audit_log ORDER BY ts DESC, id DESC LIMIT ?1 OFFSET ?2",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![limit, offset], |row| {
+                Ok(AuditRow {
+                    ts: row.get(0)?,
+                    user_id: row.get(1)?,
+                    username: row.get(2)?,
+                    method: row.get(3)?,
+                    path: row.get(4)?,
+                    status: row.get::<_, i64>(5)? as u16,
+                    ip: row.get(6)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// 清理早于 before 的审计记录
+    pub fn audit_prune(&self, before: i64) -> Result<u64> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let n = conn.execute("DELETE FROM audit_log WHERE ts < ?1", [before])?;
+        Ok(n as u64)
+    }
+
+    // ---------- 会话登记（2.4） ----------
+
+    /// 登录时登记会话
+    #[allow(clippy::too_many_arguments)]
+    pub fn session_add(
+        &self,
+        jti: &str,
+        user_id: i64,
+        username: &str,
+        ua: &str,
+        ip: &str,
+        iat: i64,
+        exp: i64,
+    ) -> Result<()> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        conn.execute(
+            "INSERT OR REPLACE INTO sessions (jti, user_id, username, ua, ip, iat, exp)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            (jti, user_id, username, ua, ip, iat, exp),
+        )?;
+        Ok(())
+    }
+
+    /// 登出/踢出时移除会话
+    pub fn session_remove(&self, jti: &str) -> Result<u64> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let n = conn.execute("DELETE FROM sessions WHERE jti = ?1", [jti])?;
+        Ok(n as u64)
+    }
+
+    /// 会话是否仍在登记表中（鉴权时校验，被踢出/改密失效的 token 查不到）
+    pub fn session_exists(&self, jti: &str) -> Result<bool> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE jti = ?1",
+            [jti],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// 移除某用户的全部会话（改密/删除用户时失效其所有登录）
+    pub fn session_remove_user(&self, user_id: i64) -> Result<u64> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let n = conn.execute("DELETE FROM sessions WHERE user_id = ?1", [user_id])?;
+        Ok(n as u64)
+    }
+
+    /// 移除某用户除指定会话外的全部会话（本人改密时保留当前登录）
+    pub fn session_remove_user_except(&self, user_id: i64, keep_jti: &str) -> Result<u64> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let n = conn.execute(
+            "DELETE FROM sessions WHERE user_id = ?1 AND jti != ?2",
+            rusqlite::params![user_id, keep_jti],
+        )?;
+        Ok(n as u64)
+    }
+
+    /// 列出未过期会话（按签发时间倒序）
+    pub fn session_list(&self, now: i64) -> Result<Vec<SessionRow>> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let mut stmt = conn.prepare(
+            "SELECT jti, user_id, username, ua, ip, iat, exp
+             FROM sessions WHERE exp > ?1 ORDER BY iat DESC",
+        )?;
+        let rows = stmt
+            .query_map([now], |row| {
+                Ok(SessionRow {
+                    jti: row.get(0)?,
+                    user_id: row.get(1)?,
+                    username: row.get(2)?,
+                    ua: row.get(3)?,
+                    ip: row.get(4)?,
+                    iat: row.get(5)?,
+                    exp: row.get(6)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// 清理过期会话
+    pub fn session_prune(&self, now: i64) -> Result<u64> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let n = conn.execute("DELETE FROM sessions WHERE exp <= ?1", [now])?;
+        Ok(n as u64)
     }
 
     /// 写入一条监控采样
@@ -490,6 +769,147 @@ impl Db {
         blocking(move || db.find_user(&username)).await
     }
 
+    pub async fn find_user_full_async(&self, username: &str) -> Result<Option<UserRow>> {
+        let db = self.clone();
+        let username = username.to_string();
+        blocking(move || db.find_user_full(&username)).await
+    }
+
+    pub async fn create_user_role_async(
+        &self,
+        username: &str,
+        hash: &str,
+        salt: &str,
+        role: &str,
+        must_change: bool,
+    ) -> Result<i64> {
+        let db = self.clone();
+        let (u, h, s, r) = (
+            username.to_string(),
+            hash.to_string(),
+            salt.to_string(),
+            role.to_string(),
+        );
+        blocking(move || db.create_user_role(&u, &h, &s, &r, must_change)).await
+    }
+
+    pub async fn user_by_id_async(&self, id: i64) -> Result<Option<(String, String, bool)>> {
+        let db = self.clone();
+        blocking(move || db.user_by_id(id)).await
+    }
+
+    pub async fn list_users_async(&self) -> Result<Vec<(i64, String, String, bool)>> {
+        let db = self.clone();
+        blocking(move || db.list_users()).await
+    }
+
+    pub async fn set_password_async(&self, id: i64, hash: &str, salt: &str) -> Result<()> {
+        let db = self.clone();
+        let (h, s) = (hash.to_string(), salt.to_string());
+        blocking(move || db.set_password(id, &h, &s)).await
+    }
+
+    pub async fn update_user_async(&self, id: i64, username: &str, role: &str) -> Result<()> {
+        let db = self.clone();
+        let (u, r) = (username.to_string(), role.to_string());
+        blocking(move || db.update_user(id, &u, &r)).await
+    }
+
+    pub async fn delete_user_async(&self, id: i64) -> Result<u64> {
+        let db = self.clone();
+        blocking(move || db.delete_user(id)).await
+    }
+
+    pub async fn user_exists_async(&self, id: i64) -> Result<bool> {
+        let db = self.clone();
+        blocking(move || db.user_exists(id)).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn audit_async(
+        &self,
+        ts: i64,
+        user_id: Option<i64>,
+        username: &str,
+        method: &str,
+        path: &str,
+        status: u16,
+        ip: &str,
+    ) -> Result<()> {
+        let db = self.clone();
+        let (u, m, p, i) = (
+            username.to_string(),
+            method.to_string(),
+            path.to_string(),
+            ip.to_string(),
+        );
+        blocking(move || db.audit(ts, user_id, &u, &m, &p, status, &i)).await
+    }
+
+    pub async fn audit_list_async(&self, limit: i64, offset: i64) -> Result<Vec<AuditRow>> {
+        let db = self.clone();
+        blocking(move || db.audit_list(limit, offset)).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn session_add_async(
+        &self,
+        jti: &str,
+        user_id: i64,
+        username: &str,
+        ua: &str,
+        ip: &str,
+        iat: i64,
+        exp: i64,
+    ) -> Result<()> {
+        let db = self.clone();
+        let (j, u, a, i) = (
+            jti.to_string(),
+            username.to_string(),
+            ua.to_string(),
+            ip.to_string(),
+        );
+        blocking(move || db.session_add(&j, user_id, &u, &a, &i, iat, exp)).await
+    }
+
+    pub async fn session_remove_async(&self, jti: &str) -> Result<u64> {
+        let db = self.clone();
+        let j = jti.to_string();
+        blocking(move || db.session_remove(&j)).await
+    }
+
+    pub async fn session_exists_async(&self, jti: &str) -> Result<bool> {
+        let db = self.clone();
+        let j = jti.to_string();
+        blocking(move || db.session_exists(&j)).await
+    }
+
+    pub async fn session_remove_user_async(&self, user_id: i64) -> Result<u64> {
+        let db = self.clone();
+        blocking(move || db.session_remove_user(user_id)).await
+    }
+
+    pub async fn session_remove_user_except_async(&self, user_id: i64, keep_jti: &str) -> Result<u64> {
+        let db = self.clone();
+        let j = keep_jti.to_string();
+        blocking(move || db.session_remove_user_except(user_id, &j)).await
+    }
+
+    pub async fn session_list_async(&self, now: i64) -> Result<Vec<SessionRow>> {
+        let db = self.clone();
+        blocking(move || db.session_list(now)).await
+    }
+
+    pub async fn session_prune_async(&self, now: i64) -> Result<u64> {
+        let db = self.clone();
+        blocking(move || db.session_prune(now)).await
+    }
+
+    pub async fn audit_prune_async(&self, before: i64) -> Result<u64> {
+        let db = self.clone();
+        blocking(move || db.audit_prune(before)).await
+    }
+
     pub async fn insert_metric_async(&self, p: &crate::monitor::Snapshot) -> Result<()> {
         let db = self.clone();
         let p = p.clone();
@@ -611,20 +1031,22 @@ mod tests {
             > 0
     }
 
-    /// 全新库：迁移建出全部表，版本号为最新（2）；再次打开幂等（不重复执行）
+    /// 全新库：迁移建出全部表，版本号为最新（5）；再次打开幂等（不重复执行）
     #[test]
     fn fresh_db_gets_baseline() {
         let path = temp_db_path("fresh");
         {
             let db = Db::open(&path).unwrap();
-            assert_eq!(db.schema_version().unwrap(), 2);
+            assert_eq!(db.schema_version().unwrap(), 5);
             assert!(table_exists(&db, "settings"));
             assert!(table_exists(&db, "users"));
             assert!(table_exists(&db, "metrics"));
             assert!(table_exists(&db, "metrics_hourly"));
+            assert!(table_exists(&db, "audit_log"));
+            assert!(table_exists(&db, "sessions"));
         }
         let db2 = Db::open(&path).unwrap();
-        assert_eq!(db2.schema_version().unwrap(), 2);
+        assert_eq!(db2.schema_version().unwrap(), 5);
         let _ = std::fs::remove_file(path);
     }
 
@@ -648,9 +1070,13 @@ mod tests {
         }
         {
             let db = Db::open(&path).unwrap();
-            assert_eq!(db.schema_version().unwrap(), 2);
+            assert_eq!(db.schema_version().unwrap(), 5);
             assert_eq!(db.user_count().unwrap(), 1);
             assert!(db.find_user("admin").unwrap().is_some());
+            // 旧库升级后 admin 自动获得默认角色 admin、不强制改密（避免锁死现有部署）
+            let u = db.find_user_full("admin").unwrap().unwrap();
+            assert_eq!(u.role, "admin");
+            assert!(!u.must_change);
         }
         // 二次打开幂等
         let db2 = Db::open(&path).unwrap();
@@ -673,7 +1099,7 @@ mod tests {
             .expect_err("半途失败应中止");
             drop(tx);
             assert!(!table_exists(&db, "t_half"), "回滚后不应残留半途建的表");
-            assert_eq!(db.schema_version().unwrap(), 2, "失败的迁移不得推进版本");
+            assert_eq!(db.schema_version().unwrap(), 5, "失败的迁移不得推进版本");
         }
         let _ = std::fs::remove_file(path);
     }
@@ -747,6 +1173,95 @@ mod tests {
             let fresh = db.history(1000, 100000, 500, 100).unwrap();
             assert_eq!(fresh.len(), 2);
             assert_eq!(fresh[0].ts, 1000, "结果按时间升序");
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 2.1/2.2：带角色的用户 CRUD 与列表（不含密码字段）
+    #[test]
+    fn user_rbac_crud() {
+        let path = temp_db_path("rbac");
+        {
+            let db = Db::open(&path).unwrap();
+            let id = db
+                .create_user_role("op1", "h", "s", "operator", true)
+                .unwrap();
+            db.create_user_role("view1", "h", "s", "viewer", false)
+                .unwrap();
+            let users = db.list_users().unwrap();
+            assert_eq!(users.len(), 2);
+            let op = users.iter().find(|u| u.1 == "op1").unwrap();
+            assert_eq!(op.0, id);
+            assert_eq!(op.2, "operator");
+            assert!(op.3, "must_change 应读出为 true");
+            // 改名/改角色
+            db.update_user(id, "op2", "admin").unwrap();
+            let u = db.user_by_id(id).unwrap().unwrap();
+            assert_eq!((u.0.as_str(), u.1.as_str(), u.2), ("op2", "admin", true));
+            // 改密清除 must_change
+            db.set_password(id, "h2", "s2").unwrap();
+            let full = db.find_user_full("op2").unwrap().unwrap();
+            assert!(!full.must_change);
+            assert_eq!(full.password_hash, "h2");
+            // 删除
+            assert_eq!(db.delete_user(id).unwrap(), 1);
+            assert!(!db.user_exists(id).unwrap());
+            assert_eq!(db.list_users().unwrap().len(), 1);
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 2.4：会话登记/存在性/按用户清除（含保留当前会话）/过期清理
+    #[test]
+    fn session_lifecycle() {
+        let path = temp_db_path("sessions");
+        {
+            let db = Db::open(&path).unwrap();
+            db.session_add("j1", 1, "admin", "ua", "1.2.3.4", 100, 200)
+                .unwrap();
+            db.session_add("j2", 1, "admin", "ua", "5.6.7.8", 110, 300)
+                .unwrap();
+            db.session_add("j3", 2, "op", "ua", "9.9.9.9", 120, 400)
+                .unwrap();
+            assert!(db.session_exists("j1").unwrap());
+            // 列出未过期（now=150 全部有效；now=250 时 j1 过期）
+            assert_eq!(db.session_list(150).unwrap().len(), 3);
+            assert_eq!(db.session_list(250).unwrap().len(), 2);
+            // 本人改密：清 user=1 但保留 j2
+            assert_eq!(db.session_remove_user_except(1, "j2").unwrap(), 1);
+            assert!(!db.session_exists("j1").unwrap());
+            assert!(db.session_exists("j2").unwrap());
+            // 管理员踢人：user=2 全清
+            assert_eq!(db.session_remove_user(2).unwrap(), 1);
+            // 过期清理
+            assert_eq!(db.session_prune(350).unwrap(), 1);
+            assert_eq!(db.session_list(350).unwrap().len(), 0);
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 2.3：审计写入与分页读取（时间倒序），prune 按时间清理
+    #[test]
+    fn audit_write_and_list() {
+        let path = temp_db_path("audit");
+        {
+            let db = Db::open(&path).unwrap();
+            db.audit(100, Some(1), "admin", "POST", "/api/files/delete", 200, "1.2.3.4")
+                .unwrap();
+            db.audit(200, None, "-", "POST", "/api/login", 401, "9.9.9.9")
+                .unwrap();
+            let rows = db.audit_list(10, 0).unwrap();
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0].ts, 200, "按时间倒序");
+            assert_eq!(rows[0].user_id, None);
+            assert_eq!(rows[1].username, "admin");
+            // 分页
+            let page = db.audit_list(1, 1).unwrap();
+            assert_eq!(page.len(), 1);
+            assert_eq!(page[0].ts, 100);
+            // 清理
+            assert_eq!(db.audit_prune(150).unwrap(), 1);
+            assert_eq!(db.audit_list(10, 0).unwrap().len(), 1);
         }
         let _ = std::fs::remove_file(path);
     }

@@ -176,6 +176,16 @@ pub fn spawn_sampler(state: AppState) {
                 {
                     tracing::warn!("监控历史聚合清理失败：{e}");
                 }
+                // 2.3/2.4：过期会话与超期审计随手清理，防止两张表无限增长
+                if let Err(e) = db.session_prune_async(now).await {
+                    tracing::warn!("清理过期会话失败：{e}");
+                }
+                if let Err(e) = db
+                    .audit_prune_async(now - crate::db::AUDIT_RETENTION_SECS)
+                    .await
+                {
+                    tracing::warn!("清理过期审计日志失败：{e}");
+                }
             }
         }
     });

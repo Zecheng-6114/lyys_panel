@@ -1,6 +1,8 @@
 use axum::extract::{
-    ConnectInfo, DefaultBodyLimit, FromRequest, FromRequestParts, Multipart, Query, Request, State,
+    ConnectInfo, DefaultBodyLimit, FromRequest, FromRequestParts, Multipart, OriginalUri, Path,
+    Query, Request, State,
 };
+use axum::middleware::{self, Next};
 use axum::http::{header, request::Parts, StatusCode};
 // AI 助手功能暂时停用（见文件末尾 "AI 助手已停用" 说明），以下导入仅 AI 段使用
 // use axum::response::sse::{Event, Sse};
@@ -41,6 +43,13 @@ impl ApiError {
     fn too_many_requests(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::TOO_MANY_REQUESTS,
+            message: msg.into(),
+        }
+    }
+    /// 403：已认证但角色权限不足（2.1 RBAC）
+    fn forbidden(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
             message: msg.into(),
         }
     }
@@ -99,17 +108,28 @@ impl IntoResponse for ApiError {
 
 /// 认证后的当前用户（从 Authorization: Bearer <token> 解析）
 ///
-/// 当前只区分「已登录」，handler 用它作为守卫参数即可。保留 `id` 是为了
-/// 后续按用户区分数据（多管理员、个人偏好）时不用改鉴权链路；
-/// `jti`/`exp` 供登出接口吊销当前 token（P1-1）。
-#[allow(dead_code)]
+/// token 校验通过后按 sub 查库补全用户名/角色（2.1 RBAC）：角色以库为准，
+/// 改角色即时生效，无需等 token 过期。查不到用户（已被删除）视为登录失效。
+/// `jti`/`exp` 供登出吊销当前 token（P1-1）；`must_change` 供前端强制改密。
 pub struct AuthUser {
-    /// 用户 id（MVP 单管理员）
+    /// 用户 id
     pub id: i64,
+    /// 用户名（审计与会话列表展示用）
+    pub username: String,
+    /// 角色：admin / operator / viewer
+    pub role: String,
+    /// 首登强制改密标记
+    pub must_change: bool,
     /// 本枚 token 的唯一 id（登出时加入服务端吊销名单）
     pub jti: String,
     /// 本枚 token 的过期时间（Unix 秒，吊销有效期到点为止）
     pub exp: usize,
+}
+
+impl AuthUser {
+    pub fn is_admin(&self) -> bool {
+        self.role == "admin"
+    }
 }
 
 impl FromRequestParts<AppState> for AuthUser {
@@ -130,11 +150,69 @@ impl FromRequestParts<AppState> for AuthUser {
         if state.revocations.is_revoked(&claims.jti) {
             return Err(ApiError::unauthorized("登录已失效，请重新登录"));
         }
+        // 2.4：被「踢出」的会话（jti 已从会话表删除且非本人当前登录）同样拒绝。
+        // 会话表只登记有效会话，登出/踢出/改密都会移除对应行。
+        if !state.db.session_exists_async(&claims.jti).await? {
+            return Err(ApiError::unauthorized("登录已失效，请重新登录"));
+        }
+        let user = state
+            .db
+            .user_by_id_async(claims.sub)
+            .await?
+            .ok_or_else(|| ApiError::unauthorized("账号已被删除，请重新登录"))?;
+        let must_change = user.2;
+        // 2.2：首登强制改密闸门——未改密前除改密/登出/查询自身信息外一律 403。
+        // nest 会剥掉 /api 前缀，必须用 OriginalUri 拿完整路径判断。
+        if must_change {
+            let path = parts
+                .extensions
+                .get::<OriginalUri>()
+                .map(|u| u.0.path())
+                .unwrap_or_else(|| parts.uri.path());
+            const ALLOWED: [&str; 3] = ["/api/me", "/api/account/password", "/api/logout"];
+            if !ALLOWED.contains(&path) {
+                return Err(ApiError::forbidden("请先修改初始密码"));
+            }
+        }
         Ok(AuthUser {
             id: claims.sub,
+            username: user.0,
+            role: user.1,
+            must_change,
             jti: claims.jti,
             exp: claims.exp,
         })
+    }
+}
+
+/// 角色守卫提取器：`RequireRole<1>`（operator 及以上）或 `RequireRole<2>`（admin）
+/// 放在 handler 参数里即可，角色不足返回 403；内部包裹 [`AuthUser`]，
+/// handler 需要操作者身份时直接解构取出，避免重复走一遍鉴权链。
+/// viewer 只读（仅 GET 路由）、operator 可执行业务写操作、
+/// admin 全权（账号/审计/会话管理）。
+pub struct RequireRole<const MIN: u8>(pub AuthUser);
+
+/// 角色等级：viewer=0 < operator=1 < admin=2
+fn role_level(role: &str) -> u8 {
+    match role {
+        "admin" => 2,
+        "operator" => 1,
+        _ => 0,
+    }
+}
+
+impl<const MIN: u8> FromRequestParts<AppState> for RequireRole<MIN> {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let user = AuthUser::from_request_parts(parts, state).await?;
+        if role_level(&user.role) < MIN {
+            return Err(ApiError::forbidden("权限不足"));
+        }
+        Ok(RequireRole(user))
     }
 }
 
@@ -156,11 +234,14 @@ struct LoginReq {
     password: String,
 }
 
-/// 登录响应体
+/// 登录响应体。
+/// `role`/`must_change` 供前端做菜单裁剪与首登强制改密（2.1/2.2）。
 #[derive(Serialize)]
 struct LoginResp {
     token: String,
     username: String,
+    role: String,
+    must_change: bool,
 }
 
 /// 登录失败退避不需要认证，但需要来源 IP 用于限流。
@@ -217,9 +298,31 @@ where
 
 async fn login(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     ClientIp(ip): ClientIp,
     SafeJson(req): SafeJson<LoginReq>,
 ) -> Result<Json<LoginResp>, ApiError> {
+    // 登录由 handler 自行写审计（中间件拿不到 body 里的用户名），
+    // 审计写失败只告警，不阻断登录流程
+    let audit_login = |state: &AppState,
+                       uid: Option<i64>,
+                       name: &str,
+                       status: u16,
+                       ip: std::net::IpAddr| {
+        let state = state.clone();
+        let name = name.to_string();
+        tokio::spawn(async move {
+            let ts = time::OffsetDateTime::now_utc().unix_timestamp();
+            if let Err(e) = state
+                .db
+                .audit_async(ts, uid, &name, "POST", "/api/login", status, &ip.to_string())
+                .await
+            {
+                tracing::warn!("写入登录审计失败：{e}");
+            }
+        });
+    };
+
     let wait = state.throttle.retry_after(ip, &req.username);
     if !wait.is_zero() {
         let secs = wait.as_secs().max(1);
@@ -228,8 +331,8 @@ async fn login(
         )));
     }
 
-    let user = state.db.find_user_async(&req.username).await?;
-    let Some((id, hash, _salt)) = user else {
+    let user = state.db.find_user_full_async(&req.username).await?;
+    let Some(row) = user else {
         let delay = state.throttle.record_failure(ip, &req.username);
         tracing::warn!(
             "登录失败（用户不存在）：user={} ip={} 退避={}s",
@@ -237,12 +340,13 @@ async fn login(
             ip,
             delay.as_secs()
         );
+        audit_login(&state, None, &req.username, 401, ip);
         return Err(ApiError::unauthorized("用户名或密码错误"));
     };
     // argon2 校验是 CPU 密集操作（默认参数下约 100ms），必须离开异步工作线程，
     // 否则并发登录会把 tokio 的线程池占满。
     let password = req.password.clone();
-    let hash_for_verify = hash.clone();
+    let hash_for_verify = row.password_hash.clone();
     let verified = tokio::task::spawn_blocking(move || {
         auth::verify_password(&password, &hash_for_verify)
     })
@@ -260,29 +364,372 @@ async fn login(
             ip,
             delay.as_secs()
         );
+        audit_login(&state, Some(row.id), &req.username, 401, ip);
         return Err(ApiError::unauthorized("用户名或密码错误"));
     }
 
     state.throttle.record_success(ip, &req.username);
     // P0-1：首次登录成功后删除初始密码文件（一次性文件方案）
     auth::cleanup_initial_password(&state.data_dir);
-    let token = auth::issue_token(&state.jwt_secret, id)?;
+
+    // 2.4：签发 token 并登记会话。AuthUser 鉴权链强制校验 jti 在会话表中存在，
+    // 因此这里必须写入 sessions，否则登录后所有请求都会被拒（401）。
+    let (token, jti, exp) = auth::issue_token(&state.jwt_secret, row.id)?;
+    let ua = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let iat = time::OffsetDateTime::now_utc().unix_timestamp();
+    state
+        .db
+        .session_add_async(&jti, row.id, &req.username, &ua, &ip.to_string(), iat, exp)
+        .await?;
+
     tracing::info!("登录成功：user={} ip={}", req.username, ip);
+    audit_login(&state, Some(row.id), &req.username, 200, ip);
     Ok(Json(LoginResp {
         token,
         username: req.username,
+        role: row.role,
+        must_change: row.must_change,
     }))
 }
 
-/// 登出（P1-1）：把当前 token 吊销到其自然过期为止，
+/// 登出（P1-1 + 2.4）：吊销当前 token 并移除会话登记，
 /// 之后该 token 再请求任何受保护接口都会被拒（401）。
 async fn logout(
     State(state): State<AppState>,
     user: AuthUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     state.revocations.revoke(&user.jti, user.exp as i64);
+    state.db.session_remove_async(&user.jti).await?;
     tracing::info!("登出（token 已吊销）：user_id={}", user.id);
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ---------- 账号体系（2.1 / 2.2 / 2.3 / 2.4） ----------
+
+/// 当前登录用户信息（前端刷新页面后恢复角色与强制改密状态用）
+#[derive(Serialize)]
+struct MeResp {
+    username: String,
+    role: String,
+    must_change: bool,
+}
+
+async fn me(user: AuthUser) -> Result<Json<MeResp>, ApiError> {
+    Ok(Json(MeResp {
+        username: user.username,
+        role: user.role,
+        must_change: user.must_change,
+    }))
+}
+
+#[derive(Deserialize)]
+struct ChangePwdReq {
+    old_password: String,
+    new_password: String,
+}
+
+/// 修改密码（任何角色）。校验旧密码后更新哈希，并踢掉该用户的其他会话，
+/// 当前会话保留（避免改密把自己关在门外）。
+async fn change_password(
+    State(state): State<AppState>,
+    user: AuthUser,
+    SafeJson(req): SafeJson<ChangePwdReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if req.new_password.len() < 8 {
+        return Err(ApiError::bad("新密码至少 8 位"));
+    }
+    let row = state
+        .db
+        .find_user_full_async(&user.username)
+        .await?
+        .ok_or_else(|| ApiError::unauthorized("账号已被删除，请重新登录"))?;
+    let old = req.old_password.clone();
+    let hash = row.password_hash.clone();
+    let ok = tokio::task::spawn_blocking(move || auth::verify_password(&old, &hash))
+        .await
+        .map_err(|e| {
+            tracing::error!("密码校验任务异常：{e}");
+            ApiError::internal()
+        })?;
+    if !ok {
+        return Err(ApiError::bad("旧密码错误"));
+    }
+    let new = req.new_password.clone();
+    let (new_hash, new_salt) = tokio::task::spawn_blocking(move || auth::hash_password(&new))
+        .await
+        .map_err(|e| {
+            tracing::error!("密码哈希任务异常：{e}");
+            ApiError::internal()
+        })?
+        .map_err(|e| {
+            tracing::error!("生成密码哈希失败：{e:#}");
+            ApiError::internal()
+        })?;
+    state.db.set_password_async(user.id, &new_hash, &new_salt).await?;
+    // 踢掉该用户的其他会话；当前 jti 保留（改密不把自己关在门外）
+    state
+        .db
+        .session_remove_user_except_async(user.id, &user.jti)
+        .await?;
+    tracing::info!("修改密码：user_id={}", user.id);
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// 用户行（API 响应，不含密码字段）
+#[derive(Serialize)]
+struct UserResp {
+    id: i64,
+    username: String,
+    role: String,
+    must_change: bool,
+}
+
+fn valid_role(role: &str) -> bool {
+    matches!(role, "admin" | "operator" | "viewer")
+}
+
+fn valid_username(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 32
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+async fn users_list(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+) -> Result<Json<Vec<UserResp>>, ApiError> {
+    let rows = state.db.list_users_async().await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|(id, username, role, must_change)| UserResp {
+                id,
+                username,
+                role,
+                must_change,
+            })
+            .collect(),
+    ))
+}
+
+#[derive(Deserialize)]
+struct CreateUserReq {
+    username: String,
+    password: String,
+    role: String,
+}
+
+/// 创建用户（admin）。新用户默认 must_change=1，首次登录强制改密（2.2）。
+async fn users_create(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+    SafeJson(req): SafeJson<CreateUserReq>,
+) -> Result<Json<UserResp>, ApiError> {
+    if !valid_username(&req.username) {
+        return Err(ApiError::bad(
+            "用户名仅允许字母、数字、下划线、连字符，长度 1-32",
+        ));
+    }
+    if req.password.len() < 8 {
+        return Err(ApiError::bad("密码至少 8 位"));
+    }
+    if !valid_role(&req.role) {
+        return Err(ApiError::bad("非法角色"));
+    }
+    if state.db.find_user_async(&req.username).await?.is_some() {
+        return Err(ApiError::bad("用户名已存在"));
+    }
+    let pwd = req.password.clone();
+    let (hash, salt) = tokio::task::spawn_blocking(move || auth::hash_password(&pwd))
+        .await
+        .map_err(|e| {
+            tracing::error!("密码哈希任务异常：{e}");
+            ApiError::internal()
+        })?
+        .map_err(|e| {
+            tracing::error!("生成密码哈希失败：{e:#}");
+            ApiError::internal()
+        })?;
+    let id = state
+        .db
+        .create_user_role_async(&req.username, &hash, &salt, &req.role, true)
+        .await?;
+    tracing::info!("创建用户：id={} user={} role={}", id, req.username, req.role);
+    Ok(Json(UserResp {
+        id,
+        username: req.username,
+        role: req.role,
+        must_change: true,
+    }))
+}
+
+#[derive(Deserialize)]
+struct UpdateUserReq {
+    username: String,
+    role: String,
+    /// 管理员重设该用户密码（可选；不传则不改密码）
+    new_password: Option<String>,
+}
+
+/// 修改用户（admin）：改名/改角色/重设密码。
+/// 重设密码或改角色都会踢掉该用户的全部会话，让变更立即生效。
+async fn users_update(
+    State(state): State<AppState>,
+    RequireRole(actor): RequireRole<2>,
+    Path(id): Path<i64>,
+    SafeJson(req): SafeJson<UpdateUserReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !state.db.user_exists_async(id).await? {
+        return Err(ApiError::bad("用户不存在"));
+    }
+    if !valid_username(&req.username) {
+        return Err(ApiError::bad(
+            "用户名仅允许字母、数字、下划线、连字符，长度 1-32",
+        ));
+    }
+    if !valid_role(&req.role) {
+        return Err(ApiError::bad("非法角色"));
+    }
+    // 改名撞车检查（排除自己）
+    if let Some(existing) = state.db.find_user_async(&req.username).await? {
+        if existing.0 != id {
+            return Err(ApiError::bad("用户名已存在"));
+        }
+    }
+    // 自保护：不允许把自己降级或改走，防止把最后一个 admin 关在门外
+    if id == actor.id && (req.role != "admin" || req.username != actor.username) {
+        return Err(ApiError::bad("不能修改自己的用户名或降级自己"));
+    }
+    state.db.update_user_async(id, &req.username, &req.role).await?;
+    if let Some(pwd) = &req.new_password {
+        if pwd.len() < 8 {
+            return Err(ApiError::bad("新密码至少 8 位"));
+        }
+        let pwd = pwd.clone();
+        let (hash, salt) = tokio::task::spawn_blocking(move || auth::hash_password(&pwd))
+            .await
+            .map_err(|e| {
+                tracing::error!("密码哈希任务异常：{e}");
+                ApiError::internal()
+            })?
+            .map_err(|e| {
+                tracing::error!("生成密码哈希失败：{e:#}");
+                ApiError::internal()
+            })?;
+        state.db.set_password_async(id, &hash, &salt).await?;
+    }
+    // 角色/密码变更立即生效：踢掉该用户全部会话（含操作者本人改自己的场景，
+    // 但上面已禁止自己降级，因此只有改密会踢自己——重登即可）
+    let removed = state.db.session_remove_user_async(id).await?;
+    tracing::info!("更新用户：id={} user={} role={} 踢除会话={}", id, req.username, req.role, removed);
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// 删除用户（admin）。不允许删除自己。
+async fn users_delete(
+    State(state): State<AppState>,
+    RequireRole(actor): RequireRole<2>,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if id == actor.id {
+        return Err(ApiError::bad("不能删除自己"));
+    }
+    if !state.db.user_exists_async(id).await? {
+        return Err(ApiError::bad("用户不存在"));
+    }
+    state.db.delete_user_async(id).await?;
+    state.db.session_remove_user_async(id).await?;
+    tracing::info!("删除用户：id={}", id);
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct AuditQuery {
+    #[serde(default = "default_limit")]
+    limit: i64,
+    #[serde(default)]
+    offset: i64,
+}
+
+/// 审计日志查询（admin，2.3）
+async fn audit_query(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+    Query(q): Query<AuditQuery>,
+) -> Result<Json<Vec<crate::db::AuditRow>>, ApiError> {
+    let limit = q.limit.clamp(1, 500);
+    let offset = q.offset.max(0);
+    Ok(Json(state.db.audit_list_async(limit, offset).await?))
+}
+
+/// 会话行（API 响应）：jti 只回传前 8 位，防止完整 jti 泄露被用于构造吊销请求
+#[derive(Serialize)]
+struct SessionResp {
+    jti_prefix: String,
+    user_id: i64,
+    username: String,
+    ua: String,
+    ip: String,
+    iat: i64,
+    exp: i64,
+    /// 是否为当前请求所在的会话
+    current: bool,
+}
+
+/// 在线会话列表（2.4）：admin 看全部，其他角色只看自己的
+async fn sessions_list(
+    State(state): State<AppState>,
+    user: AuthUser,
+) -> Result<Json<Vec<SessionResp>>, ApiError> {
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let rows = state.db.session_list_async(now).await?;
+    let visible: Vec<SessionResp> = rows
+        .into_iter()
+        .filter(|r| user.is_admin() || r.user_id == user.id)
+        .map(|r| SessionResp {
+            jti_prefix: r.jti.chars().take(8).collect(),
+            user_id: r.user_id,
+            username: r.username,
+            ua: r.ua,
+            ip: r.ip,
+            iat: r.iat,
+            exp: r.exp,
+            current: r.jti == user.jti,
+        })
+        .collect();
+    Ok(Json(visible))
+}
+
+#[derive(Deserialize)]
+struct KickReq {
+    /// 要踢除会话的目标用户 id
+    user_id: i64,
+}
+
+/// 踢出某用户的全部在线会话（admin，2.4）。
+///
+/// 删除 sessions 表行即可让该用户所有 token 立即失效：AuthUser 鉴权链
+/// 会因 session_exists 失败而返回 401，无需再动内存吊销名单。
+/// 会话列表只回传 jti 前缀（防泄露），因此按 user_id 整户踢除，
+/// 不提供按单枚 jti 精确踢出。
+async fn sessions_kick(
+    State(state): State<AppState>,
+    RequireRole(actor): RequireRole<2>,
+    SafeJson(req): SafeJson<KickReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let n = state.db.session_remove_user_async(req.user_id).await?;
+    tracing::info!(
+        "踢出用户全部会话：actor={} target={} 数量={}",
+        actor.id,
+        req.user_id,
+        n
+    );
+    Ok(Json(serde_json::json!({ "ok": true, "removed": n })))
 }
 
 async fn system_state(
@@ -338,7 +785,7 @@ struct KillReq {
 
 async fn processes_kill(
     State(state): State<AppState>,
-    _user: AuthUser,
+    _: RequireRole<1>,
     SafeJson(req): SafeJson<KillReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // 失败必须往外抛：早先的实现用 `.is_ok()` 取布尔后就丢弃了错误，
@@ -366,7 +813,7 @@ struct ServiceActionReq {
 }
 
 async fn services_action(
-    _user: AuthUser,
+    _: RequireRole<1>,
     SafeJson(req): SafeJson<ServiceActionReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let out = opservice::action(&req.name, req.action)
@@ -455,7 +902,7 @@ struct WriteReq {
 }
 
 async fn files_write(
-    _user: AuthUser,
+    _: RequireRole<1>,
     SafeJson(req): SafeJson<WriteReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::files::write_file(&req.path, &req.content)
@@ -470,7 +917,7 @@ struct MkdirReq {
 }
 
 async fn files_mkdir(
-    _user: AuthUser,
+    _: RequireRole<1>,
     SafeJson(req): SafeJson<MkdirReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::files::mkdir(&req.path)
@@ -480,7 +927,7 @@ async fn files_mkdir(
 }
 
 async fn files_delete(
-    _user: AuthUser,
+    _: RequireRole<1>,
     SafeJson(req): SafeJson<PathQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::files::remove(&req.path)
@@ -496,7 +943,7 @@ struct RenameReq {
 }
 
 async fn files_rename(
-    _user: AuthUser,
+    _: RequireRole<1>,
     SafeJson(req): SafeJson<RenameReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::files::rename(&req.from, &req.to)
@@ -541,7 +988,7 @@ async fn files_download(
 
 /// 上传：multipart 表单，字段 dir（目标目录）+ file（文件）
 async fn files_upload(
-    _user: AuthUser,
+    _: RequireRole<1>,
     mut mp: Multipart,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let mut dir = String::new();
@@ -631,7 +1078,7 @@ struct PkgActionReq {
 }
 
 async fn packages_action(
-    _user: AuthUser,
+    _: RequireRole<1>,
     SafeJson(req): SafeJson<PkgActionReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let output = match req.action.as_str() {
@@ -658,7 +1105,7 @@ struct CronReq {
 }
 
 async fn cron_add(
-    _user: AuthUser,
+    _: RequireRole<1>,
     SafeJson(req): SafeJson<CronReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::crontab::add(&req.entry)
@@ -669,7 +1116,7 @@ async fn cron_add(
 
 async fn cron_update(
     _: State<AppState>,
-    _user: AuthUser,
+    _: RequireRole<1>,
     SafeJson(req): SafeJson<CronReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let index = req.index.ok_or_else(|| ApiError::bad("缺少 index"))?;
@@ -685,7 +1132,7 @@ struct CronDeleteReq {
 }
 
 async fn cron_delete(
-    _user: AuthUser,
+    _: RequireRole<1>,
     SafeJson(req): SafeJson<CronDeleteReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::crontab::delete(req.index)
@@ -724,7 +1171,7 @@ async fn docker_status(_user: AuthUser) -> Result<Json<crate::docker::DockerStat
 }
 
 /// 一键安装 Docker（耗时较长，前端应给出等待提示）
-async fn docker_install(_user: AuthUser) -> Result<Json<serde_json::Value>, ApiError> {
+async fn docker_install(_: RequireRole<2>) -> Result<Json<serde_json::Value>, ApiError> {
     let output = crate::docker::install().await.map_err(ApiError::file_err)?;
     Ok(Json(serde_json::json!({ "ok": true, "output": output })))
 }
@@ -745,7 +1192,7 @@ struct ContainerActionReq {
 }
 
 async fn docker_container_action(
-    _user: AuthUser,
+    _: RequireRole<1>,
     SafeJson(req): SafeJson<ContainerActionReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let act = parse_docker_action(&req.action)?;
@@ -788,7 +1235,7 @@ struct ImageActionReq {
 }
 
 async fn docker_image_action(
-    _user: AuthUser,
+    _: RequireRole<1>,
     SafeJson(req): SafeJson<ImageActionReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let output = match req.action.as_str() {
@@ -816,7 +1263,7 @@ struct ComposeActionReq {
 }
 
 async fn docker_compose_action(
-    _user: AuthUser,
+    _: RequireRole<1>,
     SafeJson(req): SafeJson<ComposeActionReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let act = parse_docker_action(&req.action)?;
@@ -933,7 +1380,7 @@ async fn theme_get(
 /// 传 null 表示删除配置、恢复默认。
 async fn theme_set(
     State(state): State<AppState>,
-    _user: AuthUser,
+    _: RequireRole<2>,
     body: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     if body.len() > THEME_MAX_BYTES {
@@ -1493,6 +1940,74 @@ async fn ai_chat_stream(
 }
 */
 
+// ---------- 审计中间件（2.3） ----------
+
+/// 从请求头尽力解析出当前用户（id, username）。
+/// 解析失败返回 None（登录前请求、非法 token 等），审计仍会记录匿名条目。
+async fn audit_actor(state: &AppState, headers: &axum::http::HeaderMap) -> Option<(i64, String)> {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())?
+        .strip_prefix("Bearer ")?;
+    let claims = auth::verify_token(&state.jwt_secret, token).ok()?;
+    if state.revocations.is_revoked(&claims.jti) {
+        return None;
+    }
+    let user = state.db.user_by_id_async(claims.sub).await.ok()??;
+    Some((claims.sub, user.0))
+}
+
+/// 审计中间件：记录 /api 下所有非 GET 请求（方法、路径、状态码、来源 IP、操作者）。
+/// 路径不含查询串，避免敏感参数（如密码走 body 不落库）进入审计。
+/// 登录接口由 handler 自行记录（body 里有用户名，中间件拿不到），此处跳过。
+async fn audit_mw(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let method = req.method().clone();
+    // nest 剥掉了 /api 前缀，用 OriginalUri 记录完整路径
+    let full_path = req
+        .extensions()
+        .get::<OriginalUri>()
+        .map(|u| u.0.path().to_string())
+        .unwrap_or_else(|| req.uri().path().to_string());
+    if method == axum::http::Method::GET || full_path == "/api/login" {
+        return next.run(req).await;
+    }
+    let path = full_path;
+    let ip = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip().to_string())
+        .unwrap_or_default();
+    let headers = req.headers().clone();
+    let actor = audit_actor(&state, &headers).await;
+    let resp = next.run(req).await;
+    let ts = time::OffsetDateTime::now_utc().unix_timestamp();
+    let (user_id, username) = match actor {
+        Some((id, name)) => (Some(id), name),
+        None => (None, "-".to_string()),
+    };
+    if let Err(e) = state
+        .db
+        .audit_async(
+            ts,
+            user_id,
+            &username,
+            method.as_str(),
+            &path,
+            resp.status().as_u16(),
+            &ip,
+        )
+        .await
+    {
+        // 审计写失败不阻断业务响应，只留 tracing 告警
+        tracing::warn!("写入审计日志失败：{e}");
+    }
+    resp
+}
+
 /// 健康检查（无需认证）
 async fn health() -> &'static str {
     "ok"
@@ -1502,6 +2017,18 @@ async fn health() -> &'static str {
 pub fn router(state: AppState) -> Router {
     let protected = Router::new()
         .route("/logout", post(logout))
+        // 账号体系（2.x）：/me 与改密任何角色可用；用户/审计/踢会话 admin 专属；
+        // 会话列表所有角色可用（handler 内按角色过滤可见范围）
+        .route("/me", get(me))
+        .route("/account/password", post(change_password))
+        .route(
+            "/users",
+            get(users_list).post(users_create),
+        )
+        .route("/users/{id}", axum::routing::put(users_update).delete(users_delete))
+        .route("/audit", get(audit_query))
+        .route("/sessions", get(sessions_list))
+        .route("/sessions/kick", post(sessions_kick))
         .route("/system/state", get(system_state))
         .route("/system/history", get(system_history))
         .route("/processes", get(processes_list).post(processes_kill))
@@ -1545,7 +2072,13 @@ pub fn router(state: AppState) -> Router {
             get(theme_get)
                 .post(theme_set)
                 .layer(DefaultBodyLimit::max(THEME_MAX_BYTES)),
-        );
+        )
+        // 2.3：审计中间件挂在受保护路由上，记录所有非 GET 业务请求
+        // （from_fn 不支持 State 提取器，必须用 from_fn_with_state）
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            audit_mw,
+        ));
         // AI 助手路由暂时停用（与文件头部 AI 处理函数段一起注释，恢复时去掉本注释并补回链式调用）
         /*
         .route("/ai/config", get(ai_config_get).post(ai_config_set))

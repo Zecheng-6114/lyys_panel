@@ -112,19 +112,32 @@ pub fn load_jwt_secret(data_dir: &Path) -> Result<Vec<u8>> {
 }
 
 /// 签发 token，有效期 24 小时。jti 为随机唯一 id，供登出吊销使用（P1-1）。
-pub fn issue_token(secret: &[u8], user_id: i64) -> Result<String> {
+/// 返回 (token, jti, exp)：会话登记表（2.4）需要 jti/exp 建会话行。
+pub fn issue_token(secret: &[u8], user_id: i64) -> Result<(String, String, i64)> {
     let exp = time::OffsetDateTime::now_utc().unix_timestamp() + 60 * 60 * 24;
+    let jti: String = random_bytes(16).iter().map(|b| format!("{b:02x}")).collect();
     let claims = Claims {
         sub: user_id,
         exp: exp as usize,
-        jti: random_bytes(16).iter().map(|b| format!("{b:02x}")).collect(),
+        jti: jti.clone(),
     };
     let token = encode(
         &Header::default(),
         &claims,
         &EncodingKey::from_secret(secret),
     )?;
-    Ok(token)
+    Ok((token, jti, exp))
+}
+
+/// 用 argon2 生成密码哈希，返回 (hash, salt)。
+/// argon2 是 CPU 密集操作，异步上下文里调用需包 spawn_blocking。
+pub fn hash_password(password: &str) -> Result<(String, String)> {
+    let salt = SaltString::generate(&mut OsRng);
+    let hash = Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map_err(|e| anyhow::anyhow!("生成密码哈希失败：{e}"))?
+        .to_string();
+    Ok((hash, salt.as_str().to_string()))
 }
 
 /// 校验 token 并返回完整载荷（含 jti/exp，供吊销检查）
@@ -178,13 +191,8 @@ pub fn ensure_admin(db: &Db, data_dir: &Path) -> Result<()> {
         pwd
     });
 
-    let salt = SaltString::generate(&mut OsRng);
-    let hash = Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
-        .map_err(|e| anyhow::anyhow!("生成密码哈希失败：{e}"))?
-        .to_string();
-
-    db.create_user("admin", &hash, salt.as_str())?;
+    let (hash, salt) = hash_password(&password)?;
+    db.create_user_role("admin", &hash, &salt, "admin", false)?;
     tracing::info!("已创建初始管理员账号：admin");
     Ok(())
 }
@@ -422,8 +430,8 @@ mod tests {
     #[test]
     fn jwt_issue_verify_roundtrip() {
         let secret = test_secret();
-        let t1 = issue_token(&secret, 42).unwrap();
-        let t2 = issue_token(&secret, 42).unwrap();
+        let (t1, _, _) = issue_token(&secret, 42).unwrap();
+        let (t2, _, _) = issue_token(&secret, 42).unwrap();
         assert_ne!(t1, t2, "同一用户两次签发的 token 必须不同（jti 随机）");
 
         let c1 = verify_token(&secret, &t1).unwrap();
@@ -460,10 +468,10 @@ mod tests {
     #[test]
     fn jwt_tampered_signature_rejected() {
         let secret = test_secret();
-        let token = issue_token(&secret, 1).unwrap();
+        let (token, _, _) = issue_token(&secret, 1).unwrap();
 
         // 1) 另一枚密钥签发的同载荷 token：签名校验失败
-        let forged = issue_token(b"a-completely-different-secret!!!", 1).unwrap();
+        let (forged, _, _) = issue_token(b"a-completely-different-secret!!!", 1).unwrap();
         assert!(verify_token(&secret, &forged).is_err());
 
         // 2) 原 token 篡改签名段首个字符：签名校验失败
@@ -485,7 +493,7 @@ mod tests {
     #[test]
     fn token_revocation_blocks_valid_token() {
         let secret = test_secret();
-        let token = issue_token(&secret, 7).unwrap();
+        let (token, _, _) = issue_token(&secret, 7).unwrap();
         let claims = verify_token(&secret, &token).unwrap();
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
 
