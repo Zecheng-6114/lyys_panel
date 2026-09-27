@@ -71,6 +71,25 @@ const routes: RouteRecordRaw[] = [
         component: () => import("../views/Users.vue"),
         meta: { adminOnly: true },
       },
+      // 3.1/3.2/3.3：运维管理页，仅 admin
+      {
+        path: "backups",
+        name: "backups",
+        component: () => import("../views/Backups.vue"),
+        meta: { adminOnly: true },
+      },
+      {
+        path: "update",
+        name: "update",
+        component: () => import("../views/Update.vue"),
+        meta: { adminOnly: true },
+      },
+      {
+        path: "alerts",
+        name: "alerts",
+        component: () => import("../views/Alerts.vue"),
+        meta: { adminOnly: true },
+      },
       // AI 助手功能暂时停用（用户决定），路由注释；恢复时放开下面 4 行
       // {
       //   path: "ai",

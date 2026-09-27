@@ -19,6 +19,9 @@
         <el-menu-item index="/docker">Docker</el-menu-item>
         <el-menu-item index="/sessions">在线会话</el-menu-item>
         <el-menu-item v-if="auth.isAdmin()" index="/users">账号管理</el-menu-item>
+        <el-menu-item v-if="auth.isAdmin()" index="/backups">备份管理</el-menu-item>
+        <el-menu-item v-if="auth.isAdmin()" index="/alerts">告警通知</el-menu-item>
+        <el-menu-item v-if="auth.isAdmin()" index="/update">面板更新</el-menu-item>
         <!-- AI 助手功能暂时停用（用户决定），菜单项注释；恢复时放开下行 -->
         <!-- <el-menu-item index="/ai">AI 助手</el-menu-item> -->
       </el-menu>
@@ -185,6 +188,9 @@ const titles: Record<string, string> = {
   "/docker": "Docker",
   "/sessions": "在线会话",
   "/users": "账号管理",
+  "/backups": "备份管理",
+  "/alerts": "告警通知",
+  "/update": "面板更新",
   // "/ai": "AI 助手", // 随 AI 助手停用
 };
 const pageTitle = computed(() => titles[route.path] ?? "LYYS Panel");
