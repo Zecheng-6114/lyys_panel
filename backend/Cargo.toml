@@ -39,15 +39,6 @@ rcgen = "0.13"
 # 3.2 自更新 / 3.3 告警：出站 HTTPS（GitHub API 与 webhook），复用 rustls 栈
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
-# ---------- AI 助手功能暂时停用（用户决定 2026-09-24）----------
-# 以下依赖仅被已注释的 ai/aimemory/aitools/emotion/websearch 模块使用。
-# 停用期间从编译中移除以显著缩减二进制与依赖树；恢复 AI 时，需连同
-# main.rs 里的模块注释一起放开下面 5 行。
-# ureq = { version = "2", default-features = false, features = ["tls"] }        # AI 调模型服务的同步 HTTP 客户端
-# ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic"] }  # 情绪识别 ONNX 运行时
-# regex = "1"                                                                    # 仅 websearch 用
-# tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }   # AI 分词
-# tokio-stream = "0.1"                                                           # AI SSE 流式响应
 
 [profile.release]
 opt-level = 3

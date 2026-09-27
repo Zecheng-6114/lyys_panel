@@ -1,7 +1,3 @@
-// AI 助手功能暂时停用（用户决定），相关模块整体注释；恢复时放开下面 5 行
-// mod ai;
-// mod aimemory;
-// mod aitools;
 mod alerts;
 mod api;
 mod auth;
@@ -10,7 +6,6 @@ mod crontab;
 mod db;
 mod distro;
 mod docker;
-// mod emotion;
 mod embed;
 mod files;
 mod logs;
@@ -22,7 +17,6 @@ mod packages;
 mod rprocess;
 mod tls;
 mod update;
-// mod websearch; // 仅被 aitools（AI 工具）引用，随 AI 一起停用
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -49,7 +43,7 @@ pub struct AppState {
     /// Token 吊销名单（P1-1：登出后服务端拒绝旧 token）
     pub revocations: Arc<auth::TokenRevocations>,
     /// 数据目录：JWT 密钥文件、初始密码等敏感文件的存放根目录
-    /// （P0-2 起承载安全职责，不再是 AI 专用；AI 助手恢复时可直接复用本字段）
+    /// （P0-2 起承载安全职责）
     pub data_dir: Arc<PathBuf>,
     /// 数据库文件路径（3.1 恢复流程在启动时需要原始路径字符串）
     pub db_path: Arc<String>,
@@ -130,8 +124,7 @@ async fn main() -> anyhow::Result<()> {
     monitor::spawn_sampler(state.clone());
 
     // 压缩放在外层：前端产物里 element-plus 一个包就 790KB，不压的话每次
-    // 打开页面都在裸传。默认谓词已排除 SSE 与图片等不可压内容，不会影响
-    // AI 流式对话与语音接口。
+    // 打开页面都在裸传。默认谓词已排除 SSE 与图片等不可压内容。
     //
     // 安全响应头放在最内层：保证 4xx/5x 及静态资源等所有响应（包括错误
     // 路径）都带上五项头部（P1-4），且早于压缩层完成头注入。

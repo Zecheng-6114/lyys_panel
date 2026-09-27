@@ -60,6 +60,12 @@ const routes: RouteRecordRaw[] = [
         component: () => import("../views/Docker.vue"),
       },
       {
+        // 4.3 深度运维：SMART 磁盘健康、unit 文件查看、容器日志流
+        path: "ops",
+        name: "ops",
+        component: () => import("../views/Ops.vue"),
+      },
+      {
         path: "sessions",
         name: "sessions",
         component: () => import("../views/Sessions.vue"),
@@ -90,12 +96,6 @@ const routes: RouteRecordRaw[] = [
         component: () => import("../views/Alerts.vue"),
         meta: { adminOnly: true },
       },
-      // AI 助手功能暂时停用（用户决定），路由注释；恢复时放开下面 4 行
-      // {
-      //   path: "ai",
-      //   name: "ai",
-      //   component: () => import("../views/Ai.vue"),
-      // },
     ],
   },
 ];
