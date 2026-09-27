@@ -1,0 +1,115 @@
+# Release：tag（v*）触发，构建 x86_64 / aarch64 Linux 二进制并发布到
+# GitHub Release，产物附 sha256 校验文件。
+#
+# 关键点：
+# 1. rust-embed 在编译期读取 frontend/dist，每个构建 job 都先预构建前端；
+#    dist 与目标架构无关，构建一次即可。
+# 2. aarch64 用 GNU 交叉工具链（gcc-aarch64-linux-gnu）交叉编译，不依赖
+#    Docker：rusqlite bundled 与 ring 的 C 代码都通过 cc 编译，设置
+#    CC_aarch64_unknown_linux_gnu 等变量即可指向交叉编译器。
+# 3. x86_64 产物必须命名为 lyys-panel：backend/src/update.rs 的自更新
+#    逻辑按固定资产名 ASSET_NAME = "lyys-panel" 在 Release 中查找下载。
+#    （当前自更新实现不区分架构，aarch64 用户请走手动上传通道。）
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            asset: lyys-panel
+            cross: ""
+          - target: aarch64-unknown-linux-gnu
+            asset: lyys-panel-aarch64
+            cross: "yes"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # rust-embed 编译期读取 frontend/dist，必须先于 cargo 构建步骤
+      - name: Build frontend dist
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+          key: ${{ matrix.target }}
+
+      - name: Install aarch64 cross toolchain
+        if: matrix.cross == 'yes'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+
+      - name: Build release binary
+        working-directory: backend
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare assets
+        run: |
+          cp "backend/target/${{ matrix.target }}/release/lyys-panel" "${{ matrix.asset }}"
+          sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            ${{ matrix.asset }}
+            ${{ matrix.asset }}.sha256
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/lyys-panel
+            dist/lyys-panel.sha256
+            dist/lyys-panel-aarch64
+            dist/lyys-panel-aarch64.sha256
