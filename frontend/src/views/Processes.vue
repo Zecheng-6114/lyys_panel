@@ -21,8 +21,8 @@
       <el-table-column label="内存" width="110">
         <template #default="{ row }"><span class="mono">{{ fmtBytes(row.mem) }}</span></template>
       </el-table-column>
-      <el-table-column prop="user" label="用户" width="120" />
-      <el-table-column prop="status" label="状态" width="100" />
+      <el-table-column prop="user" label="用户" width="120" class-name="col-p2" label-class-name="col-p2" />
+      <el-table-column prop="status" label="状态" width="100" class-name="col-p3" label-class-name="col-p3" />
       <el-table-column label="操作" width="90">
         <template #default="{ row }">
           <el-button link size="small" @click="kill(row.pid)">

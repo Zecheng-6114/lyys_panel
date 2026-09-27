@@ -2,6 +2,8 @@ use axum::extract::{
     ConnectInfo, DefaultBodyLimit, FromRequest, FromRequestParts, Multipart, OriginalUri, Path,
     Query, Request, State,
 };
+// 4.3 容器日志流：WebSocket 升级提取器
+use axum::extract::ws::WebSocketUpgrade;
 use axum::middleware::{self, Next};
 use axum::http::{header, request::Parts, StatusCode};
 // AI 助手功能暂时停用（见文件末尾 "AI 助手已停用" 说明），以下导入仅 AI 段使用
@@ -829,6 +831,12 @@ struct JournalQuery {
     lines: u32,
 }
 
+/// 4.3 服务 unit 文件查看的查询参数
+#[derive(Deserialize)]
+struct ServiceUnitQuery {
+    name: String,
+}
+
 fn default_lines() -> u32 {
     200
 }
@@ -1400,6 +1408,173 @@ async fn theme_set(
     let stored = if value.is_null() { "" } else { &value.to_string() };
     state.db.set_setting_async(THEME_KEY, stored).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ---------- 4.2 仪表盘自定义 ----------
+
+/// settings 表中仪表盘配置的键名
+const DASHBOARD_KEY: &str = "dashboard_config";
+/// 配置 JSON 字节上限：结构极小（一个字符串数组），4KB 已远超需要，纯防滥用
+const DASHBOARD_MAX_BYTES: usize = 4 * 1024;
+
+/// 仪表盘卡片白名单（与前端 Dashboard.vue 的卡片 id 一一对应）
+const DASHBOARD_CARDS: [&str; 4] = ["cpu", "mem", "disk", "net"];
+
+/// 仪表盘配置校验（复用 P1-2 主题校验思路：白名单 + 类型 + 长度）：
+/// - 只允许一个顶层字段 cards；
+/// - cards 为非空字符串数组，长度 ≤ 白名单大小，元素在白名单内且不重复。
+fn validate_dashboard_config(cfg: &serde_json::Value) -> Result<(), String> {
+    let obj = cfg
+        .as_object()
+        .ok_or_else(|| "配置必须是 JSON 对象".to_string())?;
+    for k in obj.keys() {
+        if k != "cards" {
+            return Err(format!("未知字段：{k}"));
+        }
+    }
+    let cards = obj
+        .get("cards")
+        .ok_or_else(|| "缺少 cards 字段".to_string())?
+        .as_array()
+        .ok_or_else(|| "cards 必须是数组".to_string())?;
+    if cards.is_empty() {
+        return Err("cards 不能为空".to_string());
+    }
+    if cards.len() > DASHBOARD_CARDS.len() {
+        return Err(format!(
+            "卡片数量过多（上限 {}）",
+            DASHBOARD_CARDS.len()
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for c in cards {
+        let s = c
+            .as_str()
+            .ok_or_else(|| "卡片项必须是字符串".to_string())?;
+        if !DASHBOARD_CARDS.contains(&s) {
+            return Err(format!("未知卡片：{s}"));
+        }
+        if !seen.insert(s.to_string()) {
+            return Err(format!("卡片重复：{s}"));
+        }
+    }
+    Ok(())
+}
+
+/// 读取仪表盘配置；未定制过返回 null，前端使用默认顺序展示全部卡片。
+async fn dashboard_config_get(
+    State(state): State<AppState>,
+    _user: AuthUser,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let raw = state.db.get_setting_async(DASHBOARD_KEY).await?;
+    let value = match raw {
+        Some(s) if !s.is_empty() => serde_json::from_str::<serde_json::Value>(&s)
+            .unwrap_or(serde_json::Value::Null),
+        _ => serde_json::Value::Null,
+    };
+    Ok(Json(serde_json::json!({ "config": value })))
+}
+
+/// 保存仪表盘配置。body 传 null 表示删除配置、恢复默认。
+async fn dashboard_config_set(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if body.len() > DASHBOARD_MAX_BYTES {
+        return Err(ApiError::bad("仪表盘配置过大"));
+    }
+    let text = String::from_utf8(body.to_vec())
+        .map_err(|_| ApiError::bad("仪表盘配置必须是 UTF-8 JSON"))?;
+    // 空请求体（axios 发 JSON null 时不带字节）与字面 null 同义：恢复默认
+    let value: serde_json::Value = if text.trim().is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_str(&text).map_err(|_| ApiError::bad("仪表盘配置 JSON 无法解析"))?
+    };
+    if !value.is_null() {
+        // 白名单校验不通过不入库
+        validate_dashboard_config(&value).map_err(ApiError::bad)?;
+    }
+    let stored = if value.is_null() { "" } else { &value.to_string() };
+    state.db.set_setting_async(DASHBOARD_KEY, stored).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ---------- 4.3 深度运维 ----------
+
+/// 服务 unit 文件内容查看（只读）。所有角色可用（viewer 也允许查看）。
+async fn services_unit_get(
+    Query(q): Query<ServiceUnitQuery>,
+    _user: AuthUser,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let name = q.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::bad("缺少服务名"));
+    }
+    let content = crate::ops::unit_file(name)
+        .await
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({ "name": name, "content": content })))
+}
+
+/// SMART 磁盘健康概要（只读探测）。smartctl 缺失时返回降级提示而非报错。
+async fn disks_smart_get(_user: AuthUser) -> Result<Json<crate::ops::SmartReport>, ApiError> {
+    let report = crate::ops::smart_report().await;
+    Ok(Json(report))
+}
+
+// 4.3 容器日志流（WebSocket）
+
+/// WS 查询参数：浏览器端 WebSocket 无法携带 Authorization 头，
+/// token 经查询串传递；id 为目标容器，tail 为初始回看行数。
+#[derive(Deserialize)]
+struct LogStreamQuery {
+    id: String,
+    token: String,
+    tail: Option<usize>,
+}
+
+/// WebSocket 日志流的手动鉴权：与 AuthUser 提取器同一套口径
+/// （token 校验 → 吊销名单 → 会话存在 → 账号存在 → 首登改密闸门），
+/// 只是认证载体从 Header 换成了查询串。任意失败一律拒绝升级。
+async fn ws_auth(state: &AppState, token: &str) -> Result<(), ApiError> {
+    let claims = auth::verify_token(&state.jwt_secret, token)
+        .map_err(|_| ApiError::unauthorized("登录已过期，请重新登录"))?;
+    if state.revocations.is_revoked(&claims.jti) {
+        return Err(ApiError::unauthorized("登录已失效，请重新登录"));
+    }
+    if !state.db.session_exists_async(&claims.jti).await? {
+        return Err(ApiError::unauthorized("登录已失效，请重新登录"));
+    }
+    let user = state
+        .db
+        .user_by_id_async(claims.sub)
+        .await?
+        .ok_or_else(|| ApiError::unauthorized("账号已被删除，请重新登录"))?;
+    if user.2 {
+        return Err(ApiError::forbidden("请先修改初始密码"));
+    }
+    Ok(())
+}
+
+async fn docker_logstream_ws(
+    State(state): State<AppState>,
+    Query(q): Query<LogStreamQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    ws_auth(&state, &q.token).await?;
+    // check_id 返回 anyhow::Error，转成面向客户端的通用文案（细节只进日志）。
+    // id 先转成 owned String 再移动进 WS 升级闭包，避免借用 q 的局部值。
+    let id = q.id.trim().to_string();
+    crate::docker::check_id(&id)
+        .map_err(|e| {
+            tracing::warn!("容器日志流：非法容器标识");
+            ApiError::bad(e.to_string())
+        })?;
+    // 初始回看行数限制在 1..=1000，防超大查询拖垮 docker daemon
+    let tail = q.tail.unwrap_or(200).clamp(1, 1000);
+    Ok(ws.on_upgrade(move |socket| crate::ops::container_log_stream(socket, id, tail)))
 }
 
 // ---------- 3.1 备份管理（admin）----------
@@ -2295,6 +2470,17 @@ pub fn router(state: AppState) -> Router {
         .route("/docker/image/action", post(docker_image_action))
         .route("/docker/compose", get(docker_compose))
         .route("/docker/compose/action", post(docker_compose_action))
+        // 4.3 容器日志流（WebSocket）。浏览器 WS 无法带 Authorization 头，
+        // token 走查询串，handler 内做与 AuthUser 同口径的手动鉴权
+        .route("/docker/logstream", get(docker_logstream_ws))
+        // 4.2 仪表盘自定义：GET 读取（全员）、POST 保存（admin，白名单校验）
+        .route(
+            "/dashboard-config",
+            get(dashboard_config_get).post(dashboard_config_set),
+        )
+        // 4.3 深度运维：unit 文件查看与 SMART 健康均为只读探测，全员可用
+        .route("/services/unit", get(services_unit_get))
+        .route("/disks/smart", get(disks_smart_get))
         // 主题定制：GET 读取、POST 保存。背景图以 data URL 内嵌，需放宽默认 2MB 请求体上限
         .route(
             "/theme",
@@ -2362,8 +2548,35 @@ pub fn router(state: AppState) -> Router {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_theme;
+    use super::{validate_dashboard_config, validate_theme};
     use serde_json::json;
+
+    // ---------- 4.2 仪表盘配置校验 ----------
+
+    #[test]
+    fn dashboard_valid_configs() {
+        assert!(validate_dashboard_config(&json!({ "cards": ["cpu", "mem"] })).is_ok());
+        assert!(validate_dashboard_config(&json!({ "cards": ["net", "disk", "mem", "cpu"] })).is_ok());
+    }
+
+    #[test]
+    fn dashboard_rejects_bad_configs() {
+        // 非对象 / 缺字段 / cards 非数组 / 空数组
+        assert!(validate_dashboard_config(&json!("x")).is_err());
+        assert!(validate_dashboard_config(&json!({})).is_err());
+        assert!(validate_dashboard_config(&json!({ "cards": "cpu" })).is_err());
+        assert!(validate_dashboard_config(&json!({ "cards": [] })).is_err());
+        // 未知卡片 / 非字符串项 / 重复卡片 / 未知顶层字段
+        assert!(validate_dashboard_config(&json!({ "cards": ["evil"] })).is_err());
+        assert!(validate_dashboard_config(&json!({ "cards": [1] })).is_err());
+        assert!(validate_dashboard_config(&json!({ "cards": ["cpu", "cpu"] })).is_err());
+        assert!(validate_dashboard_config(&json!({ "cards": ["cpu"], "evil": 1 })).is_err());
+        // 数量超过白名单大小（复制白名单 + 1 也进不来，元素重复会先被拦）
+        assert!(validate_dashboard_config(&json!({
+            "cards": ["cpu", "mem", "disk", "net", "cpu", "mem", "disk", "net", "cpu"]
+        }))
+        .is_err());
+    }
 
     /// 一份完全合法的主题配置（各用例以此为基底做破坏性修改）
     fn valid_config() -> serde_json::Value {

@@ -44,7 +44,7 @@
       <el-table-column label="当前值" width="100">
         <template #default="{ row }">{{ row.value.toFixed(1) }}%</template>
       </el-table-column>
-      <el-table-column label="阈值" width="100">
+      <el-table-column label="阈值" width="100" class-name="col-p3" label-class-name="col-p3">
         <template #default="{ row }">{{ row.threshold.toFixed(0) }}%</template>
       </el-table-column>
       <el-table-column label="状态" min-width="120">

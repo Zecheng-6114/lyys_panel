@@ -205,8 +205,9 @@ async fn compose_prefix() -> Result<Vec<String>> {
     bail!("未检测到 docker compose（docker compose 与 docker-compose 都不可用）")
 }
 
-/// 容器 ID / 名称校验，防参数注入
-fn check_id(id: &str) -> Result<()> {
+/// 容器 ID / 名称校验，防参数注入。
+/// 4.3 起也被 WebSocket 日志流接口（api.rs）复用。
+pub fn check_id(id: &str) -> Result<()> {
     if id.is_empty()
         || id.len() > 128
         || id.starts_with('-')

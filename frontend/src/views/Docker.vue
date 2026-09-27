@@ -57,10 +57,10 @@
               </template>
             </el-table-column>
             <el-table-column prop="name" label="名称" min-width="160" />
-            <el-table-column prop="image" label="镜像" min-width="180" show-overflow-tooltip />
-            <el-table-column prop="status" label="运行时长" width="150" />
-            <el-table-column prop="ports" label="端口" min-width="160" show-overflow-tooltip />
-            <el-table-column prop="cpu" label="CPU" width="90" />
+            <el-table-column prop="image" label="镜像" min-width="180" show-overflow-tooltip class-name="col-p3" label-class-name="col-p3" />
+            <el-table-column prop="status" label="运行时长" width="150" class-name="col-p3" label-class-name="col-p3" />
+            <el-table-column prop="ports" label="端口" min-width="160" show-overflow-tooltip class-name="col-p2" label-class-name="col-p2" />
+            <el-table-column prop="cpu" label="CPU" width="90" class-name="col-p2" label-class-name="col-p2" />
             <el-table-column prop="mem" label="内存" width="140" />
             <el-table-column label="操作" width="200">
               <template #default="{ row }">
@@ -88,9 +88,9 @@
           <el-table :data="images" height="calc(100vh - 220px)" size="small">
             <el-table-column prop="repository" label="仓库" min-width="180" />
             <el-table-column prop="tag" label="标签" width="120" />
-            <el-table-column prop="id" label="镜像 ID" width="140" />
+            <el-table-column prop="id" label="镜像 ID" width="140" class-name="col-p2" label-class-name="col-p2" />
             <el-table-column prop="size" label="大小" width="110" />
-            <el-table-column prop="created" label="创建于" width="140" />
+            <el-table-column prop="created" label="创建于" width="140" class-name="col-p3" label-class-name="col-p3" />
             <el-table-column label="操作" width="90">
               <template #default="{ row }">
                 <el-button link size="small" @click="removeImage(row)">删除</el-button>
@@ -111,8 +111,8 @@
           <el-table :data="projects" height="calc(100vh - 220px)" size="small">
             <el-table-column prop="name" label="项目" min-width="180" />
             <el-table-column prop="status" label="状态" width="180" />
-            <el-table-column prop="containers" label="容器数" width="90" />
-            <el-table-column prop="config_files" label="配置文件" min-width="220" show-overflow-tooltip />
+            <el-table-column prop="containers" label="容器数" width="90" class-name="col-p2" label-class-name="col-p2" />
+            <el-table-column prop="config_files" label="配置文件" min-width="220" show-overflow-tooltip class-name="col-p3" label-class-name="col-p3" />
             <el-table-column label="操作" width="180">
               <template #default="{ row }">
                 <el-button link size="small" @click="composeAct(row, 'up')">启动</el-button>

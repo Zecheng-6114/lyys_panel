@@ -20,7 +20,7 @@
       <el-table-column label="大小" width="120">
         <template #default="{ row }">{{ fmtSize(row.size) }}</template>
       </el-table-column>
-      <el-table-column label="创建时间" width="180">
+      <el-table-column label="创建时间" width="180" class-name="col-p2" label-class-name="col-p2">
         <template #default="{ row }">{{ fmtTime(row.mtime) }}</template>
       </el-table-column>
       <el-table-column label="操作" width="180" align="right">

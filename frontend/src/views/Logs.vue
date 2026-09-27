@@ -30,10 +30,10 @@
         <template #default="{ row }">{{ fmt(row.ts) }}</template>
       </el-table-column>
       <el-table-column label="用户" prop="username" width="120" />
-      <el-table-column label="方法" prop="method" width="80" class-name="mono" />
+      <el-table-column label="方法" prop="method" width="80" class-name="mono col-p3" label-class-name="col-p3" />
       <el-table-column label="路径" prop="path" min-width="220" show-overflow-tooltip class-name="mono" />
       <el-table-column label="状态" prop="status" width="80" class-name="mono" />
-      <el-table-column label="来源 IP" prop="ip" width="140" class-name="mono" />
+      <el-table-column label="来源 IP" prop="ip" width="140" class-name="mono col-p2" label-class-name="col-p2" />
     </el-table>
     <pre v-else class="logbox">{{ text || "（暂无内容）" }}</pre>
   </div>

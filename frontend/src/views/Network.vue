@@ -26,9 +26,9 @@
           {{ row.operstate }}
         </template>
       </el-table-column>
-      <el-table-column label="MTU" prop="mtu" width="90" />
-      <el-table-column label="类型" prop="link_type" width="120" />
-      <el-table-column label="MAC" width="180">
+      <el-table-column label="MTU" prop="mtu" width="90" class-name="col-p3" label-class-name="col-p3" />
+      <el-table-column label="类型" prop="link_type" width="120" class-name="col-p2" label-class-name="col-p2" />
+      <el-table-column label="MAC" width="180" class-name="col-p3" label-class-name="col-p3">
         <template #default="{ row }">{{ row.address || "-" }}</template>
       </el-table-column>
       <el-table-column label="IP 地址" min-width="280">
@@ -52,8 +52,8 @@
     >
       <el-table-column label="状态" prop="state" width="130" />
       <el-table-column label="本地地址" prop="local" min-width="200" />
-      <el-table-column label="对端地址" prop="peer" min-width="200" />
-      <el-table-column label="队列(R/S)" width="110">
+      <el-table-column label="对端地址" prop="peer" min-width="200" class-name="col-p2" label-class-name="col-p2" />
+      <el-table-column label="队列(R/S)" width="110" class-name="col-p3" label-class-name="col-p3">
         <template #default="{ row }">{{ row.recv_q }} / {{ row.send_q }}</template>
       </el-table-column>
       <el-table-column label="进程" min-width="220">
@@ -76,8 +76,8 @@
         <template #default="{ row }">{{ row.gateway || "-" }}</template>
       </el-table-column>
       <el-table-column label="接口" prop="dev" width="140" />
-      <el-table-column label="协议" prop="protocol" width="110" />
-      <el-table-column label="scope" prop="scope" width="110" />
+      <el-table-column label="协议" prop="protocol" width="110" class-name="col-p2" label-class-name="col-p2" />
+      <el-table-column label="scope" prop="scope" width="110" class-name="col-p3" label-class-name="col-p3" />
     </el-table>
 
     <div v-else class="dnsbox">

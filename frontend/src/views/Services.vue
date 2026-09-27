@@ -17,8 +17,8 @@
           {{ row.active || "未知" }}
         </template>
       </el-table-column>
-      <el-table-column prop="sub" label="子状态" width="120" />
-      <el-table-column prop="description" label="描述" min-width="220" show-overflow-tooltip />
+      <el-table-column prop="sub" label="子状态" width="120" class-name="col-p3" label-class-name="col-p3" />
+      <el-table-column prop="description" label="描述" min-width="220" show-overflow-tooltip class-name="col-p2" label-class-name="col-p2" />
       <el-table-column label="操作" width="220">
         <template #default="{ row }">
           <el-button link size="small" @click="act(row.name, 'start')">启动</el-button>

@@ -17,10 +17,10 @@
         <template #default="{ row }">{{ row.comment || "-" }}</template>
       </el-table-column>
       <el-table-column label="分" prop="minute" width="70" />
-      <el-table-column label="时" prop="hour" width="70" />
-      <el-table-column label="日" prop="day" width="70" />
-      <el-table-column label="月" prop="month" width="70" />
-      <el-table-column label="周" prop="weekday" width="70" />
+      <el-table-column label="时" prop="hour" width="70" class-name="col-p2" label-class-name="col-p2" />
+      <el-table-column label="日" prop="day" width="70" class-name="col-p2" label-class-name="col-p2" />
+      <el-table-column label="月" prop="month" width="70" class-name="col-p3" label-class-name="col-p3" />
+      <el-table-column label="周" prop="weekday" width="70" class-name="col-p3" label-class-name="col-p3" />
       <el-table-column label="命令" prop="command" min-width="280" show-overflow-tooltip />
       <el-table-column label="操作" width="120" align="right">
         <template #default="{ row, $index }">

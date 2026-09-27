@@ -13,15 +13,15 @@
       height="var(--panel-table-height)"
     >
       <el-table-column label="用户" prop="username" width="120" />
-      <el-table-column label="会话" prop="jti_prefix" width="110" class-name="mono" />
+      <el-table-column label="会话" prop="jti_prefix" width="110" class-name="mono col-p3" label-class-name="col-p3" />
       <el-table-column label="来源 IP" prop="ip" width="140" class-name="mono" />
       <el-table-column label="客户端" min-width="220" show-overflow-tooltip>
         <template #default="{ row }">{{ row.ua || "-" }}</template>
       </el-table-column>
-      <el-table-column label="签发时间" width="170">
+      <el-table-column label="签发时间" width="170" class-name="col-p3" label-class-name="col-p3">
         <template #default="{ row }">{{ fmt(row.iat) }}</template>
       </el-table-column>
-      <el-table-column label="过期时间" width="170">
+      <el-table-column label="过期时间" width="170" class-name="col-p2" label-class-name="col-p2">
         <template #default="{ row }">{{ fmt(row.exp) }}</template>
       </el-table-column>
       <el-table-column label="操作" width="140" align="right">

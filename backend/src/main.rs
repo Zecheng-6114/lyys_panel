@@ -17,6 +17,7 @@ mod logs;
 mod monitor;
 mod network;
 mod opservice;
+mod ops; // 4.3 深度运维：unit 文件查看、SMART 磁盘健康
 mod packages;
 mod rprocess;
 mod tls;

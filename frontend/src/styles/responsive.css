@@ -1,0 +1,25 @@
+/* 4.1 表格列优先级折叠。
+ *
+ * 用法：给低优先级的 el-table-column 同时加
+ *   class-name="col-p2" label-class-name="col-p2"
+ * （class-name 作用于数据单元格，label-class-name 作用于表头单元格，
+ *  两者都要加，否则窄屏下会出现"有头无身"的错位表格）。
+ *
+ * 优先级约定：
+ *   col-p2 = 中优先级：平板可用，手机（≤768px）隐藏
+ *   col-p3 = 低优先级：平板（≤992px）即隐藏
+ * 名称/状态/操作等主列不打标，任何宽度都保留。
+ *
+ * 用 display:none 直接折叠列而不是横向滚动条：
+ * Element Plus 的列宽是按容器计算的，隐藏后再由 min-width 列吃满剩余空间，
+ * 主列信息密度不受损失。 */
+@media (max-width: 992px) {
+  .el-table .col-p3 {
+    display: none;
+  }
+}
+@media (max-width: 768px) {
+  .el-table .col-p2 {
+    display: none;
+  }
+}

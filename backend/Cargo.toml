@@ -9,7 +9,8 @@ name = "lyys-panel"
 path = "src/main.rs"
 
 [dependencies]
-axum = { version = "0.8", features = ["macros", "multipart"] }
+# 4.3 容器日志流：axum 的 ws feature（WebSocket 升级）
+axum = { version = "0.8", features = ["macros", "multipart", "ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "process", "sync", "time"] }
 tower-http = { version = "0.6", features = ["compression-br", "compression-gzip", "cors", "trace"] }
 serde = { version = "1", features = ["derive"] }

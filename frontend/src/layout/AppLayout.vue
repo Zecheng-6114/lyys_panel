@@ -17,6 +17,7 @@
         <el-menu-item index="/cron">计划任务</el-menu-item>
         <el-menu-item index="/network">网络</el-menu-item>
         <el-menu-item index="/docker">Docker</el-menu-item>
+        <el-menu-item index="/ops">深度运维</el-menu-item>
         <el-menu-item index="/sessions">在线会话</el-menu-item>
         <el-menu-item v-if="auth.isAdmin()" index="/users">账号管理</el-menu-item>
         <el-menu-item v-if="auth.isAdmin()" index="/backups">备份管理</el-menu-item>
@@ -186,6 +187,7 @@ const titles: Record<string, string> = {
   "/cron": "计划任务",
   "/network": "网络",
   "/docker": "Docker",
+  "/ops": "深度运维",
   "/sessions": "在线会话",
   "/users": "账号管理",
   "/backups": "备份管理",

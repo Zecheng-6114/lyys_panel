@@ -13,7 +13,7 @@
       size="small"
       height="var(--panel-table-height)"
     >
-      <el-table-column label="ID" prop="id" width="60" class-name="mono" />
+      <el-table-column label="ID" prop="id" width="60" class-name="mono col-p3" label-class-name="col-p3" />
       <el-table-column label="用户名" prop="username" min-width="140" />
       <el-table-column label="角色" width="120">
         <template #default="{ row }">
@@ -21,7 +21,7 @@
           {{ roleLabel(row.role) }}
         </template>
       </el-table-column>
-      <el-table-column label="待改密" width="90">
+      <el-table-column label="待改密" width="90" class-name="col-p2" label-class-name="col-p2">
         <template #default="{ row }">{{ row.must_change ? "是" : "否" }}</template>
       </el-table-column>
       <el-table-column label="操作" width="220" align="right">

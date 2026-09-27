@@ -55,10 +55,10 @@
     >
       <el-table-column type="selection" width="36" />
       <el-table-column label="包名" prop="name" min-width="200" />
-      <el-table-column label="版本" width="220">
+      <el-table-column label="版本" width="220" class-name="col-p2" label-class-name="col-p2">
         <template #default="{ row }"><span class="mono">{{ row.version }}</span></template>
       </el-table-column>
-      <el-table-column label="架构" prop="arch" width="100" />
+      <el-table-column label="架构" prop="arch" width="100" class-name="col-p3" label-class-name="col-p3" />
       <el-table-column label="描述" prop="description" min-width="300" show-overflow-tooltip />
     </el-table>
 

@@ -1,49 +1,84 @@
 <template>
   <div class="dash">
     <div class="cards">
-      <div class="card">
-        <div class="card-label">CPU</div>
-        <div class="card-value">{{ snap.cpu.toFixed(1) }}%</div>
-        <div class="bar"><i :style="{ width: snap.cpu + '%' }" /></div>
-      </div>
-      <div class="card">
-        <div class="card-label">内存</div>
-        <div class="card-value">{{ fmtBytes(snap.mem_used) }}</div>
-        <div class="bar">
-          <i :style="{ width: pct(snap.mem_used, snap.mem_total) + '%' }" />
-        </div>
-      </div>
-      <div class="card">
-        <div class="card-label">磁盘</div>
-        <div class="card-value">{{ pct(snap.disk_used, snap.disk_total) }}%</div>
-        <div class="bar">
-          <i :style="{ width: pct(snap.disk_used, snap.disk_total) + '%' }" />
-        </div>
-      </div>
-      <div class="card">
-        <div class="card-label">网络</div>
-        <div class="card-value">
-          ↓{{ fmtBytes(snap.net_in_per_sec) }}/s ↑{{ fmtBytes(snap.net_out_per_sec) }}/s
-        </div>
-        <div class="bar"><i :style="{ width: '0%' }" /></div>
+      <!-- 4.2 卡片按用户配置的顺序与显隐渲染；未定制时全部按默认顺序 -->
+      <div v-for="card in visibleCards" :key="card.id" class="card">
+        <div class="card-label">{{ card.label }}</div>
+        <div class="card-value">{{ card.value }}</div>
+        <div class="bar"><i :style="{ width: card.bar + '%' }" /></div>
       </div>
     </div>
 
     <div class="chart-card">
-      <div class="chart-title">系统负载趋势（最近 {{ history.length }} 个采样点）</div>
+      <div class="chart-head">
+        <div class="chart-title">系统负载趋势（最近 {{ history.length }} 个采样点）</div>
+        <!-- 4.2 卡片自定义入口（admin 专属，保存走 RequireRole<2> 接口） -->
+        <button
+          v-if="auth.isAdmin()"
+          class="mini-btn"
+          type="button"
+          @click="openCustom"
+        >
+          自定义卡片
+        </button>
+      </div>
       <div ref="chartEl" class="chart" />
     </div>
+
+    <!-- 4.2 卡片显隐/排序配置 -->
+    <el-dialog v-model="customOpen" title="自定义仪表盘卡片" width="360px">
+      <div class="custom-list">
+        <div v-for="(c, i) in draftCards" :key="c" class="custom-row">
+          <el-checkbox v-model="draftOn[c]" :label="CARD_LABELS[c]" />
+          <div class="custom-btns">
+            <button
+              class="mini-btn mini-btn--sm"
+              type="button"
+              :disabled="i === 0"
+              aria-label="上移"
+              @click="move(i, -1)"
+            >
+              ↑
+            </button>
+            <button
+              class="mini-btn mini-btn--sm"
+              type="button"
+              :disabled="i === draftCards.length - 1"
+              aria-label="下移"
+              @click="move(i, 1)"
+            >
+              ↓
+            </button>
+          </div>
+        </div>
+      </div>
+      <div class="custom-hint">取消勾选即隐藏卡片；↑↓ 调整展示顺序</div>
+      <template #footer>
+        <button class="mini-btn" type="button" @click="resetCustom">恢复默认</button>
+        <button class="mini-btn" type="button" :disabled="customSaving" @click="saveCustom">
+          保存
+        </button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, reactive, ref } from "vue";
+import { computed, onMounted, onBeforeUnmount, reactive, ref } from "vue";
 // 按需引入 echarts：全量引入会让本页 chunk 多出约 700KB
 import * as echarts from "echarts/core";
 import { LineChart } from "echarts/charts";
 import { GridComponent, LegendComponent, TooltipComponent } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
+import { ElMessage } from "element-plus";
 import http from "../api/http";
+import { useAuthStore } from "../stores/auth";
+import {
+  useDashboardStore,
+  DASH_CARDS,
+  CARD_LABELS,
+  type DashCard,
+} from "../stores/dashboard";
 
 echarts.use([
   LineChart,
@@ -69,6 +104,9 @@ interface MetricPoint {
   net_in: number;
   net_out: number;
 }
+
+const auth = useAuthStore();
+const dash = useDashboardStore();
 
 const snap = reactive<Snapshot>({
   cpu: 0,
@@ -97,6 +135,105 @@ function fmtBytes(n: number) {
   }
   return `${v.toFixed(v >= 100 ? 0 : 1)}${units[i]}`;
 }
+
+// ---------- 4.2 卡片渲染 ----------
+
+interface CardView {
+  id: DashCard;
+  label: string;
+  value: string;
+  bar: number;
+}
+
+/// 展示顺序 = 配置顺序（null 时用默认顺序）；内容始终取实时快照
+const visibleCards = computed<CardView[]>(() => {
+  const order = dash.cards ?? [...DASH_CARDS];
+  return order.map((id) => {
+    const base = { id, label: CARD_LABELS[id] };
+    switch (id) {
+      case "cpu":
+        return { ...base, value: `${snap.cpu.toFixed(1)}%`, bar: snap.cpu };
+      case "mem":
+        return {
+          ...base,
+          value: fmtBytes(snap.mem_used),
+          bar: pct(snap.mem_used, snap.mem_total),
+        };
+      case "disk":
+        return {
+          ...base,
+          value: `${pct(snap.disk_used, snap.disk_total)}%`,
+          bar: pct(snap.disk_used, snap.disk_total),
+        };
+      case "net":
+        return {
+          ...base,
+          value: `↓${fmtBytes(snap.net_in_per_sec)}/s ↑${fmtBytes(snap.net_out_per_sec)}/s`,
+          bar: 0,
+        };
+    }
+  });
+});
+
+// ---------- 4.2 自定义弹窗 ----------
+
+const customOpen = ref(false);
+const customSaving = ref(false);
+/// 弹窗编辑态：勾选状态 + 顺序（含未勾选项，便于重新勾上时知道插回哪）
+const draftCards = ref<DashCard[]>([]);
+const draftOn = reactive<Record<string, boolean>>({});
+
+function openCustom() {
+  const order = dash.cards ?? [...DASH_CARDS];
+  // 编辑态按"全部卡片"列出：勾选的在前（按配置顺序），未勾选的追加在后
+  const rest = DASH_CARDS.filter((c) => !order.includes(c));
+  draftCards.value = [...order, ...rest];
+  for (const c of DASH_CARDS) draftOn[c] = order.includes(c);
+  customOpen.value = true;
+}
+
+function move(i: number, dir: -1 | 1) {
+  const j = i + dir;
+  if (j < 0 || j >= draftCards.value.length) return;
+  const arr = [...draftCards.value];
+  [arr[i], arr[j]] = [arr[j], arr[i]];
+  draftCards.value = arr;
+}
+
+async function saveCustom() {
+  const picked = draftCards.value.filter((c) => draftOn[c]);
+  if (!picked.length) {
+    ElMessage.warning("至少保留一张卡片");
+    return;
+  }
+  customSaving.value = true;
+  try {
+    await dash.save(picked);
+    ElMessage.success("已保存");
+    customOpen.value = false;
+  } catch (e: unknown) {
+    const err = e as { response?: { data?: { error?: string } } };
+    ElMessage.error(err.response?.data?.error ?? "保存失败");
+  } finally {
+    customSaving.value = false;
+  }
+}
+
+async function resetCustom() {
+  customSaving.value = true;
+  try {
+    await dash.save(null);
+    ElMessage.success("已恢复默认");
+    customOpen.value = false;
+  } catch (e: unknown) {
+    const err = e as { response?: { data?: { error?: string } } };
+    ElMessage.error(err.response?.data?.error ?? "恢复失败");
+  } finally {
+    customSaving.value = false;
+  }
+}
+
+// ---------- 数据刷新 ----------
 
 async function refresh() {
   const { data } = await http.get("/system/state");
@@ -177,7 +314,7 @@ function onResize() {
 
 onMounted(async () => {
   if (chartEl.value) chart = echarts.init(chartEl.value);
-  await Promise.all([refresh(), refreshHistory()]);
+  await Promise.all([refresh(), refreshHistory(), dash.load()]);
   // 卡片与趋势图同频，都是 5 秒 —— 采样本身也是 5 秒一条，图表跟着它走即可。
   // 早先给图表降频到每 3 个 tick（15 秒）拉一次，叠加落库延迟后最新点能滞后 20 秒，
   // 看上去就是「几十秒才动一下」。120 个点的历史请求开销可以忽略，不值得省。
@@ -235,6 +372,12 @@ onBeforeUnmount(() => {
   background: var(--el-text-color-primary);
   border-radius: var(--radius);
 }
+.chart-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
 .chart-title {
   font-size: 14px;
   color: var(--el-text-color-secondary);
@@ -242,6 +385,52 @@ onBeforeUnmount(() => {
 }
 .chart {
   height: 300px;
+}
+
+/* 4.2 卡片自定义弹窗 */
+.mini-btn {
+  border: none;
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-primary);
+  border-radius: var(--radius);
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.mini-btn:hover {
+  background: var(--el-fill-color);
+}
+.mini-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.mini-btn--sm {
+  padding: 2px 8px;
+}
+.custom-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.custom-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.custom-btns {
+  display: flex;
+  gap: 6px;
+}
+.custom-hint {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+/* 弹窗底部按钮组 */
+:deep(.el-dialog__footer) {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
 }
 @media (max-width: 768px) {
   .cards {
