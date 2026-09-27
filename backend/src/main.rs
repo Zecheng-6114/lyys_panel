@@ -17,6 +17,7 @@ mod network;
 mod opservice;
 mod packages;
 mod rprocess;
+mod tls;
 // mod websearch; // 仅被 aitools（AI 工具）引用，随 AI 一起停用
 
 use std::path::PathBuf;
@@ -122,22 +123,78 @@ async fn main() -> anyhow::Result<()> {
     //
     // 安全响应头放在最内层：保证 4xx/5x 及静态资源等所有响应（包括错误
     // 路径）都带上五项头部（P1-4），且早于压缩层完成头注入。
+    // 1.3 HTTPS：PANEL_TLS=auto（默认，自签）/ custom（指定证书）/ off（纯 HTTP）
+    let tls_settings = tls::settings_from_env(&state.data_dir)?;
+
     let app = api::router(state)
         .layer(middleware::from_fn(security_headers))
         .layer(tower_http::compression::CompressionLayer::new())
         .layer(TraceLayer::new_for_http());
 
-    let listener = tokio::net::TcpListener::bind(&addr)
+    // （tls_settings 已在构建 router 前解析）
+    if let Some(ts) = &tls_settings {
+        if ts.mode == tls::TlsMode::Auto {
+            tls::ensure_self_signed(&ts.cert, &ts.key)?;
+        }
+        // 可选：PANEL_HTTP_PORT 设置后额外监听一个纯 HTTP 端口，301 跳转到 HTTPS
+        if let Ok(http_port) = std::env::var("PANEL_HTTP_PORT") {
+            spawn_http_redirect(http_port, addr.clone());
+        }
+        // 带上连接信息，登录限流需要来源 IP（与 HTTP 分支同一约定）
+        let socket_addr: std::net::SocketAddr = addr
+            .parse()
+            .with_context(|| format!("监听地址 {addr} 无法解析为 SocketAddr"))?;
+        let rustls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
+            &ts.cert, &ts.key,
+        )
         .await
-        .with_context(|| format!("监听地址 {addr} 失败"))?;
-    tracing::info!("面板服务已启动：http://{addr}");
-    // 带上连接信息，登录限流需要来源 IP
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .await?;
+        .context("加载 TLS 证书失败")?;
+        tracing::info!("面板服务已启动：https://{addr}");
+        axum_server::bind_rustls(socket_addr, rustls_config)
+            .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+            .await?;
+    } else {
+        let listener = tokio::net::TcpListener::bind(&addr)
+            .await
+            .with_context(|| format!("监听地址 {addr} 失败"))?;
+        tracing::info!("面板服务已启动：http://{addr}");
+        // 带上连接信息，登录限流需要来源 IP
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await?;
+    }
     Ok(())
+}
+
+/// 纯 HTTP → HTTPS 的 301 跳转服务（PANEL_HTTP_PORT 启用时）
+fn spawn_http_redirect(http_port: String, https_addr: String) {
+    tokio::spawn(async move {
+        let host = https_addr.split(':').next().unwrap_or("127.0.0.1");
+        let target = format!("https://{host}:{port}", port = https_addr.split(':').nth(1).unwrap_or("3789"));
+        let log_target = target.clone();
+        let app = axum::routing::any(move |uri: axum::http::Uri| {
+            let target = target.clone();
+            async move {
+                let location = format!("{target}{}", uri.path());
+                (
+                    [(axum::http::header::LOCATION, location)],
+                    axum::http::StatusCode::MOVED_PERMANENTLY,
+                )
+            }
+        });
+        let bind = format!("{host}:{http_port}");
+        match tokio::net::TcpListener::bind(&bind).await {
+            Ok(l) => {
+                tracing::info!("HTTP 跳转监听：http://{bind} → {log_target}");
+                if let Err(e) = axum::serve(l, app).await {
+                    tracing::warn!("HTTP 跳转服务退出：{e}");
+                }
+            }
+            Err(e) => tracing::warn!("HTTP 跳转监听 {bind} 失败：{e}"),
+        }
+    });
 }
 
 /// 五项安全响应头（P1-4）：
