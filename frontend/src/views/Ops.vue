@@ -178,8 +178,12 @@ const unitError = ref("");
 const unitLoading = ref(false);
 
 async function loadServices() {
-  const { data } = await http.get("/services");
-  services.value = data;
+  try {
+    const { data } = await http.get("/services");
+    services.value = data;
+  } catch {
+    ElMessage.error("服务列表加载失败");
+  }
 }
 async function loadUnit() {
   if (!unitName.value) return;
@@ -214,8 +218,12 @@ let ws: WebSocket | null = null;
 const MAX_LINES = 2000; // 环形缓冲上限，防止长时间挂着撑爆内存
 
 async function loadContainers() {
-  const { data } = await http.get("/docker/containers");
-  containers.value = data;
+  try {
+    const { data } = await http.get("/docker/containers");
+    containers.value = data;
+  } catch {
+    ElMessage.error("容器列表加载失败");
+  }
 }
 
 function wsBase() {
