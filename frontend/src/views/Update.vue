@@ -12,7 +12,7 @@
       </div>
       <div v-if="status" class="status-row">
         <span class="label">最新版本</span>
-        <span class="mono">{{ status.latest ? "v" + status.latest : "—" }}</span>
+        <span class="mono">{{ status.latest ?? "—" }}</span>
         <span v-if="status.error" class="err">{{ status.error }}</span>
         <span v-else-if="status.has_update" class="dot-wrap"
           ><i class="dot dot-on" />有新版本可用</span
@@ -78,7 +78,7 @@ async function check() {
 async function install() {
   try {
     await ElMessageBox.confirm(
-      `将从 GitHub 下载 v${status.value?.latest} 并替换当前二进制，重启服务后生效。确定继续？`,
+      `将从 GitHub 下载 ${status.value?.latest} 并替换当前二进制，重启服务后生效。确定继续？`,
       "安装确认",
       { type: "warning", confirmButtonText: "安装", cancelButtonText: "取消" },
     );
