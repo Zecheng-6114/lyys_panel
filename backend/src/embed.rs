@@ -24,7 +24,12 @@ pub async fn handler(uri: Uri) -> Response {
             };
             return (
                 [
-                    (CONTENT_TYPE, HeaderValue::from_str(mime.as_ref()).unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"))),
+                    (
+                        CONTENT_TYPE,
+                        HeaderValue::from_str(mime.as_ref()).unwrap_or_else(|_| {
+                            HeaderValue::from_static("application/octet-stream")
+                        }),
+                    ),
                     (CACHE_CONTROL, HeaderValue::from_static(cache)),
                 ],
                 file.data,

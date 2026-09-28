@@ -11,8 +11,8 @@ mod files;
 mod logs;
 mod monitor;
 mod network;
-mod opservice;
 mod ops; // 4.3 深度运维：unit 文件查看、SMART 磁盘健康
+mod opservice;
 mod packages;
 mod rprocess;
 mod tls;
@@ -96,7 +96,9 @@ async fn main() -> anyhow::Result<()> {
     // 注意不做「旧密钥搬家」——沿用旧密钥等于把已泄露的凭证原样保留。
     if db.get_setting("jwt_secret")?.is_some() {
         db.remove_setting("jwt_secret")?;
-        tracing::info!("已移除数据库中的遗留 JWT 密钥（改用密钥文件/环境变量，本次将签发全新 token）");
+        tracing::info!(
+            "已移除数据库中的遗留 JWT 密钥（改用密钥文件/环境变量，本次将签发全新 token）"
+        );
     }
 
     // P0-2：密钥优先级 环境变量 PANEL_JWT_SECRET > <data_dir>/jwt_secret.key > 新生成
@@ -149,11 +151,9 @@ async fn main() -> anyhow::Result<()> {
         let socket_addr: std::net::SocketAddr = addr
             .parse()
             .with_context(|| format!("监听地址 {addr} 无法解析为 SocketAddr"))?;
-        let rustls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
-            &ts.cert, &ts.key,
-        )
-        .await
-        .context("加载 TLS 证书失败")?;
+        let rustls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&ts.cert, &ts.key)
+            .await
+            .context("加载 TLS 证书失败")?;
         tracing::info!("面板服务已启动：https://{addr}");
         axum_server::bind_rustls(socket_addr, rustls_config)
             .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
@@ -177,7 +177,10 @@ async fn main() -> anyhow::Result<()> {
 fn spawn_http_redirect(http_port: String, https_addr: String) {
     tokio::spawn(async move {
         let host = https_addr.split(':').next().unwrap_or("127.0.0.1");
-        let target = format!("https://{host}:{port}", port = https_addr.split(':').nth(1).unwrap_or("3789"));
+        let target = format!(
+            "https://{host}:{port}",
+            port = https_addr.split(':').nth(1).unwrap_or("3789")
+        );
         let log_target = target.clone();
         let app = axum::routing::any(move |uri: axum::http::Uri| {
             let target = target.clone();

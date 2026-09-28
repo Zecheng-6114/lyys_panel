@@ -42,7 +42,14 @@ pub enum RuleState {
 }
 
 /// 评估输入：从快照提取三个指标的当前值（%）
-pub fn metric_value(metric: Metric, cpu: f64, mem_used: i64, mem_total: i64, disk_used: i64, disk_total: i64) -> f64 {
+pub fn metric_value(
+    metric: Metric,
+    cpu: f64,
+    mem_used: i64,
+    mem_total: i64,
+    disk_used: i64,
+    disk_total: i64,
+) -> f64 {
     match metric {
         Metric::Cpu => cpu,
         Metric::Mem => {
@@ -169,7 +176,11 @@ impl AlertEngine {
             let value = metrics.value(rule.metric);
             let over = value >= rule.threshold;
             let state = self.states.get(i).copied().unwrap_or(RuleState::Normal);
-            let new_state = if over { RuleState::Firing } else { RuleState::Normal };
+            let new_state = if over {
+                RuleState::Firing
+            } else {
+                RuleState::Normal
+            };
             // 只在状态翻转（触发/恢复）时出事件；持续超阈值不重复，
             // 从未触发过的正常波动不记录，避免历史被噪声淹没
             if new_state != state {
@@ -200,7 +211,14 @@ pub struct Metrics {
 
 impl Metrics {
     pub fn value(&self, m: Metric) -> f64 {
-        metric_value(m, self.cpu, self.mem_used, self.mem_total, self.disk_used, self.disk_total)
+        metric_value(
+            m,
+            self.cpu,
+            self.mem_used,
+            self.mem_total,
+            self.disk_used,
+            self.disk_total,
+        )
     }
 }
 

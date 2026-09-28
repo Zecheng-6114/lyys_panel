@@ -44,7 +44,10 @@ pub async fn tail_file(path: &str, lines: u32) -> Result<String> {
         .context("调用 tail 失败")?;
     if !out.status.success() {
         // P1-3：命令 stderr 只进日志，响应体不回显（防内部细节泄露）
-        tracing::warn!("tail stderr：{}", String::from_utf8_lossy(&out.stderr).trim());
+        tracing::warn!(
+            "tail stderr：{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
         anyhow::bail!("读取文件失败，详见服务端日志");
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())

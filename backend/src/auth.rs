@@ -32,7 +32,10 @@ fn random_bytes(n: usize) -> Vec<u8> {
 
 /// 随机 JWT 密钥（64 位十六进制字符串 = 32 字节）
 fn random_secret() -> String {
-    random_bytes(32).iter().map(|b| format!("{b:02x}")).collect()
+    random_bytes(32)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// 随机初始密码字符集：小写 + 大写 + 数字，剔除易混淆的 0/O/1/l/I（P0-1）。
@@ -79,10 +82,7 @@ fn write_private(path: &Path, content: &str) -> Result<()> {
 pub fn load_jwt_secret(data_dir: &Path) -> Result<Vec<u8>> {
     // 1) 环境变量
     if let Ok(s) = std::env::var("PANEL_JWT_SECRET") {
-        anyhow::ensure!(
-            s.len() >= 32,
-            "PANEL_JWT_SECRET 至少需要 32 字节"
-        );
+        anyhow::ensure!(s.len() >= 32, "PANEL_JWT_SECRET 至少需要 32 字节");
         tracing::info!("JWT 密钥已从环境变量 PANEL_JWT_SECRET 加载");
         return Ok(s.into_bytes());
     }
@@ -96,8 +96,7 @@ pub fn load_jwt_secret(data_dir: &Path) -> Result<Vec<u8>> {
             .to_string();
         anyhow::ensure!(secret.len() == 64, "密钥文件格式错误（应为 64 位十六进制）");
         let mut key = vec![0u8; 32];
-        hex::decode_to_slice(&secret, &mut key)
-            .map_err(|_| anyhow::anyhow!("解析密钥文件失败"))?;
+        hex::decode_to_slice(&secret, &mut key).map_err(|_| anyhow::anyhow!("解析密钥文件失败"))?;
         tracing::info!("JWT 密钥已从 {} 加载", key_path.display());
         return Ok(key);
     }
@@ -107,7 +106,10 @@ pub fn load_jwt_secret(data_dir: &Path) -> Result<Vec<u8>> {
     let mut key = vec![0u8; 32];
     hex::decode_to_slice(&secret, &mut key).map_err(|_| anyhow::anyhow!("解析密钥失败"))?;
     write_private(&key_path, &secret)?;
-    tracing::info!("已生成新的 JWT 密钥文件：{}（权限 0600，请妥善备份）", key_path.display());
+    tracing::info!(
+        "已生成新的 JWT 密钥文件：{}（权限 0600，请妥善备份）",
+        key_path.display()
+    );
     Ok(key)
 }
 
@@ -115,7 +117,10 @@ pub fn load_jwt_secret(data_dir: &Path) -> Result<Vec<u8>> {
 /// 返回 (token, jti, exp)：会话登记表（2.4）需要 jti/exp 建会话行。
 pub fn issue_token(secret: &[u8], user_id: i64) -> Result<(String, String, i64)> {
     let exp = time::OffsetDateTime::now_utc().unix_timestamp() + 60 * 60 * 24;
-    let jti: String = random_bytes(16).iter().map(|b| format!("{b:02x}")).collect();
+    let jti: String = random_bytes(16)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     let claims = Claims {
         sub: user_id,
         exp: exp as usize,
@@ -348,13 +353,11 @@ impl LoginThrottle {
             }
         }
 
-        let entry = map
-            .entry(Self::key(ip, username))
-            .or_insert(Failure {
-                count: 0,
-                last: now,
-                next_allowed: now,
-            });
+        let entry = map.entry(Self::key(ip, username)).or_insert(Failure {
+            count: 0,
+            last: now,
+            next_allowed: now,
+        });
 
         // 距上次失败已超出窗口，视为新一轮
         if now.duration_since(entry.last) >= FAILURE_WINDOW {

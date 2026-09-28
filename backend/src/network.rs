@@ -11,7 +11,10 @@ async fn json_cmd(program: &str, args: &[&str]) -> anyhow::Result<Value> {
         .with_context(|| format!("调用 {program} 失败"))?;
     if !out.status.success() {
         // P1-3：命令 stderr 只进日志，响应体不回显（防内部细节泄露）
-        tracing::warn!("{program} stderr：{}", String::from_utf8_lossy(&out.stderr).trim());
+        tracing::warn!(
+            "{program} stderr：{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
         anyhow::bail!("{program} 执行失败，详见服务端日志");
     }
     let v: Value =
@@ -46,13 +49,9 @@ pub async fn connections() -> anyhow::Result<Vec<Value>> {
     for line in text.lines().skip(1) {
         // 列：State Recv-Q Send-Q Local:Port Peer:Port [Process]
         let mut it = line.split_whitespace();
-        let (Some(state), Some(recv_q), Some(send_q), Some(local), Some(peer)) = (
-            it.next(),
-            it.next(),
-            it.next(),
-            it.next(),
-            it.next(),
-        ) else {
+        let (Some(state), Some(recv_q), Some(send_q), Some(local), Some(peer)) =
+            (it.next(), it.next(), it.next(), it.next(), it.next())
+        else {
             continue;
         };
         // 进程信息为剩余部分
@@ -78,8 +77,7 @@ pub async fn dns() -> anyhow::Result<Vec<String>> {
         .lines()
         .filter_map(|l| {
             let t = l.trim();
-            t.strip_prefix("nameserver")
-                .map(|s| s.trim().to_string())
+            t.strip_prefix("nameserver").map(|s| s.trim().to_string())
         })
         .collect();
     Ok(servers)

@@ -49,12 +49,15 @@ fn classify(id: &str, like: &str) -> Option<Family> {
 /// 检测当前发行版并写入全局。不支持的发行版返回 Err，
 /// main 据此打印错误并退出；后续各模块通过 family() 分派包管理命令。
 pub fn init() -> Result<(), String> {
-    let content =
-        std::fs::read_to_string("/etc/os-release").map_err(|e| format!("无法读取 /etc/os-release：{e}"))?;
+    let content = std::fs::read_to_string("/etc/os-release")
+        .map_err(|e| format!("无法读取 /etc/os-release：{e}"))?;
     let id = field(&content, "ID").unwrap_or_default();
     let like = field(&content, "ID_LIKE").unwrap_or_default();
-    let pretty = field(&content, "PRETTY_NAME")
-        .unwrap_or(if id.is_empty() { "未知系统".to_string() } else { id.clone() });
+    let pretty = field(&content, "PRETTY_NAME").unwrap_or(if id.is_empty() {
+        "未知系统".to_string()
+    } else {
+        id.clone()
+    });
     let family = classify(&id, &like).ok_or_else(|| {
         format!("当前系统 {pretty} 暂不支持（目前支持 Debian/Ubuntu 系与 Arch 系），服务停止启动")
     })?;
@@ -72,7 +75,10 @@ pub fn family() -> Family {
 
 /// 发行版描述（PRETTY_NAME），用于启动日志
 pub fn pretty() -> &'static str {
-    CURRENT.get().map(|d| d.pretty.as_str()).unwrap_or("未知系统")
+    CURRENT
+        .get()
+        .map(|d| d.pretty.as_str())
+        .unwrap_or("未知系统")
 }
 
 #[cfg(test)]
@@ -110,7 +116,10 @@ mod tests {
     fn field_parsing() {
         let content = "NAME=\"Debian GNU/Linux\"\nID=debian\nID_LIKE=\"\"\nPRETTY_NAME=\"Debian GNU/Linux 13 (trixie)\"\n";
         assert_eq!(field(content, "ID").as_deref(), Some("debian"));
-        assert_eq!(field(content, "PRETTY_NAME").as_deref(), Some("Debian GNU/Linux 13 (trixie)"));
+        assert_eq!(
+            field(content, "PRETTY_NAME").as_deref(),
+            Some("Debian GNU/Linux 13 (trixie)")
+        );
         // 空值应视为 None
         assert_eq!(field(content, "ID_LIKE"), None);
         // 不存在的键

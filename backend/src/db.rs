@@ -93,16 +93,36 @@ impl Db {
     /// 新增迁移 = 在 backend/migrations/ 建 `NNNN_名字.sql` + 在此追加一行；
     /// 版本号只增不减，已发布迁移的内容不得再修改。
     const MIGRATIONS: &'static [(i64, &'static str, &'static str)] = &[
-        (1, "0001_baseline.sql", include_str!("../migrations/0001_baseline.sql")),
+        (
+            1,
+            "0001_baseline.sql",
+            include_str!("../migrations/0001_baseline.sql"),
+        ),
         (
             2,
             "0002_metrics_hourly.sql",
             include_str!("../migrations/0002_metrics_hourly.sql"),
         ),
-        (3, "0003_users_rbac.sql", include_str!("../migrations/0003_users_rbac.sql")),
-        (4, "0004_audit_log.sql", include_str!("../migrations/0004_audit_log.sql")),
-        (5, "0005_sessions.sql", include_str!("../migrations/0005_sessions.sql")),
-        (6, "0006_alerts.sql", include_str!("../migrations/0006_alerts.sql")),
+        (
+            3,
+            "0003_users_rbac.sql",
+            include_str!("../migrations/0003_users_rbac.sql"),
+        ),
+        (
+            4,
+            "0004_audit_log.sql",
+            include_str!("../migrations/0004_audit_log.sql"),
+        ),
+        (
+            5,
+            "0005_sessions.sql",
+            include_str!("../migrations/0005_sessions.sql"),
+        ),
+        (
+            6,
+            "0006_alerts.sql",
+            include_str!("../migrations/0006_alerts.sql"),
+        ),
     ];
 
     /// 按版本号升序执行未应用的迁移。
@@ -113,10 +133,16 @@ impl Db {
     /// IF NOT EXISTS 的整体可重放性，升级路径见测试 legacy_db_upgrades。
     fn migrate(&self) -> Result<()> {
         let mut conn = self.pool.get().context("获取数据库连接失败")?;
-        conn.execute_batch("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);")
-            .context("创建 schema_version 表失败")?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);",
+        )
+        .context("创建 schema_version 表失败")?;
         let current: i64 = conn
-            .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |r| r.get(0))
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
             .context("读取数据库版本号失败")?;
         anyhow::ensure!(
             Self::MIGRATIONS.windows(2).all(|w| w[0].0 < w[1].0),
@@ -142,8 +168,7 @@ impl Db {
     pub fn vacuum_into(&self, target: &Path) -> Result<()> {
         let conn = self.pool.get().context("获取数据库连接失败")?;
         let path_str = target.to_string_lossy().replace('\'', "''");
-        conn
-            .execute_batch(&format!("VACUUM INTO '{path_str}'"))
+        conn.execute_batch(&format!("VACUUM INTO '{path_str}'"))
             .context("VACUUM INTO 备份失败")?;
         Ok(())
     }
@@ -163,11 +188,9 @@ impl Db {
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
         let conn = self.pool.get().context("获取数据库连接失败")?;
         let value = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = ?1",
-                [key],
-                |row| row.get::<_, String>(0),
-            )
+            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+                row.get::<_, String>(0)
+            })
             .optional()?;
         Ok(value)
     }
@@ -275,12 +298,16 @@ impl Db {
     /// 列出全部用户（不含密码/盐）
     pub fn list_users(&self) -> Result<Vec<(i64, String, String, bool)>> {
         let conn = self.pool.get().context("获取数据库连接失败")?;
-        let mut stmt = conn.prepare(
-            "SELECT id, username, role, must_change FROM users ORDER BY id",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT id, username, role, must_change FROM users ORDER BY id")?;
         let rows = stmt
             .query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get::<_, i64>(3)? != 0))
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get::<_, i64>(3)? != 0,
+                ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
@@ -316,8 +343,9 @@ impl Db {
     /// 用户是否存在（删除/改名前的自保护检查用）
     pub fn user_exists(&self, id: i64) -> Result<bool> {
         let conn = self.pool.get().context("获取数据库连接失败")?;
-        let n: i64 =
-            conn.query_row("SELECT COUNT(*) FROM users WHERE id = ?1", [id], |r| r.get(0))?;
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM users WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })?;
         Ok(n > 0)
     }
 
@@ -454,11 +482,10 @@ impl Db {
     /// 会话是否仍在登记表中（鉴权时校验，被踢出/改密失效的 token 查不到）
     pub fn session_exists(&self, jti: &str) -> Result<bool> {
         let conn = self.pool.get().context("获取数据库连接失败")?;
-        let n: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM sessions WHERE jti = ?1",
-            [jti],
-            |r| r.get(0),
-        )?;
+        let n: i64 =
+            conn.query_row("SELECT COUNT(*) FROM sessions WHERE jti = ?1", [jti], |r| {
+                r.get(0)
+            })?;
         Ok(n > 0)
     }
 
@@ -514,13 +541,7 @@ impl Db {
         let conn = self.pool.get().context("获取数据库连接失败")?;
         conn.execute(
             "INSERT INTO metrics (ts, cpu, mem_used, net_in, net_out) VALUES (?1, ?2, ?3, ?4, ?5)",
-            (
-                p.ts,
-                p.cpu,
-                p.mem_used,
-                p.net_in_per_sec,
-                p.net_out_per_sec,
-            ),
+            (p.ts, p.cpu, p.mem_used, p.net_in_per_sec, p.net_out_per_sec),
         )?;
         Ok(())
     }
@@ -576,7 +597,10 @@ impl Db {
                 [raw_before],
             )?;
             conn.execute("DELETE FROM metrics WHERE ts < ?1", [raw_before])?;
-            conn.execute("DELETE FROM metrics_hourly WHERE hour_ts < ?1", [hourly_before])?;
+            conn.execute(
+                "DELETE FROM metrics_hourly WHERE hour_ts < ?1",
+                [hourly_before],
+            )?;
             Ok(())
         })();
         match r {
@@ -592,7 +616,13 @@ impl Db {
     /// 历史查询（1.2：自动按时间跨度选表）。
     /// 起点落在原始保留窗口内 → 查 5 秒原始表；更早 → 查小时聚合表。
     /// 返回按时间升序、最多 limit 个点（取窗口尾部）。
-    pub fn history(&self, from: i64, to: i64, raw_from: i64, limit: i64) -> Result<Vec<MetricPoint>> {
+    pub fn history(
+        &self,
+        from: i64,
+        to: i64,
+        raw_from: i64,
+        limit: i64,
+    ) -> Result<Vec<MetricPoint>> {
         let conn = self.pool.get().context("获取数据库连接失败")?;
         let sql = if from >= raw_from {
             "SELECT ts, cpu, mem_used, net_in, net_out FROM metrics
@@ -616,7 +646,6 @@ impl Db {
         rows.reverse();
         Ok(rows)
     }
-
 }
 
 /// 把一个同步的数据库操作挪到阻塞线程池执行。
@@ -782,7 +811,11 @@ impl Db {
         blocking(move || db.session_remove_user(user_id)).await
     }
 
-    pub async fn session_remove_user_except_async(&self, user_id: i64, keep_jti: &str) -> Result<u64> {
+    pub async fn session_remove_user_except_async(
+        &self,
+        user_id: i64,
+        keep_jti: &str,
+    ) -> Result<u64> {
         let db = self.clone();
         let j = keep_jti.to_string();
         blocking(move || db.session_remove_user_except(user_id, &j)).await
@@ -815,7 +848,11 @@ impl Db {
         blocking(move || db.alert_event_add(ts, &metric, value, threshold, &state)).await
     }
 
-    pub async fn alert_event_list_async(&self, limit: i64, offset: i64) -> Result<Vec<AlertEventRow>> {
+    pub async fn alert_event_list_async(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<AlertEventRow>> {
         let db = self.clone();
         blocking(move || db.alert_event_list(limit, offset)).await
     }
@@ -856,7 +893,6 @@ impl Db {
         let db = self.clone();
         blocking(move || db.history(from, to, raw_from, limit)).await
     }
-
 }
 
 /// rusqlite 没有 re-export this trait，这里引入供 `.optional()` 使用
@@ -872,7 +908,10 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir()
-            .join(format!("lyys_mig_test_{tag}_{}_{unique}", std::process::id()))
+            .join(format!(
+                "lyys_mig_test_{tag}_{}_{unique}",
+                std::process::id()
+            ))
             .to_string_lossy()
             .into_owned()
     }
@@ -1104,8 +1143,16 @@ mod tests {
         let path = temp_db_path("audit");
         {
             let db = Db::open(&path).unwrap();
-            db.audit(100, Some(1), "admin", "POST", "/api/files/delete", 200, "1.2.3.4")
-                .unwrap();
+            db.audit(
+                100,
+                Some(1),
+                "admin",
+                "POST",
+                "/api/files/delete",
+                200,
+                "1.2.3.4",
+            )
+            .unwrap();
             db.audit(200, None, "-", "POST", "/api/login", 401, "9.9.9.9")
                 .unwrap();
             let rows = db.audit_list(10, 0).unwrap();

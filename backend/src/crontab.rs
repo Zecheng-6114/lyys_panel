@@ -25,7 +25,8 @@ pub struct CronEntry {
 fn valid_field(f: &str) -> bool {
     !f.is_empty()
         && f.len() <= 32
-        && f.chars().all(|c| c.is_ascii_digit() || matches!(c, '*' | '/' | ',' | '-' | '?'))
+        && f.chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '*' | '/' | ',' | '-' | '?'))
 }
 
 impl CronEntry {
@@ -60,7 +61,11 @@ impl CronEntry {
 
 /// 读取当前 root crontab 原始文本
 async fn read_raw() -> anyhow::Result<String> {
-    let out = Command::new("crontab").arg("-l").output().await.context("调用 crontab 失败")?;
+    let out = Command::new("crontab")
+        .arg("-l")
+        .output()
+        .await
+        .context("调用 crontab 失败")?;
     // 没有 crontab 时返回非 0，视为空
     if !out.status.success() {
         return Ok(String::new());
@@ -87,10 +92,16 @@ async fn write_raw(text: &str) -> anyhow::Result<()> {
         .context("写入 crontab 失败")?;
     child.stdin.as_mut().unwrap().flush().await.ok();
     drop(child.stdin.take());
-    let out = child.wait_with_output().await.context("等待 crontab 失败")?;
+    let out = child
+        .wait_with_output()
+        .await
+        .context("等待 crontab 失败")?;
     if !out.status.success() {
         // P1-3：命令 stderr 只进日志，响应体不回显（防内部细节泄露）
-        tracing::warn!("crontab stderr：{}", String::from_utf8_lossy(&out.stderr).trim());
+        tracing::warn!(
+            "crontab stderr：{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
         anyhow::bail!("写入 crontab 失败，详见服务端日志");
     }
     Ok(())

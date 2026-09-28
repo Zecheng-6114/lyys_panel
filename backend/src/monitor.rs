@@ -73,7 +73,10 @@ impl Monitor {
 
         // 网络速率 = (本次累计 - 上次累计) / 时间间隔
         let now = Instant::now();
-        let dt = now.duration_since(self.last_instant).as_secs_f64().max(1e-6);
+        let dt = now
+            .duration_since(self.last_instant)
+            .as_secs_f64()
+            .max(1e-6);
         let mut net_in = 0u64;
         let mut net_out = 0u64;
         let mut new_net = HashMap::new();
@@ -136,10 +139,7 @@ impl Monitor {
 
     /// 进程列表（按 CPU 降序）
     pub fn processes(&mut self) -> Vec<ProcessInfo> {
-        self.sys.refresh_processes(
-            ProcessesToUpdate::All,
-            true,
-        );
+        self.sys.refresh_processes(ProcessesToUpdate::All, true);
         let mut list: Vec<ProcessInfo> = self
             .sys
             .processes()
@@ -209,7 +209,13 @@ pub fn spawn_sampler(state: AppState) {
                 let state_str = if ev.firing { "firing" } else { "resolved" };
                 let now = time::OffsetDateTime::now_utc().unix_timestamp();
                 if let Err(e) = db
-                    .alert_event_add_async(now, metric.clone(), ev.value, ev.threshold, state_str.into())
+                    .alert_event_add_async(
+                        now,
+                        metric.clone(),
+                        ev.value,
+                        ev.threshold,
+                        state_str.into(),
+                    )
                     .await
                 {
                     tracing::warn!("写入告警事件失败：{e}");
@@ -217,7 +223,11 @@ pub fn spawn_sampler(state: AppState) {
                 let db2 = db.clone();
                 let msg = format!(
                     "[LYYS 面板告警] {metric} {}：当前 {:.1}%，阈值 {:.0}%",
-                    if ev.firing { "超过" } else { "恢复到阈值以下" },
+                    if ev.firing {
+                        "超过"
+                    } else {
+                        "恢复到阈值以下"
+                    },
                     ev.value,
                     ev.threshold
                 );
@@ -234,7 +244,11 @@ pub fn spawn_sampler(state: AppState) {
                         }
                     });
                 }
-                tracing::info!("告警事件：{metric} {:.1}% 阈值 {:.0}%（{state_str}）", ev.value, ev.threshold);
+                tracing::info!(
+                    "告警事件：{metric} {:.1}% 阈值 {:.0}%（{state_str}）",
+                    ev.value,
+                    ev.threshold
+                );
             }
             // 每 720 次采样（约 1 小时）执行一次保留策略
             ticks += 1;
@@ -273,11 +287,12 @@ pub fn spawn_sampler(state: AppState) {
                 // 3.1：每日自动备份（VACUUM 是重 IO 操作，放 spawn_blocking）
                 let db3 = db.clone();
                 let dir3 = data_dir.clone();
-                if let Err(e) =
-                    tokio::task::spawn_blocking(move || crate::backup::maybe_daily_backup(&db3, &dir3))
-                        .await
-                        .map_err(anyhow::Error::from)
-                        .and_then(|r| r)
+                if let Err(e) = tokio::task::spawn_blocking(move || {
+                    crate::backup::maybe_daily_backup(&db3, &dir3)
+                })
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|r| r)
                 {
                     tracing::warn!("每日自动备份失败：{e}");
                 }

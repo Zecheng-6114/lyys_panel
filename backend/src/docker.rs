@@ -6,10 +6,10 @@
 //! - 面板以 root 运行，直接访问 /var/run/docker.sock，不需要把用户加进 docker 组；
 //! - 每个外部命令都带超时，避免 daemon 卡住时请求永远挂着。
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use tokio::process::Command;
-use tokio::time::{Duration, timeout};
+use tokio::time::{timeout, Duration};
 
 /// Docker 环境状态。前端据此决定显示控制面板还是安装入口。
 #[derive(Serialize)]
@@ -102,7 +102,10 @@ async fn run(program: &str, args: &[&str], secs: u64, what: &str) -> Result<Stri
     let out = res.context(format!("调用 {program} 失败，请确认已安装并启动 Docker"))?;
     if !out.status.success() {
         // P1-3：命令 stderr 只进日志，响应体不回显（防内部细节泄露）
-        tracing::warn!("{what}失败，{program} stderr：{}", String::from_utf8_lossy(&out.stderr).trim());
+        tracing::warn!(
+            "{what}失败，{program} stderr：{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
         anyhow::bail!("{what}失败，详见服务端日志");
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
@@ -153,7 +156,13 @@ pub async fn status() -> Result<DockerStatus> {
 
     // 2) daemon 能不能连上。docker info 需要真正与 daemon 通信，
     //    比 ps 更早失败，是判断「装了但没启动」的可靠依据。
-    let info = timeout(Duration::from_secs(LIST_TIMEOUT), Command::new("docker").args(["info", "--format", "{{.ServerVersion}}"]).output()).await;
+    let info = timeout(
+        Duration::from_secs(LIST_TIMEOUT),
+        Command::new("docker")
+            .args(["info", "--format", "{{.ServerVersion}}"])
+            .output(),
+    )
+    .await;
     let running = matches!(&info, Ok(Ok(o)) if o.status.success());
     let error = if running {
         String::new()
@@ -257,9 +266,15 @@ pub async fn containers() -> Result<Vec<ContainerInfo>> {
     .await?;
 
     // docker stats 只统计运行中的容器，先取一份按 ID 索引，缺失即填空
-    let mut stats: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
+    let mut stats: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
     if let Ok(s) = docker(
-        &["stats", "--no-stream", "--format", "{{.ID}}\t{{.CPUPerc}}\t{{.MemUsage}}"],
+        &[
+            "stats",
+            "--no-stream",
+            "--format",
+            "{{.ID}}\t{{.CPUPerc}}\t{{.MemUsage}}",
+        ],
         LIST_TIMEOUT,
     )
     .await
@@ -275,7 +290,15 @@ pub async fn containers() -> Result<Vec<ContainerInfo>> {
     let mut list = Vec::new();
     for line in text.lines() {
         let mut it = line.split('\t');
-        let (Some(id), Some(name), Some(image), Some(state), Some(status), Some(ports), Some(running_for)) = (
+        let (
+            Some(id),
+            Some(name),
+            Some(image),
+            Some(state),
+            Some(status),
+            Some(ports),
+            Some(running_for),
+        ) = (
             it.next(),
             it.next(),
             it.next(),
@@ -283,7 +306,8 @@ pub async fn containers() -> Result<Vec<ContainerInfo>> {
             it.next(),
             it.next(),
             it.next(),
-        ) else {
+        )
+        else {
             continue;
         };
         let labels = it.next().unwrap_or("");
@@ -328,7 +352,11 @@ pub async fn logs(id: &str, tail: usize) -> Result<String> {
 /// 镜像列表
 pub async fn images() -> Result<Vec<ImageInfo>> {
     let text = docker(
-        &["images", "--format", "{{.ID}}\t{{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}"],
+        &[
+            "images",
+            "--format",
+            "{{.ID}}\t{{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}",
+        ],
         LIST_TIMEOUT,
     )
     .await?;
@@ -390,10 +418,19 @@ fn parse_compose_json(text: &str) -> Result<Vec<ComposeProject>> {
         if line.trim().is_empty() {
             continue;
         }
-        let v: serde_json::Value = serde_json::from_str(line).context("解析 compose ls 输出失败")?;
+        let v: serde_json::Value =
+            serde_json::from_str(line).context("解析 compose ls 输出失败")?;
         list.push(ComposeProject {
-            name: v.get("Name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-            status: v.get("Status").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            name: v
+                .get("Name")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            status: v
+                .get("Status")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
             config_files: v
                 .get("ConfigFiles")
                 .and_then(|x| x.as_str())
@@ -434,12 +471,18 @@ async fn compose_projects_from_labels() -> Result<Vec<ComposeProject>> {
         }
         let dir = labels
             .split(',')
-            .find_map(|kv| kv.trim().strip_prefix("com.docker.compose.project.working_dir="))
+            .find_map(|kv| {
+                kv.trim()
+                    .strip_prefix("com.docker.compose.project.working_dir=")
+            })
             .unwrap_or("")
             .to_string();
         let cfg = labels
             .split(',')
-            .find_map(|kv| kv.trim().strip_prefix("com.docker.compose.project.config_files="))
+            .find_map(|kv| {
+                kv.trim()
+                    .strip_prefix("com.docker.compose.project.config_files=")
+            })
             .unwrap_or("")
             .to_string();
         let entry = map.entry(project).or_insert((0, 0, dir, cfg));
@@ -505,7 +548,10 @@ pub async fn compose_action(name: &str, act: Action) -> Result<String> {
         .context("调用 compose 失败")?;
     if !out.status.success() {
         // P1-3：命令 stderr 只进日志，响应体不回显
-        tracing::warn!("compose 操作失败，stderr：{}", String::from_utf8_lossy(&out.stderr).trim());
+        tracing::warn!(
+            "compose 操作失败，stderr：{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
         anyhow::bail!("compose 操作失败，详见服务端日志");
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
@@ -517,7 +563,10 @@ async fn locate_project(name: &str) -> Result<(String, String)> {
         if p.name == name {
             // v2 的 ConfigFiles 是绝对路径，工作目录取其父目录
             let dir = if p.working_dir.is_empty() && !p.config_files.is_empty() {
-                p.config_files.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default()
+                p.config_files
+                    .rsplit_once('/')
+                    .map(|(d, _)| d.to_string())
+                    .unwrap_or_default()
             } else {
                 p.working_dir.clone()
             };
@@ -568,16 +617,25 @@ pub async fn install() -> Result<String> {
     use crate::distro::Family;
     let mut log = String::new();
 
-    let (prog, update_args, install_args): (&str, &[&str], &[&str]) = match crate::distro::family() {
+    let (prog, update_args, install_args): (&str, &[&str], &[&str]) = match crate::distro::family()
+    {
         Family::Debian => (
             "apt-get",
             &["update"],
             &[
-                "install", "-y", "--no-install-recommends", "docker.io", "docker-cli",
+                "install",
+                "-y",
+                "--no-install-recommends",
+                "docker.io",
+                "docker-cli",
                 "docker-compose",
             ],
         ),
-        Family::Arch => ("pacman", &["-Sy", "--noconfirm"], &["-S", "--noconfirm", "docker", "docker-compose"]),
+        Family::Arch => (
+            "pacman",
+            &["-Sy", "--noconfirm"],
+            &["-S", "--noconfirm", "docker", "docker-compose"],
+        ),
     };
 
     log.push_str("=== 刷新软件源 ===\n");
@@ -598,7 +656,10 @@ pub async fn install() -> Result<String> {
     log.push_str(&String::from_utf8_lossy(&out.stdout));
     if !out.status.success() {
         // P1-3：命令 stderr 只进日志，响应体不回显
-        tracing::warn!("启动 docker 服务失败，systemctl stderr：{}", String::from_utf8_lossy(&out.stderr).trim());
+        tracing::warn!(
+            "启动 docker 服务失败，systemctl stderr：{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
         anyhow::bail!("启动 docker 服务失败，详见服务端日志");
     }
 

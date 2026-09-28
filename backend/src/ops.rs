@@ -6,10 +6,10 @@
 //! - smartctl 缺失 / lsblk 缺失时不报 5xx，返回 available=false 的降级提示，
 //!   前端据此展示说明而非空白。
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use tokio::process::Command;
-use tokio::time::{Duration, timeout};
+use tokio::time::{timeout, Duration};
 
 /// 单条命令超时（秒）
 const CMD_TIMEOUT: u64 = 20;
@@ -189,12 +189,8 @@ async fn probe_disk(dev: &str) -> DiskSmart {
             .unwrap_or("")
             .to_string(),
         health,
-        temperature: v
-            .pointer("/temperature/current")
-            .and_then(|x| x.as_i64()),
-        powered_on_hours: v
-            .pointer("/power_on_time/hours")
-            .and_then(|x| x.as_i64()),
+        temperature: v.pointer("/temperature/current").and_then(|x| x.as_i64()),
+        powered_on_hours: v.pointer("/power_on_time/hours").and_then(|x| x.as_i64()),
     }
 }
 

@@ -25,16 +25,22 @@ pub fn backups_dir(data_dir: &Path) -> PathBuf {
 /// 备份文件名校验：panel-YYYYMMDD-HHMMSS.db。
 /// 所有按名字操作文件的接口（下载/删除/恢复）都必须先过这里，杜绝路径穿越。
 pub fn is_valid_backup_name(name: &str) -> bool {
-    let Some(stem) = name.strip_prefix("panel-").and_then(|s| s.strip_suffix(".db")) else {
+    let Some(stem) = name
+        .strip_prefix("panel-")
+        .and_then(|s| s.strip_suffix(".db"))
+    else {
         return false;
     };
     let bytes = stem.as_bytes();
     bytes.len() == 15
         && bytes[8] == b'-'
-        && bytes
-            .iter()
-            .enumerate()
-            .all(|(i, b)| if i == 8 { *b == b'-' } else { b.is_ascii_digit() })
+        && bytes.iter().enumerate().all(|(i, b)| {
+            if i == 8 {
+                *b == b'-'
+            } else {
+                b.is_ascii_digit()
+            }
+        })
 }
 
 /// UTC 时间戳文件名
@@ -243,7 +249,10 @@ mod tests {
 
         // 备份内容可查：把备份文件当库打开，设置项还在
         let restored = Db::open(&backups_dir(&tmp).join(&list[0].name).to_string_lossy()).unwrap();
-        assert_eq!(restored.get_setting("probe").unwrap().as_deref(), Some("hello"));
+        assert_eq!(
+            restored.get_setting("probe").unwrap().as_deref(),
+            Some("hello")
+        );
         drop(restored);
 
         delete_backup(&tmp, &name).unwrap();
@@ -276,7 +285,9 @@ mod tests {
         let db = Db::open(&db_path).unwrap();
         assert_eq!(db.get_setting("stage").unwrap().as_deref(), Some("v1"));
         // 反悔备份存在
-        assert!(backups_dir(&tmp).join(format!("pre-restore-{name}")).exists());
+        assert!(backups_dir(&tmp)
+            .join(format!("pre-restore-{name}"))
+            .exists());
         // 无标记时 apply 返回 false
         assert!(!apply_pending_restore(&tmp, &db_path).unwrap());
         let _ = std::fs::remove_dir_all(&tmp);

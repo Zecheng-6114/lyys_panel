@@ -35,9 +35,9 @@ fn check_pattern(pattern: &str) -> anyhow::Result<()> {
     if pattern.is_empty()
         || pattern.starts_with('-')
         || pattern.len() > 128
-        || !pattern
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-' | '_' | ':' | ' ' | '*'))
+        || !pattern.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-' | '_' | ':' | ' ' | '*')
+        })
     {
         anyhow::bail!("非法搜索词：{pattern}");
     }
@@ -45,14 +45,20 @@ fn check_pattern(pattern: &str) -> anyhow::Result<()> {
 }
 
 /// 已安装包列表（可按名称关键字过滤，limit 限制返回条数）
-pub async fn list_installed(filter: Option<&str>, limit: usize) -> anyhow::Result<Vec<PackageInfo>> {
+pub async fn list_installed(
+    filter: Option<&str>,
+    limit: usize,
+) -> anyhow::Result<Vec<PackageInfo>> {
     match crate::distro::family() {
         Family::Debian => list_installed_deb(filter, limit).await,
         Family::Arch => list_installed_arch(filter, limit).await,
     }
 }
 
-async fn list_installed_deb(filter: Option<&str>, limit: usize) -> anyhow::Result<Vec<PackageInfo>> {
+async fn list_installed_deb(
+    filter: Option<&str>,
+    limit: usize,
+) -> anyhow::Result<Vec<PackageInfo>> {
     let mut cmd = Command::new("dpkg-query");
     cmd.args([
         "-W",
@@ -65,7 +71,10 @@ async fn list_installed_deb(filter: Option<&str>, limit: usize) -> anyhow::Resul
     let out = cmd.output().await.context("调用 dpkg-query 失败")?;
     if !out.status.success() {
         // P1-3：命令 stderr 只进日志，响应体不回显（防内部细节泄露）
-        tracing::warn!("dpkg-query stderr：{}", String::from_utf8_lossy(&out.stderr).trim());
+        tracing::warn!(
+            "dpkg-query stderr：{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
         anyhow::bail!("查询软件包失败，详见服务端日志");
     }
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -92,7 +101,10 @@ async fn list_installed_deb(filter: Option<&str>, limit: usize) -> anyhow::Resul
     Ok(list)
 }
 
-async fn list_installed_arch(filter: Option<&str>, limit: usize) -> anyhow::Result<Vec<PackageInfo>> {
+async fn list_installed_arch(
+    filter: Option<&str>,
+    limit: usize,
+) -> anyhow::Result<Vec<PackageInfo>> {
     // pacman -Q 输出全部本地已安装包：Name Version（与 dpkg-query 语义一致，含依赖包）
     let out = Command::new("pacman")
         .args(["-Q"])
@@ -101,7 +113,10 @@ async fn list_installed_arch(filter: Option<&str>, limit: usize) -> anyhow::Resu
         .context("调用 pacman 失败")?;
     if !out.status.success() {
         // P1-3：命令 stderr 只进日志，响应体不回显
-        tracing::warn!("pacman stderr：{}", String::from_utf8_lossy(&out.stderr).trim());
+        tracing::warn!(
+            "pacman stderr：{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
         anyhow::bail!("查询软件包失败，详见服务端日志");
     }
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -150,7 +165,10 @@ async fn upgradable_deb() -> anyhow::Result<Vec<PackageInfo>> {
         .context("调用 apt-get 失败")?;
     if !out.status.success() {
         // P1-3：命令 stderr 只进日志，响应体不回显
-        tracing::warn!("apt-get stderr：{}", String::from_utf8_lossy(&out.stderr).trim());
+        tracing::warn!(
+            "apt-get stderr：{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
         anyhow::bail!("检查升级失败，详见服务端日志");
     }
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -190,7 +208,10 @@ async fn upgradable_arch() -> anyhow::Result<Vec<PackageInfo>> {
     // pacman -Qu 在"无可升级包"时退出码为 1，属正常，需区分
     if !out.status.success() && out.status.code() != Some(1) {
         // P1-3：命令 stderr 只进日志，响应体不回显
-        tracing::warn!("pacman stderr：{}", String::from_utf8_lossy(&out.stderr).trim());
+        tracing::warn!(
+            "pacman stderr：{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
         anyhow::bail!("检查升级失败，详见服务端日志");
     }
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -365,7 +386,8 @@ pub async fn remove(names: &[String]) -> anyhow::Result<String> {
     let mut cmd = match crate::distro::family() {
         Family::Debian => {
             let mut cmd = Command::new("apt-get");
-            cmd.args(["remove", "-y"]).env("DEBIAN_FRONTEND", "noninteractive");
+            cmd.args(["remove", "-y"])
+                .env("DEBIAN_FRONTEND", "noninteractive");
             cmd
         }
         Family::Arch => {
@@ -391,16 +413,21 @@ pub async fn run_pkg_cmd(cmd: &mut Command, what: &str) -> anyhow::Result<String
     let cloned = tmp.clone();
     // try_clone 的错误若不包 context 会以裸 io 错误（含 errno）成为错误链最外层，
     // 进而进入响应体（P1-3）
-    cmd.stdout(Stdio::from(file.try_clone().context("复制临时文件句柄失败")?))
-        .stderr(Stdio::from(file))
-        .stdin(Stdio::null());
+    cmd.stdout(Stdio::from(
+        file.try_clone().context("复制临时文件句柄失败")?,
+    ))
+    .stderr(Stdio::from(file))
+    .stdin(Stdio::null());
     let status = cmd.status().await.context("调用包管理器失败")?;
     let output = tokio::fs::read_to_string(&cloned).await.unwrap_or_default();
     let _ = tokio::fs::remove_file(&cloned).await;
     if !status.success() {
         // P1-3：完整命令输出（含 stderr）只进日志，响应体不回显
         tracing::warn!("{what}失败，包管理器输出：\n{output}");
-        anyhow::bail!("{what}失败（退出码 {}），详见服务端日志", status.code().unwrap_or(-1));
+        anyhow::bail!(
+            "{what}失败（退出码 {}），详见服务端日志",
+            status.code().unwrap_or(-1)
+        );
     }
     Ok(output)
 }
@@ -525,7 +552,15 @@ mod tests {
         assert!(search(&"a".repeat(129), 10).await.is_err());
         assert!(search("-c /etc/shadow", 10).await.is_err());
         // shell 元字符与非法字符：对齐白名单后一律拒绝
-        for bad in ["lib; touch /tmp/pwn", "a|b", "a&&b", "$(id)", "`id`", "a>b", "a\nb"] {
+        for bad in [
+            "lib; touch /tmp/pwn",
+            "a|b",
+            "a&&b",
+            "$(id)",
+            "`id`",
+            "a>b",
+            "a\nb",
+        ] {
             assert!(search(bad, 10).await.is_err(), "应拒绝搜索词：{bad}");
         }
         // 合法用法：多词与通配符不得被误杀（走到外部命令调用，

@@ -58,7 +58,10 @@ fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     let (x, y) = (segs(a), segs(b));
     let n = x.len().max(y.len());
     for i in 0..n {
-        let (xi, yi) = (x.get(i).copied().unwrap_or(0), y.get(i).copied().unwrap_or(0));
+        let (xi, yi) = (
+            x.get(i).copied().unwrap_or(0),
+            y.get(i).copied().unwrap_or(0),
+        );
         if xi != yi {
             return xi.cmp(&yi);
         }
@@ -68,9 +71,7 @@ fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
 
 /// 检查 GitHub 是否有新版本（不下载）
 pub async fn check(client: &reqwest::Client) -> Result<UpdateStatus> {
-    let url = format!(
-        "https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest"
-    );
+    let url = format!("https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest");
     let resp = client
         .get(&url)
         .header(reqwest::header::USER_AGENT, "lyys-panel-updater")
@@ -103,9 +104,7 @@ pub async fn check(client: &reqwest::Client) -> Result<UpdateStatus> {
 
 /// 下载 GitHub 最新版的 lyys-panel 资产。返回 (数据, 来源标签)。
 pub async fn download_github(client: &reqwest::Client) -> Result<(Vec<u8>, String)> {
-    let url = format!(
-        "https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest"
-    );
+    let url = format!("https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest");
     let release: ReleaseJson = client
         .get(&url)
         .header(reqwest::header::USER_AGENT, "lyys-panel-updater")
@@ -144,10 +143,7 @@ pub fn validate_binary(bytes: &[u8]) -> Result<()> {
         "文件过小（{} 字节），不是有效二进制",
         bytes.len()
     );
-    anyhow::ensure!(
-        bytes.starts_with(b"\x7fELF"),
-        "文件不是 ELF 可执行格式"
-    );
+    anyhow::ensure!(bytes.starts_with(b"\x7fELF"), "文件不是 ELF 可执行格式");
     Ok(())
 }
 
@@ -182,7 +178,10 @@ mod tests {
     fn version_comparison() {
         assert_eq!(version_cmp("v0.2.0", "0.1.0"), std::cmp::Ordering::Greater);
         assert_eq!(version_cmp("0.1.0", "v0.1.0"), std::cmp::Ordering::Equal);
-        assert_eq!(version_cmp("v1.0.0", "v0.99.9"), std::cmp::Ordering::Greater);
+        assert_eq!(
+            version_cmp("v1.0.0", "v0.99.9"),
+            std::cmp::Ordering::Greater
+        );
         assert_eq!(version_cmp("0.9", "0.9.1"), std::cmp::Ordering::Less);
         assert_eq!(version_cmp("v10.0", "v9.0"), std::cmp::Ordering::Greater);
     }
@@ -191,7 +190,8 @@ mod tests {
     fn binary_validation() {
         assert!(validate_binary(b"not an elf").is_err());
         assert!(validate_binary(b"\x7fELF small").is_err());
-        let fake = vec![0x7f, b'E', b'L', b'F', 2, 1].into_iter()
+        let fake = vec![0x7f, b'E', b'L', b'F', 2, 1]
+            .into_iter()
             .chain(std::iter::repeat_n(0, 2 * 1024 * 1024))
             .collect::<Vec<u8>>();
         assert!(validate_binary(&fake).is_ok());
