@@ -1,7 +1,7 @@
 # AGENTS.md — AI 在本仓库的 git 行为规则（强制）
 
-完整提交规范见 `CONTRIBUTING.md`，由 `commit-msg` 钩子机械执行。本文件只列
-AI 必须遵守的行为约束。
+完整提交规范见 `CONTRIBUTING.md`（Conventional Commits + SemVer + Keep a
+Changelog），由 `commit-msg` 钩子机械执行。本文件只列 AI 必须遵守的行为约束。
 
 ## 铁律
 
@@ -18,6 +18,10 @@ AI 必须遵守的行为约束。
    再提；禁止 `git add -A` / `git add .`，逐文件暂存。
 7. **提交前必须验证。** `cargo clippy --all-targets -- -D warnings`（后端）与
    `npm run build`（前端有改动时）全部通过才允许进入提交流程。
+8. **提交信息格式为 Conventional Commits。** 主题 `<type>[(scope)][!]: 小写祈使句`
+   （type ∈ feat/fix/perf/refactor/docs/test/build/ci/chore/revert）；正文必填
+   what & why；破坏性变更加 `!` 且必须带 `BREAKING CHANGE:` 行；`git commit -s`
+   生成 Signed-off-by。细则与示例见 `CONTRIBUTING.md` 第二节。
 
 ## 提交前检查清单（AI 逐项确认）
 
@@ -26,6 +30,7 @@ AI 必须遵守的行为约束。
 - [ ] `git status` / `git diff` 自查：无意外文件、无调试残留、无密钥
 - [ ] 逐文件 `git add`，范围与本次逻辑单元一致
 - [ ] 提交信息符合 `CONTRIBUTING.md` 第二节且用户已批准
+- [ ] type/scope 与实际改动匹配（feat=新功能、fix=修复、refactor=重构…）
 - [ ] 使用 `git commit -s`（自动生成 Signed-off-by）
 
 ## 历史背景
@@ -34,3 +39,7 @@ AI 必须遵守的行为约束。
 移除；2026-09-24 以全新历史恢复并制定本规范。同日经用户明确批准，将全新历史
 强推覆盖 GitHub 远程 `Zecheng-6114/lyys_panel`（main），旧历史（原
 main=6597ee7）自此不再是分支头，已不保证可查。
+
+2026-09-28 经用户决定，提交信息由 Linux 风格（`subsystem: Description`）迁移到
+业界标准 Conventional Commits，钩子与 `CONTRIBUTING.md` 同步重写；历史提交不
+改写，钩子仅约束新提交。
