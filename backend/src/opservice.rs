@@ -35,10 +35,72 @@ impl Action {
     }
 }
 
+/// 电源/面板级操作（3.x 补充：统一的重启与关机入口）
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PowerAction {
+    /// 重启面板自身服务（自更新后生效用）
+    PanelRestart,
+    /// 重启整机
+    Reboot,
+    /// 关机
+    Shutdown,
+}
+
+impl PowerAction {
+    /// 对应的 systemctl 动词；面板重启返回专用处理标记
+    fn systemctl_arg(&self) -> Option<&'static str> {
+        match self {
+            PowerAction::PanelRestart => None,
+            PowerAction::Reboot => Some("reboot"),
+            PowerAction::Shutdown => Some("poweroff"),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PowerAction::PanelRestart => "panel-restart",
+            PowerAction::Reboot => "reboot",
+            PowerAction::Shutdown => "shutdown",
+        }
+    }
+}
+
+/// 面板服务单元名（与部署 systemd 单元一致）
+const PANEL_UNIT: &str = "lyys-panel";
+
+/// 执行电源级操作。面板重启走 `systemctl restart lyys-panel`；整机
+/// 重启/关机走 `systemctl reboot|poweroff`（root 运行，无需 polkit 认证）。
+pub async fn power(act: PowerAction) -> Result<serde_json::Value> {
+    let out = match act.systemctl_arg() {
+        Some(verb) => Command::new("systemctl").arg(verb).output().await,
+        None => {
+            Command::new("systemctl")
+                .arg("restart")
+                .arg(PANEL_UNIT)
+                .output()
+                .await
+        }
+    }
+    .context("执行 systemctl 失败")?;
+    Ok(json!({
+        "ok": out.status.success(),
+        "action": act.as_str(),
+        "stderr": String::from_utf8_lossy(&out.stderr).into_owned(),
+    }))
+}
+
 /// 列出所有已加载的 systemd 单元（type=service）
 pub async fn list() -> Result<Vec<ServiceInfo>> {
     let out = Command::new("systemctl")
-        .args(["list-units", "--type=service", "--all", "--no-legend", "--plain", "--output=json"])
+        .args([
+            "list-units",
+            "--type=service",
+            "--all",
+            "--no-legend",
+            "--plain",
+            "--output=json",
+        ])
         .output()
         .await
         .context("调用 systemctl 失败，请确认系统使用 systemd")?;
@@ -53,9 +115,21 @@ pub async fn list() -> Result<Vec<ServiceInfo>> {
             let name = v.get("unit")?.as_str()?.to_string();
             Some(ServiceInfo {
                 name,
-                load: v.get("load").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                active: v.get("active").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                sub: v.get("sub").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                load: v
+                    .get("load")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                active: v
+                    .get("active")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                sub: v
+                    .get("sub")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 description: v
                     .get("description")
                     .and_then(|x| x.as_str())
@@ -70,7 +144,13 @@ pub async fn list() -> Result<Vec<ServiceInfo>> {
 /// 文本模式回退解析（兼容不支持 json 输出的 systemctl）
 async fn list_from_text() -> Result<Vec<ServiceInfo>> {
     let out = Command::new("systemctl")
-        .args(["list-units", "--type=service", "--all", "--no-legend", "--plain"])
+        .args([
+            "list-units",
+            "--type=service",
+            "--all",
+            "--no-legend",
+            "--plain",
+        ])
         .output()
         .await
         .context("调用 systemctl 失败")?;

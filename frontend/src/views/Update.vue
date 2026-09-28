@@ -20,8 +20,13 @@
         <span v-else class="dot-wrap"><i class="dot dot-off" />已是最新</span>
       </div>
       <div v-if="status?.has_update && !status.error" class="actions">
-        <el-button :loading="installing" @click="install">下载并安装</el-button>
+        <el-button type="primary" :loading="installing" @click="install">下载并安装</el-button>
         <span class="hint">安装完成后需重启面板服务生效</span>
+      </div>
+      <!-- 统一的重启入口：自更新替换二进制后在此生效 -->
+      <div class="actions">
+        <el-button :loading="restarting" @click="restartPanel">重启面板服务</el-button>
+        <span class="hint">重启当前面板进程（不影响服务器上的其他服务）</span>
       </div>
     </div>
 
@@ -59,9 +64,38 @@ const appVersion = __APP_VERSION__;
 const status = ref<UpdateStatus | null>(null);
 const checking = ref(false);
 const installing = ref(false);
+const restarting = ref(false);
 const uploading = ref(false);
 const fileInput = ref<HTMLInputElement | null>(null);
 const fileName = ref("");
+
+/// 重启面板服务：请求发出后进程会被 systemctl 重启，本请求可能因
+/// 服务中断而失败——两种情况都轮询 health 直到服务恢复。
+async function restartPanel() {
+  try {
+    await ElMessageBox.confirm(
+      "将重启面板服务（lyys-panel），期间页面短暂不可用，其他服务不受影响。确定继续？",
+      "重启确认",
+      { type: "warning", confirmButtonText: "重启", cancelButtonText: "取消" },
+    );
+  } catch {
+    return;
+  }
+  restarting.value = true;
+  http.post("/power", { action: "panel-restart" }).catch(() => {});
+  // 给旧进程一点退出时间，再开始探测
+  await new Promise((r) => setTimeout(r, 1500));
+  for (let i = 0; i < 20; i++) {
+    try {
+      await http.get("/health", { timeout: 2000 });
+      ElMessage.success("面板已重启");
+      break;
+    } catch {
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+  restarting.value = false;
+}
 
 async function check() {
   checking.value = true;
@@ -177,6 +211,10 @@ async function upload() {
 }
 .upload-row input[type="file"] {
   font-size: 13px;
+  color: var(--el-text-color-secondary);
+}
+.hint {
+  font-size: 12px;
   color: var(--el-text-color-secondary);
 }
 </style>

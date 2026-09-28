@@ -40,6 +40,31 @@
         </button>
         <div class="page-title">{{ pageTitle }}</div>
         <div class="top-actions">
+          <!-- 服务器电源操作：危险动作，仅 admin，二次确认 -->
+          <el-dropdown v-if="auth.isAdmin()" trigger="click" @command="onPower">
+            <button class="mini-btn icon-btn" type="button" aria-label="服务器电源" title="服务器电源">
+              <!-- 电源图标 -->
+              <svg
+                viewBox="0 0 24 24"
+                width="17"
+                height="17"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M18.36 6.64a9 9 0 1 1-12.73 0" />
+                <line x1="12" y1="2" x2="12" y2="12" />
+              </svg>
+            </button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="reboot">重启服务器</el-dropdown-item>
+                <el-dropdown-item command="shutdown">关机</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
           <button class="mini-btn" type="button" @click="openPwdDialog">改密</button>
           <button
             v-if="auth.isAdmin()"
@@ -197,6 +222,31 @@ const pageTitle = computed(() => titles[route.path] ?? "LYYS Panel");
 // 登出（P1-1）：先请求服务端吊销当前 token（旧 token 立即失效），
 // 再清本地凭证。吊销请求失败（如后端已不可达）不阻断本地登出，
 // token 本身有 24h 过期兜底。
+/// 服务器电源操作（admin）：二次确认后执行；机器断电/重启后无法收到
+/// 响应，直接给出提示即可。
+async function onPower(cmd: "reboot" | "shutdown") {
+  const label = cmd === "reboot" ? "重启服务器" : "关机";
+  try {
+    await ElMessageBox.confirm(
+      `该操作影响整台服务器上的所有服务，且执行后面板将不可用（${
+        cmd === "reboot" ? "需等待系统重启完成" : "需手动开机"
+      }）。确定${label}？`,
+      `${label}确认`,
+      { type: "warning", confirmButtonText: label, cancelButtonText: "取消" },
+    );
+  } catch {
+    return;
+  }
+  try {
+    await http.post("/power", { action: cmd });
+    ElMessage.warning(
+      cmd === "reboot" ? "服务器重启中，约 1-2 分钟后重新访问面板" : "服务器已关机，需手动开机",
+    );
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.error ?? `${label}指令失败`);
+  }
+}
+
 async function logout() {
   const token = localStorage.getItem("panel_token");
   if (token) {

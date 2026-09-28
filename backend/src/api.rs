@@ -4,8 +4,8 @@ use axum::extract::{
 };
 // 4.3 容器日志流：WebSocket 升级提取器
 use axum::extract::ws::WebSocketUpgrade;
-use axum::middleware::{self, Next};
 use axum::http::{header, request::Parts, StatusCode};
+use axum::middleware::{self, Next};
 // AI 助手功能暂时停用（见文件末尾 "AI 助手已停用" 说明），以下导入仅 AI 段使用
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -102,7 +102,11 @@ impl From<anyhow::Error> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status, Json(serde_json::json!({ "error": self.message }))).into_response()
+        (
+            self.status,
+            Json(serde_json::json!({ "error": self.message })),
+        )
+            .into_response()
     }
 }
 
@@ -135,7 +139,10 @@ impl AuthUser {
 impl FromRequestParts<AppState> for AuthUser {
     type Rejection = ApiError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
         let header = parts
             .headers
             .get(axum::http::header::AUTHORIZATION)
@@ -304,24 +311,29 @@ async fn login(
 ) -> Result<Json<LoginResp>, ApiError> {
     // 登录由 handler 自行写审计（中间件拿不到 body 里的用户名），
     // 审计写失败只告警，不阻断登录流程
-    let audit_login = |state: &AppState,
-                       uid: Option<i64>,
-                       name: &str,
-                       status: u16,
-                       ip: std::net::IpAddr| {
-        let state = state.clone();
-        let name = name.to_string();
-        tokio::spawn(async move {
-            let ts = time::OffsetDateTime::now_utc().unix_timestamp();
-            if let Err(e) = state
-                .db
-                .audit_async(ts, uid, &name, "POST", "/api/login", status, &ip.to_string())
-                .await
-            {
-                tracing::warn!("写入登录审计失败：{e}");
-            }
-        });
-    };
+    let audit_login =
+        |state: &AppState, uid: Option<i64>, name: &str, status: u16, ip: std::net::IpAddr| {
+            let state = state.clone();
+            let name = name.to_string();
+            tokio::spawn(async move {
+                let ts = time::OffsetDateTime::now_utc().unix_timestamp();
+                if let Err(e) = state
+                    .db
+                    .audit_async(
+                        ts,
+                        uid,
+                        &name,
+                        "POST",
+                        "/api/login",
+                        status,
+                        &ip.to_string(),
+                    )
+                    .await
+                {
+                    tracing::warn!("写入登录审计失败：{e}");
+                }
+            });
+        };
 
     let wait = state.throttle.retry_after(ip, &req.username);
     if !wait.is_zero() {
@@ -347,15 +359,14 @@ async fn login(
     // 否则并发登录会把 tokio 的线程池占满。
     let password = req.password.clone();
     let hash_for_verify = row.password_hash.clone();
-    let verified = tokio::task::spawn_blocking(move || {
-        auth::verify_password(&password, &hash_for_verify)
-    })
-    .await
-    // 后台任务崩溃属服务端内部错误：细节进日志，客户端只收通用 500（P1-3）
-    .map_err(|e| {
-        tracing::error!("密码校验任务异常：{e}");
-        ApiError::internal()
-    })?;
+    let verified =
+        tokio::task::spawn_blocking(move || auth::verify_password(&password, &hash_for_verify))
+            .await
+            // 后台任务崩溃属服务端内部错误：细节进日志，客户端只收通用 500（P1-3）
+            .map_err(|e| {
+                tracing::error!("密码校验任务异常：{e}");
+                ApiError::internal()
+            })?;
     if !verified {
         let delay = state.throttle.record_failure(ip, &req.username);
         tracing::warn!(
@@ -469,7 +480,10 @@ async fn change_password(
             tracing::error!("生成密码哈希失败：{e:#}");
             ApiError::internal()
         })?;
-    state.db.set_password_async(user.id, &new_hash, &new_salt).await?;
+    state
+        .db
+        .set_password_async(user.id, &new_hash, &new_salt)
+        .await?;
     // 踢掉该用户的其他会话；当前 jti 保留（改密不把自己关在门外）
     state
         .db
@@ -559,7 +573,12 @@ async fn users_create(
         .db
         .create_user_role_async(&req.username, &hash, &salt, &req.role, true)
         .await?;
-    tracing::info!("创建用户：id={} user={} role={}", id, req.username, req.role);
+    tracing::info!(
+        "创建用户：id={} user={} role={}",
+        id,
+        req.username,
+        req.role
+    );
     Ok(Json(UserResp {
         id,
         username: req.username,
@@ -605,7 +624,10 @@ async fn users_update(
     if id == actor.id && (req.role != "admin" || req.username != actor.username) {
         return Err(ApiError::bad("不能修改自己的用户名或降级自己"));
     }
-    state.db.update_user_async(id, &req.username, &req.role).await?;
+    state
+        .db
+        .update_user_async(id, &req.username, &req.role)
+        .await?;
     if let Some(pwd) = &req.new_password {
         if pwd.len() < 8 {
             return Err(ApiError::bad("新密码至少 8 位"));
@@ -626,7 +648,13 @@ async fn users_update(
     // 角色/密码变更立即生效：踢掉该用户全部会话（含操作者本人改自己的场景，
     // 但上面已禁止自己降级，因此只有改密会踢自己——重登即可）
     let removed = state.db.session_remove_user_async(id).await?;
-    tracing::info!("更新用户：id={} user={} role={} 踢除会话={}", id, req.username, req.role, removed);
+    tracing::info!(
+        "更新用户：id={} user={} role={} 踢除会话={}",
+        id,
+        req.username,
+        req.role,
+        removed
+    );
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -765,7 +793,9 @@ async fn system_history(
         (Some(from), Some(to)) if from <= to => {
             let now = time::OffsetDateTime::now_utc().unix_timestamp();
             let raw_from = now - crate::db::RAW_RETENTION_SECS;
-            Ok(Json(state.db.history_async(from, to, raw_from, limit).await?))
+            Ok(Json(
+                state.db.history_async(from, to, raw_from, limit).await?,
+            ))
         }
         _ => Ok(Json(state.db.recent_metrics_async(limit).await?)),
     }
@@ -823,6 +853,23 @@ async fn services_action(
 }
 
 #[derive(Deserialize)]
+struct PowerActionReq {
+    action: opservice::PowerAction,
+}
+
+/// 电源级操作（admin）：面板重启 / 整机重启 / 关机。
+/// 整机操作危险，仅 admin 可用；审计中间件自动记录非 GET 请求。
+async fn power_action(
+    _: RequireRole<2>,
+    SafeJson(req): SafeJson<PowerActionReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let out = opservice::power(req.action)
+        .await
+        .map_err(ApiError::file_err)?;
+    Ok(Json(out))
+}
+
+#[derive(Deserialize)]
 struct JournalQuery {
     unit: Option<String>,
     #[serde(default = "default_lines")]
@@ -845,10 +892,12 @@ async fn logs_journal(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // P1-3：journal 按用户给的 unit 读取，失败多为参数问题 → 4xx + 通用文案，
     // 细节（journalctl 输出等）只进日志
-    let text = crate::logs::journal(q.unit.as_deref(), q.lines).await.map_err(|e| {
-        tracing::warn!("日志读取失败（journal）：{e:#}");
-        ApiError::bad("日志读取失败（参数无效或 journal 服务不可用）")
-    })?;
+    let text = crate::logs::journal(q.unit.as_deref(), q.lines)
+        .await
+        .map_err(|e| {
+            tracing::warn!("日志读取失败（journal）：{e:#}");
+            ApiError::bad("日志读取失败（参数无效或 journal 服务不可用）")
+        })?;
     Ok(Json(serde_json::json!({ "text": text })))
 }
 
@@ -869,10 +918,12 @@ async fn logs_tail(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // P1-3：路径来自客户端，读取失败（不存在/无权限/非普通文件）属输入问题
     // → 4xx + 通用文案，不回显路径与 errno
-    let text = crate::logs::tail_file(&q.path, q.lines).await.map_err(|e| {
-        tracing::warn!("日志读取失败（tail）：{e:#}");
-        ApiError::bad("无法读取该日志（不存在、无权限或非普通文件）")
-    })?;
+    let text = crate::logs::tail_file(&q.path, q.lines)
+        .await
+        .map_err(|e| {
+            tracing::warn!("日志读取失败（tail）：{e:#}");
+            ApiError::bad("无法读取该日志（不存在、无权限或非普通文件）")
+        })?;
     Ok(Json(serde_json::json!({ "text": text })))
 }
 
@@ -897,7 +948,9 @@ async fn files_read(
     _user: AuthUser,
     Query(q): Query<PathQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let text = crate::files::read_file(&q.path).await.map_err(ApiError::file_err)?;
+    let text = crate::files::read_file(&q.path)
+        .await
+        .map_err(ApiError::file_err)?;
     Ok(Json(serde_json::json!({ "content": text })))
 }
 
@@ -958,11 +1011,10 @@ async fn files_rename(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-async fn files_download(
-    _user: AuthUser,
-    Query(q): Query<PathQuery>,
-) -> Result<Response, ApiError> {
-    let (name, bytes) = crate::files::download(&q.path).await.map_err(ApiError::file_err)?;
+async fn files_download(_user: AuthUser, Query(q): Query<PathQuery>) -> Result<Response, ApiError> {
+    let (name, bytes) = crate::files::download(&q.path)
+        .await
+        .map_err(ApiError::file_err)?;
     let ct = mime_guess::from_path(&name)
         .first_or_octet_stream()
         .to_string();
@@ -970,9 +1022,7 @@ async fn files_download(
     let encoded: String = name
         .bytes()
         .map(|b| {
-            if b.is_ascii_alphanumeric()
-                || matches!(b, b'.' | b'-' | b'_' | b'~')
-            {
+            if b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'~') {
                 (b as char).to_string()
             } else {
                 format!("%{b:02X}")
@@ -980,14 +1030,9 @@ async fn files_download(
         })
         .collect();
     let disposition = format!("attachment; filename*=UTF-8''{encoded}");
-    let mut resp = (
-        [(header::CONTENT_TYPE, ct)],
-        bytes,
-    )
-        .into_response();
+    let mut resp = ([(header::CONTENT_TYPE, ct)], bytes).into_response();
     if let Ok(v) = header::HeaderValue::from_str(&disposition) {
-        resp.headers_mut()
-            .insert(header::CONTENT_DISPOSITION, v);
+        resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
     }
     Ok(resp)
 }
@@ -1014,10 +1059,14 @@ async fn files_upload(
             }
             "file" => {
                 fname = field.file_name().unwrap_or("upload.bin").to_string();
-                fbytes = field.bytes().await.map_err(|e| {
-                    tracing::warn!("上传字段 file 读取失败：{e}");
-                    ApiError::bad("上传数据读取失败")
-                })?.to_vec();
+                fbytes = field
+                    .bytes()
+                    .await
+                    .map_err(|e| {
+                        tracing::warn!("上传字段 file 读取失败：{e}");
+                        ApiError::bad("上传数据读取失败")
+                    })?
+                    .to_vec();
             }
             _ => {}
         }
@@ -1029,7 +1078,9 @@ async fn files_upload(
     let saved = crate::files::save_upload(&dir, &fname, fbytes)
         .await
         .map_err(ApiError::file_err)?;
-    Ok(Json(serde_json::json!({ "ok": true, "path": saved, "size": size })))
+    Ok(Json(
+        serde_json::json!({ "ok": true, "path": saved, "size": size }),
+    ))
 }
 
 // ---------- 软件包管理 ----------
@@ -1059,7 +1110,10 @@ async fn packages_list(
 async fn packages_upgradable(
     _user: AuthUser,
 ) -> Result<Json<Vec<crate::packages::PackageInfo>>, ApiError> {
-    crate::packages::upgradable().await.map(Json).map_err(ApiError::file_err)
+    crate::packages::upgradable()
+        .await
+        .map(Json)
+        .map_err(ApiError::file_err)
 }
 
 async fn packages_search(
@@ -1101,7 +1155,10 @@ async fn packages_action(
 // ---------- 计划任务 ----------
 
 async fn cron_list(_user: AuthUser) -> Result<Json<Vec<crate::crontab::CronEntry>>, ApiError> {
-    crate::crontab::list().await.map(Json).map_err(ApiError::file_err)
+    crate::crontab::list()
+        .await
+        .map(Json)
+        .map_err(ApiError::file_err)
 }
 
 #[derive(Deserialize)]
@@ -1149,31 +1206,42 @@ async fn cron_delete(
 
 // ---------- 网络查看 ----------
 
-async fn net_interfaces(
-    _user: AuthUser,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    crate::network::interfaces().await.map(Json).map_err(ApiError::file_err)
+async fn net_interfaces(_user: AuthUser) -> Result<Json<serde_json::Value>, ApiError> {
+    crate::network::interfaces()
+        .await
+        .map(Json)
+        .map_err(ApiError::file_err)
 }
 
 async fn net_routes(_user: AuthUser) -> Result<Json<serde_json::Value>, ApiError> {
-    crate::network::routes().await.map(Json).map_err(ApiError::file_err)
+    crate::network::routes()
+        .await
+        .map(Json)
+        .map_err(ApiError::file_err)
 }
 
-async fn net_connections(
-    _user: AuthUser,
-) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
-    crate::network::connections().await.map(Json).map_err(ApiError::file_err)
+async fn net_connections(_user: AuthUser) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    crate::network::connections()
+        .await
+        .map(Json)
+        .map_err(ApiError::file_err)
 }
 
 async fn net_dns(_user: AuthUser) -> Result<Json<Vec<String>>, ApiError> {
-    crate::network::dns().await.map(Json).map_err(ApiError::file_err)
+    crate::network::dns()
+        .await
+        .map(Json)
+        .map_err(ApiError::file_err)
 }
 
 // ---------- Docker 控制 ----------
 
 /// Docker 环境状态：未安装或守护进程未启动时也返回 200，由前端决定展示方式
 async fn docker_status(_user: AuthUser) -> Result<Json<crate::docker::DockerStatus>, ApiError> {
-    crate::docker::status().await.map(Json).map_err(ApiError::file_err)
+    crate::docker::status()
+        .await
+        .map(Json)
+        .map_err(ApiError::file_err)
 }
 
 /// 一键安装 Docker（耗时较长，前端应给出等待提示）
@@ -1230,7 +1298,10 @@ async fn docker_logs(
 }
 
 async fn docker_images(_user: AuthUser) -> Result<Json<Vec<crate::docker::ImageInfo>>, ApiError> {
-    crate::docker::images().await.map(Json).map_err(ApiError::file_err)
+    crate::docker::images()
+        .await
+        .map(Json)
+        .map_err(ApiError::file_err)
 }
 
 #[derive(Deserialize)]
@@ -1327,10 +1398,7 @@ fn validate_theme(cfg: &serde_json::Value) -> Result<(), String> {
             "colors" => {
                 let colors = v.as_object().ok_or("colors 必须是对象")?;
                 for (ck, cv) in colors {
-                    if !matches!(
-                        ck.as_str(),
-                        "primary" | "bg_page" | "bg_card" | "text"
-                    ) {
+                    if !matches!(ck.as_str(), "primary" | "bg_page" | "bg_card" | "text") {
                         return Err(format!("未知颜色字段：{ck}"));
                     }
                     let s = cv.as_str().ok_or("颜色值必须是字符串")?;
@@ -1348,7 +1416,9 @@ fn validate_theme(cfg: &serde_json::Value) -> Result<(), String> {
                 if !s.starts_with("data:image/") {
                     return Err("bg_image 仅允许 data:image/ 前缀的 data URL".into());
                 }
-                if s.chars().any(|c| c == '"' || c == ')' || c == '\\' || (c as u32) < 0x20) {
+                if s.chars()
+                    .any(|c| c == '"' || c == ')' || c == '\\' || (c as u32) < 0x20)
+                {
                     return Err("bg_image 含有不允许的字符".into());
                 }
             }
@@ -1368,8 +1438,8 @@ async fn theme_get(
     let raw = state.db.get_setting_async(THEME_KEY).await?;
     let value = match raw {
         Some(s) => {
-            let v = serde_json::from_str::<serde_json::Value>(&s)
-                .unwrap_or(serde_json::Value::Null);
+            let v =
+                serde_json::from_str::<serde_json::Value>(&s).unwrap_or(serde_json::Value::Null);
             if !v.is_null() && validate_theme(&v).is_err() {
                 tracing::warn!("忽略库中未通过安全校验的主题配置");
                 serde_json::Value::Null
@@ -1403,7 +1473,11 @@ async fn theme_set(
         // P1-2：服务端白名单校验，不通过不入库
         validate_theme(&value).map_err(ApiError::bad)?;
     }
-    let stored = if value.is_null() { "" } else { &value.to_string() };
+    let stored = if value.is_null() {
+        ""
+    } else {
+        &value.to_string()
+    };
     state.db.set_setting_async(THEME_KEY, stored).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -1441,16 +1515,11 @@ fn validate_dashboard_config(cfg: &serde_json::Value) -> Result<(), String> {
         return Err("cards 不能为空".to_string());
     }
     if cards.len() > DASHBOARD_CARDS.len() {
-        return Err(format!(
-            "卡片数量过多（上限 {}）",
-            DASHBOARD_CARDS.len()
-        ));
+        return Err(format!("卡片数量过多（上限 {}）", DASHBOARD_CARDS.len()));
     }
     let mut seen = std::collections::HashSet::new();
     for c in cards {
-        let s = c
-            .as_str()
-            .ok_or_else(|| "卡片项必须是字符串".to_string())?;
+        let s = c.as_str().ok_or_else(|| "卡片项必须是字符串".to_string())?;
         if !DASHBOARD_CARDS.contains(&s) {
             return Err(format!("未知卡片：{s}"));
         }
@@ -1468,8 +1537,9 @@ async fn dashboard_config_get(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let raw = state.db.get_setting_async(DASHBOARD_KEY).await?;
     let value = match raw {
-        Some(s) if !s.is_empty() => serde_json::from_str::<serde_json::Value>(&s)
-            .unwrap_or(serde_json::Value::Null),
+        Some(s) if !s.is_empty() => {
+            serde_json::from_str::<serde_json::Value>(&s).unwrap_or(serde_json::Value::Null)
+        }
         _ => serde_json::Value::Null,
     };
     Ok(Json(serde_json::json!({ "config": value })))
@@ -1496,7 +1566,11 @@ async fn dashboard_config_set(
         // 白名单校验不通过不入库
         validate_dashboard_config(&value).map_err(ApiError::bad)?;
     }
-    let stored = if value.is_null() { "" } else { &value.to_string() };
+    let stored = if value.is_null() {
+        ""
+    } else {
+        &value.to_string()
+    };
     state.db.set_setting_async(DASHBOARD_KEY, stored).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -1515,7 +1589,9 @@ async fn services_unit_get(
     let content = crate::ops::unit_file(name)
         .await
         .map_err(ApiError::file_err)?;
-    Ok(Json(serde_json::json!({ "name": name, "content": content })))
+    Ok(Json(
+        serde_json::json!({ "name": name, "content": content }),
+    ))
 }
 
 /// SMART 磁盘健康概要（只读探测）。smartctl 缺失时返回降级提示而非报错。
@@ -1567,11 +1643,10 @@ async fn docker_logstream_ws(
     // check_id 返回 anyhow::Error，转成面向客户端的通用文案（细节只进日志）。
     // id 先转成 owned String 再移动进 WS 升级闭包，避免借用 q 的局部值。
     let id = q.id.trim().to_string();
-    crate::docker::check_id(&id)
-        .map_err(|e| {
-            tracing::warn!("容器日志流：非法容器标识");
-            ApiError::bad(e.to_string())
-        })?;
+    crate::docker::check_id(&id).map_err(|e| {
+        tracing::warn!("容器日志流：非法容器标识");
+        ApiError::bad(e.to_string())
+    })?;
     // 初始回看行数限制在 1..=1000，防超大查询拖垮 docker daemon
     let tail = q.tail.unwrap_or(200).clamp(1, 1000);
     Ok(ws.on_upgrade(move |socket| crate::ops::container_log_stream(socket, id, tail)))
@@ -1617,10 +1692,12 @@ async fn backup_download(
     let data_dir = state.data_dir.clone();
     let name = q.name.clone();
     let name_for_check = q.name.clone();
-    let path = tokio::task::spawn_blocking(move || crate::backup::resolve_backup(&data_dir, &name_for_check))
-        .await
-        .map_err(|_| ApiError::internal())?
-        .map_err(ApiError::file_err)?;
+    let path = tokio::task::spawn_blocking(move || {
+        crate::backup::resolve_backup(&data_dir, &name_for_check)
+    })
+    .await
+    .map_err(|_| ApiError::internal())?
+    .map_err(ApiError::file_err)?;
     let bytes = tokio::fs::read(&path)
         .await
         .map_err(|_| ApiError::file_err(anyhow::anyhow!("读取备份文件失败")))?;
@@ -1826,11 +1903,7 @@ async fn audit_actor(state: &AppState, headers: &axum::http::HeaderMap) -> Optio
 /// 审计中间件：记录 /api 下所有非 GET 请求（方法、路径、状态码、来源 IP、操作者）。
 /// 路径不含查询串，避免敏感参数（如密码走 body 不落库）进入审计。
 /// 登录接口由 handler 自行记录（body 里有用户名，中间件拿不到），此处跳过。
-async fn audit_mw(
-    State(state): State<AppState>,
-    req: Request,
-    next: Next,
-) -> Response {
+async fn audit_mw(State(state): State<AppState>, req: Request, next: Next) -> Response {
     let method = req.method().clone();
     // nest 剥掉了 /api 前缀，用 OriginalUri 记录完整路径
     let full_path = req
@@ -1887,11 +1960,11 @@ pub fn router(state: AppState) -> Router {
         // 会话列表所有角色可用（handler 内按角色过滤可见范围）
         .route("/me", get(me))
         .route("/account/password", post(change_password))
+        .route("/users", get(users_list).post(users_create))
         .route(
-            "/users",
-            get(users_list).post(users_create),
+            "/users/{id}",
+            axum::routing::put(users_update).delete(users_delete),
         )
-        .route("/users/{id}", axum::routing::put(users_update).delete(users_delete))
         .route("/audit", get(audit_query))
         .route("/sessions", get(sessions_list))
         .route("/sessions/kick", post(sessions_kick))
@@ -1899,6 +1972,7 @@ pub fn router(state: AppState) -> Router {
         .route("/system/history", get(system_history))
         .route("/processes", get(processes_list).post(processes_kill))
         .route("/services", get(services_list).post(services_action))
+        .route("/power", post(power_action))
         .route("/logs/journal", get(logs_journal))
         .route("/logs/files", get(logs_files))
         .route("/logs/tail", get(logs_tail))
@@ -1918,7 +1992,13 @@ pub fn router(state: AppState) -> Router {
         .route("/packages/upgradable", get(packages_upgradable))
         .route("/packages/search", get(packages_search))
         .route("/packages/action", post(packages_action))
-        .route("/cron", get(cron_list).post(cron_add).put(cron_update).delete(cron_delete))
+        .route(
+            "/cron",
+            get(cron_list)
+                .post(cron_add)
+                .put(cron_update)
+                .delete(cron_delete),
+        )
         .route("/network/interfaces", get(net_interfaces))
         .route("/network/routes", get(net_routes))
         .route("/network/connections", get(net_connections))
@@ -1976,10 +2056,7 @@ pub fn router(state: AppState) -> Router {
         .route("/alerts/events", get(alerts_events))
         // 2.3：审计中间件挂在受保护路由上，记录所有非 GET 业务请求
         // （from_fn 不支持 State 提取器，必须用 from_fn_with_state）
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            audit_mw,
-        ));
+        .layer(middleware::from_fn_with_state(state.clone(), audit_mw));
     Router::new()
         .route("/health", get(health))
         .route("/api/login", post(login))
@@ -1998,7 +2075,9 @@ mod tests {
     #[test]
     fn dashboard_valid_configs() {
         assert!(validate_dashboard_config(&json!({ "cards": ["cpu", "mem"] })).is_ok());
-        assert!(validate_dashboard_config(&json!({ "cards": ["net", "disk", "mem", "cpu"] })).is_ok());
+        assert!(
+            validate_dashboard_config(&json!({ "cards": ["net", "disk", "mem", "cpu"] })).is_ok()
+        );
     }
 
     #[test]
