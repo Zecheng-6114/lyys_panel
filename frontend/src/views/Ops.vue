@@ -34,16 +34,22 @@
         <el-table-column label="健康状态" width="120">
           <template #default="{ row }">
             <span class="dot-wrap">
-              <i class="dot" :class="row.healthy ? 'dot-on' : 'dot-off'" />
-              {{ row.healthy ? "健康" : "异常" }}
+              <i class="dot" :class="row.health === 'PASSED' ? 'dot-on' : 'dot-off'" />
+              {{
+                row.health === "PASSED"
+                  ? "健康"
+                  : row.health === "FAILED"
+                    ? "异常"
+                    : "未知"
+              }}
             </span>
           </template>
         </el-table-column>
         <el-table-column label="温度" prop="temperature" width="80" class-name="col-p2" label-class-name="col-p2">
           <template #default="{ row }">{{ row.temperature != null ? row.temperature + "°C" : "—" }}</template>
         </el-table-column>
-        <el-table-column label="通电时长" prop="power_on_hours" width="110" class-name="col-p2" label-class-name="col-p2">
-          <template #default="{ row }">{{ row.power_on_hours != null ? row.power_on_hours + "h" : "—" }}</template>
+        <el-table-column label="通电时长" prop="powered_on_hours" width="110" class-name="col-p2" label-class-name="col-p2">
+          <template #default="{ row }">{{ row.powered_on_hours != null ? row.powered_on_hours + "h" : "—" }}</template>
         </el-table-column>
       </el-table>
     </div>
@@ -142,11 +148,11 @@ import http from "../api/http";
 // ---------- SMART ----------
 interface SmartDisk {
   device: string;
-  model: string | null;
-  serial: string | null;
-  healthy: boolean;
+  model: string;
+  serial: string;
+  health: string;
   temperature: number | null;
-  power_on_hours: number | null;
+  powered_on_hours: number | null;
 }
 interface SmartReport {
   available: boolean;
