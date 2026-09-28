@@ -96,6 +96,14 @@ interface Snapshot {
   disk_total: number;
   net_in_per_sec: number;
   net_out_per_sec: number;
+  load1: number;
+  load5: number;
+  load15: number;
+  cpu_cores: number;
+  uptime: number;
+  swap_used: number;
+  swap_total: number;
+  procs: number;
 }
 interface MetricPoint {
   ts: number;
@@ -116,6 +124,14 @@ const snap = reactive<Snapshot>({
   disk_total: 1,
   net_in_per_sec: 0,
   net_out_per_sec: 0,
+  load1: 0,
+  load5: 0,
+  load15: 0,
+  cpu_cores: 1,
+  uptime: 0,
+  swap_used: 0,
+  swap_total: 0,
+  procs: 0,
 });
 const history = ref<MetricPoint[]>([]);
 const chartEl = ref<HTMLElement>();
@@ -134,6 +150,15 @@ function fmtBytes(n: number) {
     i++;
   }
   return `${v.toFixed(v >= 100 ? 0 : 1)}${units[i]}`;
+}
+
+function fmtUptime(sec: number) {
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  if (d > 0) return `${d}天${h}时`;
+  if (h > 0) return `${h}时${m}分`;
+  return `${m}分`;
 }
 
 // ---------- 4.2 卡片渲染 ----------
@@ -171,6 +196,25 @@ const visibleCards = computed<CardView[]>(() => {
           value: `↓${fmtBytes(snap.net_in_per_sec)}/s ↑${fmtBytes(snap.net_out_per_sec)}/s`,
           bar: 0,
         };
+      case "load":
+        return {
+          ...base,
+          value: `${snap.load1.toFixed(2)} / ${snap.load5.toFixed(2)} / ${snap.load15.toFixed(2)}`,
+          bar: pct(snap.load1, snap.cpu_cores),
+        };
+      case "uptime":
+        return { ...base, value: fmtUptime(snap.uptime), bar: 0 };
+      case "swap":
+        return {
+          ...base,
+          value:
+            snap.swap_total > 0
+              ? `${fmtBytes(snap.swap_used)} / ${fmtBytes(snap.swap_total)}`
+              : "未启用",
+          bar: snap.swap_total > 0 ? pct(snap.swap_used, snap.swap_total) : 0,
+        };
+      case "procs":
+        return { ...base, value: String(snap.procs), bar: 0 };
     }
   });
 });
@@ -338,6 +382,8 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  /* 与列表页表格同口径：撑满内容区，趋势图吃掉卡片行以下的剩余高度 */
+  height: calc(100vh - 160px);
 }
 .cards {
   display: grid;
@@ -349,6 +395,12 @@ onBeforeUnmount(() => {
   background: var(--el-bg-color);
   border-radius: var(--radius);
   padding: 16px;
+}
+.chart-card {
+  flex: 1;
+  min-height: 240px;
+  display: flex;
+  flex-direction: column;
 }
 .card-label {
   font-size: 13px;
@@ -384,7 +436,8 @@ onBeforeUnmount(() => {
   margin-bottom: 8px;
 }
 .chart {
-  height: 300px;
+  flex: 1;
+  min-height: 0;
 }
 
 /* 4.2 卡片自定义弹窗 */

@@ -3,7 +3,16 @@ import { ref } from "vue";
 import http from "../api/http";
 
 /// 仪表盘卡片白名单与默认顺序（与后端 api.rs 的 DASHBOARD_CARDS 保持一致）
-export const DASH_CARDS = ["cpu", "mem", "disk", "net"] as const;
+export const DASH_CARDS = [
+  "cpu",
+  "mem",
+  "disk",
+  "net",
+  "load",
+  "uptime",
+  "swap",
+  "procs",
+] as const;
 export type DashCard = (typeof DASH_CARDS)[number];
 
 /// 卡片展示名（自定义配置弹窗里用）
@@ -12,6 +21,10 @@ export const CARD_LABELS: Record<DashCard, string> = {
   mem: "内存",
   disk: "磁盘",
   net: "网络",
+  load: "负载",
+  uptime: "运行时长",
+  swap: "交换区",
+  procs: "进程",
 };
 
 const ALL: readonly string[] = DASH_CARDS;

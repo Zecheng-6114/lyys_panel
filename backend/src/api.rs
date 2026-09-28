@@ -1416,7 +1416,9 @@ const DASHBOARD_KEY: &str = "dashboard_config";
 const DASHBOARD_MAX_BYTES: usize = 4 * 1024;
 
 /// 仪表盘卡片白名单（与前端 Dashboard.vue 的卡片 id 一一对应）
-const DASHBOARD_CARDS: [&str; 4] = ["cpu", "mem", "disk", "net"];
+const DASHBOARD_CARDS: [&str; 8] = [
+    "cpu", "mem", "disk", "net", "load", "uptime", "swap", "procs",
+];
 
 /// 仪表盘配置校验（复用 P1-2 主题校验思路：白名单 + 类型 + 长度）：
 /// - 只允许一个顶层字段 cards；

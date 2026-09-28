@@ -19,6 +19,18 @@ pub struct Snapshot {
     /// 网络速率（字节/秒），由相邻两次采样的累计值差值计算
     pub net_in_per_sec: i64,
     pub net_out_per_sec: i64,
+    /// 平均负载 1/5/15 分钟
+    pub load1: f64,
+    pub load5: f64,
+    pub load15: f64,
+    /// CPU 核心数（负载条按 核数×100% 归一）
+    pub cpu_cores: usize,
+    /// 运行时长（秒）
+    pub uptime: u64,
+    pub swap_used: i64,
+    pub swap_total: i64,
+    /// 进程数：数 /proc 下的数字目录，单次 readdir，刻意不走 sysinfo 全表刷新
+    pub procs: usize,
 }
 
 /// 磁盘容量枚举的复用间隔。容量变化以分钟计，跟着 5 秒的采样节奏刷新纯属浪费。
@@ -83,6 +95,24 @@ impl Monitor {
             disk_total,
             net_in_per_sec: (net_in as f64 / dt) as i64,
             net_out_per_sec: (net_out as f64 / dt) as i64,
+            load1: System::load_average().one,
+            load5: System::load_average().five,
+            load15: System::load_average().fifteen,
+            cpu_cores: self.sys.cpus().len(),
+            uptime: System::uptime(),
+            swap_used: self.sys.used_swap() as i64,
+            swap_total: self.sys.total_swap() as i64,
+            procs: std::fs::read_dir("/proc")
+                .map(|rd| {
+                    rd.filter_map(|e| e.ok())
+                        .filter(|e| {
+                            let n = e.file_name();
+                            let s = n.to_string_lossy();
+                            !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())
+                        })
+                        .count()
+                })
+                .unwrap_or(0),
         }
     }
 
