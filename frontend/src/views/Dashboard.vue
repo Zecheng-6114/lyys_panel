@@ -1,5 +1,12 @@
 <template>
   <div class="dash">
+    <div class="toolbar">
+      <div class="spacer" />
+      <!-- 4.2 卡片自定义入口（admin 专属，保存走 RequireRole<2> 接口） -->
+      <button v-if="auth.isAdmin()" class="mini-btn" type="button" @click="openCustom">
+        自定义卡片
+      </button>
+    </div>
     <div class="cards">
       <!-- 4.2 卡片按用户配置的顺序与显隐渲染；未定制时全部按默认顺序 -->
       <div v-for="card in visibleCards" :key="card.id" class="card">
@@ -11,16 +18,19 @@
 
     <div class="chart-card">
       <div class="chart-head">
-        <div class="chart-title">系统负载趋势（最近 {{ history.length }} 个采样点）</div>
-        <!-- 4.2 卡片自定义入口（admin 专属，保存走 RequireRole<2> 接口） -->
-        <button
-          v-if="auth.isAdmin()"
-          class="mini-btn"
-          type="button"
-          @click="openCustom"
-        >
-          自定义卡片
-        </button>
+        <div class="chart-title">系统负载趋势（{{ rangeLabel }}）</div>
+        <div class="range-group">
+          <button
+            v-for="r in RANGES"
+            :key="r.key"
+            class="mini-btn mini-btn--sm"
+            :class="{ 'mini-btn--on': rangeKey === r.key }"
+            type="button"
+            @click="setRange(r.key)"
+          >
+            {{ r.label }}
+          </button>
+        </div>
       </div>
       <div ref="chartEl" class="chart" />
     </div>
@@ -137,6 +147,23 @@ const history = ref<MetricPoint[]>([]);
 const chartEl = ref<HTMLElement>();
 let chart: ReturnType<typeof echarts.init> | null = null;
 let timer: number | undefined;
+
+// 趋势图时间窗：原始 5 秒采样，点数 = 秒数/5，全部落在后端 limit 上限内
+const RANGES = [
+  { key: "10m", label: "10 分钟", secs: 600, points: 120 },
+  { key: "30m", label: "30 分钟", secs: 1800, points: 360 },
+  { key: "1h", label: "1 小时", secs: 3600, points: 720 },
+  { key: "2h", label: "2 小时", secs: 7200, points: 1440 },
+] as const;
+type RangeKey = (typeof RANGES)[number]["key"];
+const rangeKey = ref<RangeKey>("10m");
+const rangeLabel = computed(
+  () => RANGES.find((r) => r.key === rangeKey.value)?.label ?? "10 分钟",
+);
+function setRange(k: RangeKey) {
+  rangeKey.value = k;
+  refreshHistory().catch(() => {});
+}
 
 function pct(a: number, b: number) {
   return b > 0 ? Math.round((a / b) * 100) : 0;
@@ -284,7 +311,11 @@ async function refresh() {
   Object.assign(snap, data);
 }
 async function refreshHistory() {
-  const { data } = await http.get("/system/history", { params: { limit: 120 } });
+  const r = RANGES.find((x) => x.key === rangeKey.value) ?? RANGES[0];
+  const now = Math.floor(Date.now() / 1000);
+  const { data } = await http.get("/system/history", {
+    params: { from: now - r.secs, to: now, limit: r.points },
+  });
   history.value = data;
   renderChart();
 }
@@ -382,8 +413,6 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  /* 与列表页表格同口径：撑满内容区，趋势图吃掉卡片行以下的剩余高度 */
-  height: calc(100vh - 160px);
 }
 .cards {
   display: grid;
@@ -397,7 +426,6 @@ onBeforeUnmount(() => {
   padding: 16px;
 }
 .chart-card {
-  flex: 1;
   min-height: 240px;
   display: flex;
   flex-direction: column;
@@ -436,8 +464,20 @@ onBeforeUnmount(() => {
   margin-bottom: 8px;
 }
 .chart {
-  flex: 1;
-  min-height: 0;
+  height: 320px;
+}
+.range-group {
+  display: flex;
+  gap: 6px;
+}
+/* 选中的时间窗：反色块（无边框设计规范） */
+.mini-btn--on {
+  background: var(--el-text-color-primary);
+  color: var(--el-bg-color);
+}
+.mini-btn--on:hover {
+  background: var(--el-text-color-primary);
+  opacity: 0.85;
 }
 
 /* 4.2 卡片自定义弹窗 */
