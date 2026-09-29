@@ -236,6 +236,7 @@ onMounted(load);
   max-height: 60vh;
   overflow: auto;
   font-family: var(--panel-mono);
+  font-variant-numeric: tabular-nums;
   font-size: 12px;
   line-height: 1.6;
   white-space: pre-wrap;

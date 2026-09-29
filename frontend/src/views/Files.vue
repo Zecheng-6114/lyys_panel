@@ -355,6 +355,7 @@ onMounted(() => load("/"));
 .pathbar {
   font-size: 13px;
   font-family: var(--panel-mono);
+  font-variant-numeric: tabular-nums;
   display: flex;
   align-items: center;
   min-width: 0;
@@ -398,6 +399,7 @@ onMounted(() => load("/"));
 }
 .editor :deep(.el-textarea__inner) {
   font-family: var(--panel-mono);
+  font-variant-numeric: tabular-nums;
   font-size: 12px;
   line-height: 1.6;
 }

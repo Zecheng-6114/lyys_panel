@@ -438,6 +438,7 @@ onBeforeUnmount(() => {
   font-size: 20px;
   font-weight: 600;
   font-family: var(--panel-mono);
+  font-variant-numeric: tabular-nums;
   margin: 6px 0;
 }
 .bar {

@@ -166,6 +166,7 @@ onMounted(load);
 }
 .dnsrow {
   font-family: var(--panel-mono);
+  font-variant-numeric: tabular-nums;
   font-size: 13px;
   padding: 4px 0;
 }

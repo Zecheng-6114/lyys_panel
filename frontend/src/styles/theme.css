@@ -1,7 +1,56 @@
 /* 极简黑白主题：覆盖 Element Plus 关键 CSS 变量
    设计约束：纯黑白灰、圆角 6px、无彩色、无阴影 */
 
+/* HarmonyOS Sans SC：按许可协议以【原样 TTF】内嵌分发（协议第 2 条禁止
+   任何修改/格式转换，LICENSE.txt 随字体目录一同保留）。六字重全量声明。 */
+@font-face {
+  font-family: "HarmonyOS Sans SC";
+  font-weight: 100;
+  font-style: normal;
+  font-display: swap;
+  src: url("/fonts/HarmonyOS_Sans_SC/HarmonyOS_Sans_SC_Thin.ttf") format("truetype");
+}
+@font-face {
+  font-family: "HarmonyOS Sans SC";
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+  src: url("/fonts/HarmonyOS_Sans_SC/HarmonyOS_Sans_SC_Light.ttf") format("truetype");
+}
+@font-face {
+  font-family: "HarmonyOS Sans SC";
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  src: url("/fonts/HarmonyOS_Sans_SC/HarmonyOS_Sans_SC_Regular.ttf") format("truetype");
+}
+@font-face {
+  font-family: "HarmonyOS Sans SC";
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+  src: url("/fonts/HarmonyOS_Sans_SC/HarmonyOS_Sans_SC_Medium.ttf") format("truetype");
+}
+@font-face {
+  font-family: "HarmonyOS Sans SC";
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+  src: url("/fonts/HarmonyOS_Sans_SC/HarmonyOS_Sans_SC_Bold.ttf") format("truetype");
+}
+@font-face {
+  font-family: "HarmonyOS Sans SC";
+  font-weight: 900;
+  font-style: normal;
+  font-display: swap;
+  src: url("/fonts/HarmonyOS_Sans_SC/HarmonyOS_Sans_SC_Black.ttf") format("truetype");
+}
+
 :root {
+  /* 全局字体：鸿蒙字体置于栈首，EP 组件字体变量同步覆盖 */
+  --el-font-family:
+    "HarmonyOS Sans SC", -apple-system, "Segoe UI", Roboto, "PingFang SC",
+    "Microsoft YaHei", sans-serif;
   /* 主色改为纯黑 */
   --el-color-primary: #111111;
   --el-color-primary-light-3: #444444;
@@ -112,8 +161,11 @@
   --el-box-shadow-dark: none;
 
   /* ---------- 面板自定义变量 ---------- */
-  /* 等宽字体栈（PID/数值/版本/路径/日志等机器数据统一使用） */
-  --panel-mono: ui-monospace, Menlo, Consolas, monospace;
+  /* 机器数据字体：统一用鸿蒙字体 + 表格数字（tnum）。经实测该字体
+     0-9 字身宽全部一致（570 单位）且带 tnum 特性，数字列天然对齐，
+     不再需要独立等宽栈。 */
+  --panel-mono: "HarmonyOS Sans SC", -apple-system, "Segoe UI", Roboto,
+    "PingFang SC", "Microsoft YaHei", sans-serif;
   /* 列表页表格/日志框统一高度（随顶栏+工具栏预留，改这里即可全站生效） */
   --panel-table-height: calc(100vh - 160px);
 }
@@ -130,8 +182,7 @@ body,
   padding: 0;
 }
 body {
-  font-family:
-    -apple-system, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: var(--el-font-family);
   background: var(--el-bg-color-page);
   color: var(--el-text-color-primary);
 }
@@ -300,9 +351,10 @@ body {
 .spacer {
   flex: 1;
 }
-/* 机器数据（PID/数值/版本/路径等）统一等宽字体 */
+/* 机器数据（PID/数值/版本/路径等）统一字体 + 表格数字保证列对齐 */
 .mono {
   font-family: var(--panel-mono);
+  font-variant-numeric: tabular-nums;
 }
 /* 通用小按钮（顶栏操作、cron 预设等）：浅灰底、无边框 */
 .mini-btn {
