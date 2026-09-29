@@ -8,23 +8,74 @@
         class="side-menu"
         :ellipsis="false"
       >
-        <el-menu-item index="/dashboard">仪表盘</el-menu-item>
-        <el-menu-item index="/processes">进程</el-menu-item>
-        <el-menu-item index="/services">服务</el-menu-item>
-        <el-menu-item index="/logs">日志</el-menu-item>
-        <el-menu-item index="/files">文件</el-menu-item>
-        <el-menu-item index="/packages">软件</el-menu-item>
-        <el-menu-item index="/cron">计划任务</el-menu-item>
-        <el-menu-item index="/network">网络</el-menu-item>
-        <el-menu-item index="/docker">Docker</el-menu-item>
-        <el-menu-item index="/ops">深度运维</el-menu-item>
-        <el-menu-item index="/ai">AI 助手</el-menu-item>
-        <el-menu-item index="/sessions">在线会话</el-menu-item>
-        <el-menu-item v-if="auth.isAdmin()" index="/users">账号管理</el-menu-item>
-        <el-menu-item v-if="auth.isAdmin()" index="/backups">备份管理</el-menu-item>
-        <el-menu-item v-if="auth.isAdmin()" index="/alerts">告警通知</el-menu-item>
-        <el-menu-item v-if="auth.isAdmin()" index="/settings">系统设置</el-menu-item>
-        <el-menu-item v-if="auth.isAdmin()" index="/update">面板更新</el-menu-item>
+        <el-menu-item index="/dashboard">
+          <el-icon><Odometer /></el-icon>
+          <span>仪表盘</span>
+        </el-menu-item>
+        <el-menu-item index="/processes">
+          <el-icon><Cpu /></el-icon>
+          <span>进程</span>
+        </el-menu-item>
+        <el-menu-item index="/services">
+          <el-icon><SetUp /></el-icon>
+          <span>服务</span>
+        </el-menu-item>
+        <el-menu-item index="/logs">
+          <el-icon><Document /></el-icon>
+          <span>日志</span>
+        </el-menu-item>
+        <el-menu-item index="/files">
+          <el-icon><Folder /></el-icon>
+          <span>文件</span>
+        </el-menu-item>
+        <el-menu-item index="/packages">
+          <el-icon><Box /></el-icon>
+          <span>软件</span>
+        </el-menu-item>
+        <el-menu-item index="/cron">
+          <el-icon><Timer /></el-icon>
+          <span>计划任务</span>
+        </el-menu-item>
+        <el-menu-item index="/network">
+          <el-icon><Connection /></el-icon>
+          <span>网络</span>
+        </el-menu-item>
+        <el-menu-item index="/docker">
+          <el-icon><Ship /></el-icon>
+          <span>Docker</span>
+        </el-menu-item>
+        <el-menu-item index="/ops">
+          <el-icon><Tools /></el-icon>
+          <span>深度运维</span>
+        </el-menu-item>
+        <el-menu-item index="/ai">
+          <el-icon><ChatDotRound /></el-icon>
+          <span>AI 助手</span>
+        </el-menu-item>
+        <el-menu-item index="/sessions">
+          <el-icon><ChatLineRound /></el-icon>
+          <span>在线会话</span>
+        </el-menu-item>
+        <el-menu-item v-if="auth.isAdmin()" index="/users">
+          <el-icon><User /></el-icon>
+          <span>账号管理</span>
+        </el-menu-item>
+        <el-menu-item v-if="auth.isAdmin()" index="/backups">
+          <el-icon><CopyDocument /></el-icon>
+          <span>备份管理</span>
+        </el-menu-item>
+        <el-menu-item v-if="auth.isAdmin()" index="/alerts">
+          <el-icon><Bell /></el-icon>
+          <span>告警通知</span>
+        </el-menu-item>
+        <el-menu-item v-if="auth.isAdmin()" index="/settings">
+          <el-icon><Setting /></el-icon>
+          <span>系统设置</span>
+        </el-menu-item>
+        <el-menu-item v-if="auth.isAdmin()" index="/update">
+          <el-icon><Download /></el-icon>
+          <span>面板更新</span>
+        </el-menu-item>
       </el-menu>
       <div class="version">v{{ appVersion }}</div>
     </aside>
@@ -62,7 +113,8 @@
             </button>
             <template #dropdown>
               <el-dropdown-menu>
-                <el-dropdown-item command="reboot">重启服务器</el-dropdown-item>
+                <el-dropdown-item command="panel-restart">重启面板服务</el-dropdown-item>
+                <el-dropdown-item command="reboot" divided>重启服务器</el-dropdown-item>
                 <el-dropdown-item command="shutdown">关机</el-dropdown-item>
               </el-dropdown-menu>
             </template>
@@ -138,6 +190,25 @@ import http from "../api/http";
 import { useThemeStore } from "../stores/theme";
 import { useAuthStore } from "../stores/auth";
 import SettingsDialog from "../components/SettingsDialog.vue";
+import {
+  Odometer,
+  Cpu,
+  SetUp,
+  Document,
+  Folder,
+  Box,
+  Timer,
+  Connection,
+  Ship,
+  Tools,
+  ChatDotRound,
+  ChatLineRound,
+  User,
+  CopyDocument,
+  Bell,
+  Setting,
+  Download,
+} from "@element-plus/icons-vue";
 
 const route = useRoute();
 const router = useRouter();
@@ -226,9 +297,34 @@ const pageTitle = computed(() => titles[route.path] ?? "LYYS Panel");
 // 登出（P1-1）：先请求服务端吊销当前 token（旧 token 立即失效），
 // 再清本地凭证。吊销请求失败（如后端已不可达）不阻断本地登出，
 // token 本身有 24h 过期兜底。
-/// 服务器电源操作（admin）：二次确认后执行；机器断电/重启后无法收到
-/// 响应，直接给出提示即可。
-async function onPower(cmd: "reboot" | "shutdown") {
+/// 电源菜单（admin）：面板重启只影响本进程、轮询到恢复即报成功；
+/// 服务器重启/关机是整机危险操作，二次确认，指令发出后机器断电
+/// 响应回不来（无 response 的网络错误不代表失败）。
+async function onPower(cmd: "panel-restart" | "reboot" | "shutdown") {
+  if (cmd === "panel-restart") {
+    try {
+      await ElMessageBox.confirm(
+        "将重启面板服务（lyys-panel），期间页面短暂不可用，服务器其他服务不受影响。确定继续？",
+        "重启确认",
+        { type: "warning", confirmButtonText: "重启", cancelButtonText: "取消" },
+      );
+    } catch {
+      return;
+    }
+    http.post("/power", { action: cmd }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 1500));
+    for (let i = 0; i < 20; i++) {
+      try {
+        await http.get("/health", { timeout: 2000 });
+        ElMessage.success("面板已重启");
+        return;
+      } catch {
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+    ElMessage.warning("重启指令已发出，若页面无法访问请稍后刷新");
+    return;
+  }
   const label = cmd === "reboot" ? "重启服务器" : "关机";
   try {
     await ElMessageBox.confirm(

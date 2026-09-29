@@ -21,23 +21,20 @@
       </div>
       <div v-if="status?.has_update && !status.error" class="actions">
         <el-button type="primary" :loading="installing" @click="install">下载并安装</el-button>
-        <span class="hint">安装完成后需重启面板服务生效</span>
-      </div>
-      <!-- 统一的重启入口：自更新替换二进制后在此生效 -->
-      <div class="actions">
-        <el-button :loading="restarting" @click="restartPanel">重启面板服务</el-button>
-        <span class="hint">重启当前面板进程（不影响服务器上的其他服务）</span>
+        <span class="hint">安装完成后需重启面板服务生效（右上角电源菜单）</span>
       </div>
     </div>
 
     <div class="section-title">手动上传（内网环境旁路）</div>
     <div class="upload-row">
+      <el-button @click="pickFile">选择文件</el-button>
       <input
         ref="fileInput"
         type="file"
-        accept=".bin,application/octet-stream"
+        style="display: none"
         @change="onFileChange"
       />
+      <span class="filename mono">{{ fileName || "未选择文件" }}</span>
       <el-button :loading="uploading" :disabled="!fileName" @click="upload">
         上传并安装
       </el-button>
@@ -64,37 +61,41 @@ const appVersion = __APP_VERSION__;
 const status = ref<UpdateStatus | null>(null);
 const checking = ref(false);
 const installing = ref(false);
-const restarting = ref(false);
 const uploading = ref(false);
 const fileInput = ref<HTMLInputElement | null>(null);
 const fileName = ref("");
 
-/// 重启面板服务：请求发出后进程会被 systemctl 重启，本请求可能因
-/// 服务中断而失败——两种情况都轮询 health 直到服务恢复。
-async function restartPanel() {
+/// 安装成功后的收尾：询问是否立即重启面板。请求发出后进程会被
+/// systemctl 重启，本请求可能因服务中断而失败——两种情况都轮询
+/// health 直到服务恢复。
+async function promptRestart() {
   try {
     await ElMessageBox.confirm(
-      "将重启面板服务（lyys-panel），期间页面短暂不可用，其他服务不受影响。确定继续？",
-      "重启确认",
-      { type: "warning", confirmButtonText: "重启", cancelButtonText: "取消" },
+      "新版本二进制已就位，是否立即重启面板服务生效？",
+      "安装完成",
+      {
+        type: "warning",
+        confirmButtonText: "立即重启",
+        cancelButtonText: "稍后手动重启",
+      },
     );
   } catch {
+    ElMessage.info("已安装，稍后可通过右上角电源菜单重启面板生效");
     return;
   }
-  restarting.value = true;
   http.post("/power", { action: "panel-restart" }).catch(() => {});
   // 给旧进程一点退出时间，再开始探测
   await new Promise((r) => setTimeout(r, 1500));
   for (let i = 0; i < 20; i++) {
     try {
       await http.get("/health", { timeout: 2000 });
-      ElMessage.success("面板已重启");
-      break;
+      ElMessage.success("面板已重启，新版本已生效");
+      return;
     } catch {
       await new Promise((r) => setTimeout(r, 1000));
     }
   }
-  restarting.value = false;
+  ElMessage.warning("重启指令已发出，若页面无法访问请稍后刷新");
 }
 
 async function check() {
@@ -121,13 +122,17 @@ async function install() {
   }
   installing.value = true;
   try {
-    const { data } = await http.post("/update/install", null, { timeout: 300000 });
-    ElMessage.success(data.message ?? "已安装，重启服务后生效");
+    await http.post("/update/install", null, { timeout: 300000 });
+    await promptRestart();
   } catch (e: any) {
     ElMessage.error(e.response?.data?.error ?? "安装失败");
   } finally {
     installing.value = false;
   }
+}
+
+function pickFile() {
+  fileInput.value?.click();
 }
 
 function onFileChange() {
@@ -150,11 +155,11 @@ async function upload() {
   uploading.value = true;
   try {
     const buf = await f.arrayBuffer();
-    const { data } = await http.post("/update/upload", buf, {
+    await http.post("/update/upload", buf, {
       headers: { "Content-Type": "application/octet-stream" },
       timeout: 300000,
     });
-    ElMessage.success(data.message ?? "已安装，重启服务后生效");
+    await promptRestart();
   } catch (e: any) {
     ElMessage.error(e.response?.data?.error ?? "上传失败");
   } finally {
@@ -164,19 +169,20 @@ async function upload() {
 </script>
 
 <style scoped>
+/* 间距统一：区块间 20px、块内 12px、行内 8px 三档 */
 .status-block {
   background: var(--el-bg-color);
   border-radius: var(--radius);
   padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
   margin-bottom: 20px;
 }
 .status-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   font-size: 13px;
 }
 .label {
@@ -196,22 +202,26 @@ async function upload() {
 .actions {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
 }
 .section-title {
   font-size: 14px;
   font-weight: 500;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
 }
 .upload-row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 8px;
+  gap: 8px;
+  margin-bottom: 12px;
 }
-.upload-row input[type="file"] {
-  font-size: 13px;
+.filename {
+  font-size: 12px;
   color: var(--el-text-color-secondary);
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .hint {
   font-size: 12px;
