@@ -239,12 +239,21 @@ async function onPower(cmd: "reboot" | "shutdown") {
   }
   try {
     await http.post("/power", { action: cmd });
-    ElMessage.warning(
-      cmd === "reboot" ? "服务器重启中，约 1-2 分钟后重新访问面板" : "服务器已关机，需手动开机",
-    );
   } catch (e: any) {
+    // 指令发出后机器立即断电/重启，响应大概率回不来（无 response 的网络错误）。
+    // 这不代表失败：只有拿到明确错误响应（4xx/5xx）才算指令被拒绝。
+    if (!e?.response) {
+      ElMessage.warning(
+        cmd === "reboot" ? "服务器重启中，约 1-2 分钟后重新访问面板" : "服务器关机中，需手动开机",
+      );
+      return;
+    }
     ElMessage.error(e?.response?.data?.error ?? `${label}指令失败`);
+    return;
   }
+  ElMessage.warning(
+    cmd === "reboot" ? "服务器重启中，约 1-2 分钟后重新访问面板" : "服务器已关机，需手动开机",
+  );
 }
 
 async function logout() {
