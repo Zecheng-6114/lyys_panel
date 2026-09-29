@@ -363,6 +363,12 @@ async function send() {
   display: flex;
   flex-direction: column;
 }
+/* 按钮与单行输入框等高（textarea：21px 行高 + 12px 上下内边距 = 33px），
+   消除发送/停止按钮比输入框矮一截的错位感 */
+.btns :deep(.el-button) {
+  height: 33px;
+  margin: 0;
+}
 @media (max-width: 768px) {
   .ai {
     height: calc(100vh - var(--topbar-h, 52px) - 24px);
