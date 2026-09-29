@@ -20,20 +20,31 @@
       <el-button size="small" :disabled="streaming" @click="clearChat">清空会话</el-button>
     </div>
 
-    <!-- 消息区：流式渲染时自动滚动到底部 -->
-    <div ref="msgsEl" class="msgs">
-      <div v-if="messages.length === 0" class="empty">
-        <div class="empty-title">AI 助手</div>
-        <div class="empty-sub">基于 OpenAI 兼容接口，输入问题开始对话</div>
+    <!-- 消息区：有新内容时贴底滚动，用户上滑查看历史则暂停自动跟随 -->
+    <div class="msgs-wrap">
+      <div ref="msgsEl" class="msgs" @scroll="onScroll">
+        <div v-if="messages.length === 0" class="empty">
+          <div class="empty-title">AI 助手</div>
+          <div class="empty-sub">基于 OpenAI 兼容接口，输入问题开始对话</div>
+        </div>
+        <div
+          v-for="(m, i) in messages"
+          :key="i"
+          class="msg"
+          :class="{ user: m.role === 'user', error: m.role === 'error' }"
+        >
+          <div class="bubble">{{ m.content }}<span v-if="m.streaming" class="cursor">▍</span></div>
+        </div>
       </div>
-      <div
-        v-for="(m, i) in messages"
-        :key="i"
-        class="msg"
-        :class="{ user: m.role === 'user', error: m.role === 'error' }"
+      <el-button
+        v-show="!stickBottom && messages.length"
+        class="to-bottom"
+        size="small"
+        round
+        @click="jumpBottom"
       >
-        <div class="bubble">{{ m.content }}<span v-if="m.streaming" class="cursor">▍</span></div>
-      </div>
+        回到底部 ↓
+      </el-button>
     </div>
 
     <div class="input-row">
@@ -41,7 +52,7 @@
         v-model="draft"
         class="draft"
         type="textarea"
-        :rows="3"
+        :rows="1"
         resize="none"
         placeholder="输入消息，Enter 发送 / Shift+Enter 换行"
         @keydown="onKey"
@@ -96,11 +107,30 @@ const streaming = ref(false);
 const msgsEl = ref<HTMLElement>();
 let aborter: AbortController | null = null;
 
-function scrollBottom() {
+// 贴底跟随开关：有新内容且用户位于底部附近时自动滚动；
+// 用户向上滚动查看历史时暂停自动跟随，回到底部（或点"回到底部"）后恢复。
+const stickBottom = ref(true);
+// 距底部 24px 内视为贴底，容忍亚像素/四舍五入误差
+const NEAR_BOTTOM = 24;
+
+function onScroll() {
+  const el = msgsEl.value;
+  if (!el) return;
+  stickBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM;
+}
+
+function scrollBottom(force = false) {
+  if (!stickBottom.value && !force) return;
   nextTick(() => {
     const el = msgsEl.value;
     if (el) el.scrollTop = el.scrollHeight;
   });
+}
+
+// 手动回到底部：强制滚动并恢复自动跟随
+function jumpBottom() {
+  stickBottom.value = true;
+  scrollBottom(true);
 }
 
 function onKey(e: KeyboardEvent) {
@@ -136,7 +166,9 @@ async function send() {
     )
     .map((m) => ({ role: m.role, content: m.content }));
   messages.push({ role: "user", content });
-  scrollBottom();
+  // 用户主动发送新消息：恢复贴底跟随
+  stickBottom.value = true;
+  scrollBottom(true);
 
   const reply = reactive<ChatMsg>({ role: "assistant", content: "", streaming: true });
   messages.push(reply);
@@ -234,6 +266,12 @@ async function send() {
 .spacer {
   flex: 1;
 }
+.msgs-wrap {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+}
 .msgs {
   flex: 1;
   min-height: 0;
@@ -297,6 +335,15 @@ async function send() {
     opacity: 0;
   }
 }
+/* 距底部较远时的"回到底部"引导 */
+.to-bottom {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1;
+  box-shadow: var(--el-box-shadow-light);
+}
 .input-row {
   flex: none;
   display: flex;
@@ -306,6 +353,11 @@ async function send() {
 }
 .draft {
   flex: 1;
+}
+/* 收紧输入框：单行高度，去掉多余 padding，与整体视觉协调 */
+.draft :deep(.el-textarea__inner) {
+  padding: 6px 10px;
+  line-height: 1.5;
 }
 .btns {
   display: flex;
