@@ -1575,6 +1575,121 @@ async fn dashboard_config_set(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+// ---------- AI API 配置（设置页） ----------
+
+/// settings 表键名与解析逻辑都在 ai.rs，保持单一事实来源
+const AI_CONFIG_KEY: &str = crate::ai::AI_CONFIG_KEY;
+/// 配置 JSON 字节上限：三个短字符串而已，4KB 已远超需要，纯防滥用
+const AI_CONFIG_MAX_BYTES: usize = 4 * 1024;
+const AI_BASE_MAX_LEN: usize = 512;
+const AI_KEY_MAX_LEN: usize = 512;
+const AI_MODEL_MAX_LEN: usize = 128;
+
+/// 密钥脱敏回显：≥8 字符保留末 4 位，更短的一律全遮。
+/// 任何接口都不应返回密钥明文，这是唯一的回显形态。
+fn mask_key(key: &str) -> String {
+    let n = key.chars().count();
+    if n >= 8 {
+        let tail: String = key.chars().skip(n - 4).collect();
+        format!("••••{tail}")
+    } else {
+        "••••".to_string()
+    }
+}
+
+/// 保存前校验（独立成函数以便单元测试）：长度上限 + 地址协议白名单。
+/// 密钥内容不校验格式（各家供应商前缀不一），只限制长度。
+fn validate_ai_config(base: &str, key: &str, model: &str) -> Result<(), String> {
+    if base.len() > AI_BASE_MAX_LEN {
+        return Err("上游 API 地址过长".into());
+    }
+    if !base.is_empty() && !base.starts_with("http://") && !base.starts_with("https://") {
+        return Err("上游 API 地址必须以 http(s):// 开头".into());
+    }
+    if key.len() > AI_KEY_MAX_LEN {
+        return Err("API 密钥过长".into());
+    }
+    if model.len() > AI_MODEL_MAX_LEN {
+        return Err("模型名过长".into());
+    }
+    Ok(())
+}
+
+/// 读取 AI API 配置（登录即可，AI 聊天页的「未配置」提示要用）。
+/// 密钥只回 `key_masked`（脱敏）与 `key_set`（是否已存），绝不回明文。
+async fn ai_config_get(
+    State(state): State<AppState>,
+    _user: AuthUser,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let stored = crate::ai::parse_stored(
+        state.db.get_setting_async(AI_CONFIG_KEY).await?,
+    );
+    let env_key = crate::ai::env_var("AI_API_KEY").is_some();
+    let key_set = !stored.key.trim().is_empty();
+    // 回显「生效值」：设置页为空时环境变量/默认值兜底，便于管理员核对
+    let base = if stored.base.trim().is_empty() {
+        crate::ai::env_var("AI_API_BASE")
+            .unwrap_or_else(|| "https://api.openai.com/v1".into())
+    } else {
+        stored.base.trim().to_string()
+    };
+    let model = if stored.model.trim().is_empty() {
+        crate::ai::env_var("AI_MODEL").unwrap_or_else(|| "gpt-4o-mini".into())
+    } else {
+        stored.model.trim().to_string()
+    };
+    Ok(Json(serde_json::json!({
+        "config": {
+            "base": base,
+            "model": model,
+            "key_set": key_set,
+            "key_masked": if key_set { Some(mask_key(stored.key.trim())) } else { None },
+            "env_key_set": env_key,
+            "configured": key_set || env_key,
+        }
+    })))
+}
+
+/// 保存 AI API 配置（仅 admin）。字段语义：
+/// - `base`/`model`：传值即覆盖（空串=清除，回退环境变量/默认值）；
+/// - `key`：`None` = 不改（前端不传即保留原密钥），空串 = 清除，非空 = 覆盖。
+async fn ai_config_set(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if body.len() > AI_CONFIG_MAX_BYTES {
+        return Err(ApiError::bad("AI 配置过大"));
+    }
+    let text = String::from_utf8(body.to_vec())
+        .map_err(|_| ApiError::bad("AI 配置必须是 UTF-8 JSON"))?;
+    #[derive(Deserialize)]
+    struct Req {
+        base: Option<String>,
+        key: Option<String>,
+        model: Option<String>,
+    }
+    let req: Req =
+        serde_json::from_str(&text).map_err(|_| ApiError::bad("AI 配置 JSON 无法解析"))?;
+    let mut stored = crate::ai::parse_stored(
+        state.db.get_setting_async(AI_CONFIG_KEY).await?,
+    );
+    if let Some(v) = req.base {
+        stored.base = v.trim().to_string();
+    }
+    if let Some(v) = req.key {
+        stored.key = v.trim().to_string();
+    }
+    if let Some(v) = req.model {
+        stored.model = v.trim().to_string();
+    }
+    validate_ai_config(&stored.base, &stored.key, &stored.model).map_err(ApiError::bad)?;
+    let json = serde_json::to_string(&stored)
+        .map_err(|_| ApiError::bad("AI 配置序列化失败"))?;
+    state.db.set_setting_async(AI_CONFIG_KEY, &json).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 // ---------- 4.3 深度运维 ----------
 
 /// 服务 unit 文件内容查看（只读）。所有角色可用（viewer 也允许查看）。
@@ -2058,7 +2173,8 @@ pub fn router(state: AppState) -> Router {
         // （from_fn 不支持 State 提取器，必须用 from_fn_with_state）
         .layer(middleware::from_fn_with_state(state.clone(), audit_mw))
         // AI 助手：OpenAI 兼容 chat/completions 流式转发，需登录
-        .route("/ai/chat", post(crate::ai::ai_chat));
+        .route("/ai/chat", post(crate::ai::ai_chat))
+        .route("/ai/config", get(ai_config_get).post(ai_config_set));
     Router::new()
         .route("/health", get(health))
         .route("/api/login", post(login))
@@ -2069,7 +2185,10 @@ pub fn router(state: AppState) -> Router {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_dashboard_config, validate_theme};
+    use super::{
+        mask_key, validate_ai_config, validate_dashboard_config, validate_theme, AI_BASE_MAX_LEN,
+        AI_KEY_MAX_LEN, AI_MODEL_MAX_LEN,
+    };
     use serde_json::json;
 
     // ---------- 4.2 仪表盘配置校验 ----------
@@ -2223,5 +2342,50 @@ mod tests {
         // version：必须是数字
         assert!(validate_theme(&json!({ "version": "1" })).is_err());
         assert!(validate_theme(&json!({ "version": 2 })).is_ok());
+    }
+
+    // ---------- AI API 配置校验（设置页） ----------
+
+    /// 三项全空 = 全部回退环境变量/默认值，必须放行
+    #[test]
+    fn ai_config_empty_passes() {
+        assert!(validate_ai_config("", "", "").is_ok());
+    }
+
+    /// 地址：只接受 http(s):// 开头，其余一律拒绝
+    #[test]
+    fn ai_config_base_validation() {
+        for b in ["https://api.openai.com/v1", "http://127.0.0.1:8000/v1"] {
+            assert!(validate_ai_config(b, "", "").is_ok(), "应接受合法地址：{b}");
+        }
+        for b in ["ftp://evil", "api.example.com/v1", "javascript:alert(1)", "//x"] {
+            assert!(validate_ai_config(b, "", "").is_err(), "应拒绝非法地址：{b:?}");
+        }
+    }
+
+    /// 长度上限：超限拒绝，上限值本身放行
+    #[test]
+    fn ai_config_length_limits() {
+        let base_ok = format!("https://a{}", "b".repeat(AI_BASE_MAX_LEN - 10));
+        assert!(validate_ai_config(&base_ok, "", "").is_ok());
+        let base_bad = format!("https://{}", "a".repeat(AI_BASE_MAX_LEN));
+        assert!(validate_ai_config(&base_bad, "", "").is_err());
+        assert!(validate_ai_config("", &"k".repeat(AI_KEY_MAX_LEN), "").is_ok());
+        assert!(validate_ai_config("", &"k".repeat(AI_KEY_MAX_LEN + 1), "").is_err());
+        assert!(validate_ai_config("", "", &"m".repeat(AI_MODEL_MAX_LEN)).is_ok());
+        assert!(validate_ai_config("", "", &"m".repeat(AI_MODEL_MAX_LEN + 1)).is_err());
+    }
+
+    /// 密钥脱敏：长密钥保留末 4 位，短密钥全遮，绝不出现完整明文
+    #[test]
+    fn ai_config_key_masking() {
+        assert_eq!(mask_key("sk-1234567890abcdef"), "••••cdef");
+        // 8 字符恰好保留末 4 位
+        assert_eq!(mask_key("12345678"), "••••5678");
+        // 7 字符及以下全遮
+        assert_eq!(mask_key("short"), "••••");
+        assert_eq!(mask_key(""), "••••");
+        let m = mask_key("sk-1234567890abcdef");
+        assert!(!m.contains("sk-"), "脱敏结果不得包含明文前缀：{m}");
     }
 }

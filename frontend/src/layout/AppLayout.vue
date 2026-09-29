@@ -23,6 +23,7 @@
         <el-menu-item v-if="auth.isAdmin()" index="/users">账号管理</el-menu-item>
         <el-menu-item v-if="auth.isAdmin()" index="/backups">备份管理</el-menu-item>
         <el-menu-item v-if="auth.isAdmin()" index="/alerts">告警通知</el-menu-item>
+        <el-menu-item v-if="auth.isAdmin()" index="/settings">系统设置</el-menu-item>
         <el-menu-item v-if="auth.isAdmin()" index="/update">面板更新</el-menu-item>
       </el-menu>
       <div class="version">v{{ appVersion }}</div>
@@ -218,6 +219,7 @@ const titles: Record<string, string> = {
   "/backups": "备份管理",
   "/alerts": "告警通知",
   "/update": "面板更新",
+  "/settings": "系统设置",
 };
 const pageTitle = computed(() => titles[route.path] ?? "LYYS Panel");
 

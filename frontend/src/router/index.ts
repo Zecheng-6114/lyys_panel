@@ -102,6 +102,13 @@ const routes: RouteRecordRaw[] = [
         component: () => import("../views/Alerts.vue"),
         meta: { adminOnly: true },
       },
+      {
+        // 系统设置（当前仅 AI API 配置）：保存仅 admin，GET /ai/config 登录即可
+        path: "settings",
+        name: "settings",
+        component: () => import("../views/Settings.vue"),
+        meta: { adminOnly: true },
+      },
     ],
   },
 ];

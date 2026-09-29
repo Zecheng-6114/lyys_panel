@@ -1,5 +1,19 @@
 <template>
   <div class="ai">
+    <!-- 未配置 AI 上游时引导管理员去设置页（4.5） -->
+    <el-alert v-if="!aiConfigured" class="cfg-tip" type="warning" :closable="false">
+      <template #title>
+        AI 功能尚未配置上游 API（地址 / 密钥 / 模型），暂时无法对话。
+        <el-button
+          v-if="auth.isAdmin()"
+          link
+          type="primary"
+          @click="router.push('/settings')"
+        >
+          前往系统设置
+        </el-button>
+      </template>
+    </el-alert>
     <div class="toolbar">
       <span class="hint">会话仅保存在当前页面，刷新或离开后清空</span>
       <span class="spacer" />
@@ -49,7 +63,26 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, reactive, ref } from "vue";
+import { nextTick, onMounted, reactive, ref } from "vue";
+import { useRouter } from "vue-router";
+import { ElMessage } from "element-plus";
+import { useAuthStore } from "../stores/auth";
+import http from "../api/http";
+
+const router = useRouter();
+const auth = useAuthStore();
+// 上游是否已配置（设置页密钥或环境变量任一即可）；加载失败按已配置处理，
+// 避免一次网络抖动让聊天页出现误导性的“未配置”横幅。
+const aiConfigured = ref(true);
+
+onMounted(async () => {
+  try {
+    const resp = await http.get("/ai/config", { timeout: 5000 });
+    aiConfigured.value = !!resp.data?.config?.configured;
+  } catch {
+    /* 保持默认 true */
+  }
+});
 
 interface ChatMsg {
   role: "user" | "assistant" | "error";

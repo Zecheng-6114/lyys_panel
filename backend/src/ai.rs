@@ -2,13 +2,15 @@
 //!
 //! 设计边界（4.4 AI 重写范围）：
 //! - 只做无状态转发：不存会话、不做记忆、不做工具调用，历史由前端随请求携带；
-//! - 上游地址 / 密钥 / 模型全部来自环境变量，不落数据库、不进日志；
+//! - 上游地址 / 密钥 / 模型来自设置页配置（settings 表）或环境变量，
+//!   密钥不进日志、不向前端明文回显；
 //! - 流式透传上游 SSE 字节流，前端按 SSE 解析，后端不做内容改写。
 //!
-//! 配置（panel.env / systemd 环境变量，改后重启面板生效）：
-//! - `AI_API_KEY`  必填，上游 API 密钥（Bearer Token）；
-//! - `AI_API_BASE` 选填，默认 `https://api.openai.com/v1`，填到 /v1 为止；
-//! - `AI_MODEL`    选填，默认 `gpt-4o-mini`。
+//! 配置来源与优先级（高 → 低）：
+//! 1. 设置页配置（settings 表 `ai_api_config`，经 /api/ai/config 保存）；
+//! 2. 环境变量（panel.env / systemd，改后重启面板生效）；
+//! 3. 内置默认值（base=`https://api.openai.com/v1`，model=`gpt-4o-mini`）。
+//!    密钥没有默认值：设置页与环境变量都未配置时，对话请求返回 400。
 
 use std::sync::OnceLock;
 
@@ -22,12 +24,36 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::api::AuthUser;
+use crate::db::Db;
 use crate::AppState;
 
 /// 请求体上限：单条消息内容最大字节数（UTF-8）。防御性限制，正常问答远用不到。
 const MAX_CONTENT_BYTES: usize = 32 * 1024;
 /// 请求体上限：一次请求最多携带的消息条数（含 system/assistant 历史）。
 const MAX_MESSAGES: usize = 64;
+
+/// settings 表中 AI 配置的键名（值为 JSON，见 [`StoredAiConfig`]）。
+/// api.rs 的 /api/ai/config 读写同一键，两处必须保持一致。
+pub(super) const AI_CONFIG_KEY: &str = "ai_api_config";
+
+/// 设置页持久化的 AI 配置（settings 表，JSON 序列化存储）。
+/// 字段均可缺省/为空：空值表示该项回退到环境变量或内置默认。
+#[derive(Default, Deserialize, Serialize)]
+pub(super) struct StoredAiConfig {
+    #[serde(default)]
+    pub base: String,
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub model: String,
+}
+
+/// 从 settings 表原始值解析配置；缺失/损坏一律按未配置处理（回退环境变量），
+/// 不让一条坏数据把整个 AI 功能打挂。
+pub(super) fn parse_stored(raw: Option<String>) -> StoredAiConfig {
+    raw.and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
 
 /// 本模块专用错误：与 api::ApiError 同构（JSON `{"error": ...}`），
 /// 因 ApiError 的构造器不对外公开，这里单独实现一份。
@@ -41,6 +67,12 @@ impl AiError {
     fn bad(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
+            message: msg.into(),
+        }
+    }
+    fn internal(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
             message: msg.into(),
         }
     }
@@ -82,31 +114,52 @@ fn http_client() -> &'static reqwest::Client {
     })
 }
 
-/// 读取并校验 AI 配置。每次请求都读环境变量：改配置后重启面板即可生效，
-/// 无需为此引入配置热更新机制。
-fn ai_config() -> Result<(String, String, String), AiError> {
-    let key = std::env::var("AI_API_KEY")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .ok_or_else(|| {
-            AiError::bad("AI 功能未配置：请在面板环境变量中设置 AI_API_KEY 后重启面板")
-        })?;
-    let base = std::env::var("AI_API_BASE")
-        .unwrap_or_else(|_| "https://api.openai.com/v1".into())
-        .trim()
-        .trim_end_matches('/')
-        .to_string();
+/// 读取环境变量的辅助：空串视为未配置。
+/// api.rs 的 ai_config_get 回显生效值时也要读环境变量，故设 pub(super)。
+pub(super) fn env_var(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.trim().is_empty())
+}
+
+/// 配置合并（settings 优先、环境变量兜底），独立成纯函数便于单测
+/// （进程级环境变量是全局的，DB 依赖没法进单元测试）。
+/// 返回 (base, key, model)；key 两级都取不到时报 BAD_REQUEST。
+fn resolve(stored: &StoredAiConfig) -> Result<(String, String, String), AiError> {
+    // 密钥：设置页 > 环境变量，均无则未配置
+    let key = if stored.key.trim().is_empty() {
+        env_var("AI_API_KEY").ok_or_else(|| {
+            AiError::bad("AI 功能未配置：请在设置页或环境变量中配置 API 密钥")
+        })?
+    } else {
+        stored.key.trim().to_string()
+    };
+    // 上游地址：设置页 > 环境变量 > 默认值，统一去掉尾部斜杠
+    let base = if stored.base.trim().is_empty() {
+        env_var("AI_API_BASE").unwrap_or_else(|| "https://api.openai.com/v1".into())
+    } else {
+        stored.base.trim().to_string()
+    }
+    .trim_end_matches('/')
+    .to_string();
     if !base.starts_with("http://") && !base.starts_with("https://") {
-        return Err(AiError::bad("AI_API_BASE 配置无效：必须以 http(s):// 开头"));
+        return Err(AiError::bad("上游 API 地址无效：必须以 http(s):// 开头"));
     }
-    let model = std::env::var("AI_MODEL")
-        .unwrap_or_else(|_| "gpt-4o-mini".into())
-        .trim()
-        .to_string();
-    if model.is_empty() {
-        return Err(AiError::bad("AI_MODEL 配置无效：不能为空"));
-    }
+    // 模型名：设置页 > 环境变量 > 默认值
+    let model = if stored.model.trim().is_empty() {
+        env_var("AI_MODEL").unwrap_or_else(|| "gpt-4o-mini".into())
+    } else {
+        stored.model.trim().to_string()
+    };
     Ok((base, key, model))
+}
+
+/// 汇总设置页配置与环境变量，得到生效的三元组。每次请求都现读：
+/// 设置页保存后下一个请求立即生效，无需重启面板。
+async fn ai_config(db: &Db) -> Result<(String, String, String), AiError> {
+    let raw = db
+        .get_setting_async(AI_CONFIG_KEY)
+        .await
+        .map_err(|e| AiError::internal(format!("读取 AI 配置失败：{e}")))?;
+    resolve(&parse_stored(raw))
 }
 
 /// POST /api/ai/chat（需登录）
@@ -137,14 +190,14 @@ fn validate(req: &ChatReq) -> Result<(), String> {
 }
 
 pub(super) async fn ai_chat(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     // 提取器本身即鉴权：token 无效/被吊销直接 401
     _user: AuthUser,
     Json(req): Json<ChatReq>,
 ) -> Result<Response, AiError> {
     validate(&req).map_err(AiError::bad)?;
 
-    let (base, key, model) = ai_config()?;
+    let (base, key, model) = ai_config(&state.db).await?;
     let body = serde_json::json!({
         "model": model,
         "messages": req.messages,
@@ -158,8 +211,9 @@ pub(super) async fn ai_chat(
         .send()
         .await
         .map_err(|e| {
-            tracing::warn!("AI 上游连接失败：{e}");
-            AiError::upstream("无法连接 AI 服务，请检查 AI_API_BASE 网络配置")
+            // 只记错误与地址，绝不记录密钥
+            tracing::warn!("AI 上游连接失败：{e}（base={base}）");
+            AiError::upstream("无法连接 AI 服务，请检查上游 API 地址与网络配置")
         })?;
 
     let status = resp.status();
@@ -218,34 +272,69 @@ mod tests {
         }
     }
 
-    // 三个场景共用一个 #[test]：ai_config 读进程级环境变量，
+    // 所有场景共用一个 #[test]：resolve 读进程级环境变量，
     // 拆成多个并行 test 会互相污染（env 是全局的），必须串行执行。
     #[test]
-    fn config_env_handling() {
-        // 1) 未配置密钥：报未配置（BAD_REQUEST）
+    fn config_resolution() {
+        // 1) 设置页与环境变量均未配置密钥：报未配置（BAD_REQUEST）
         std::env::remove_var("AI_API_KEY");
-        let e = err_of(ai_config());
+        let e = err_of(resolve(&StoredAiConfig::default()));
         assert_eq!(e.status, StatusCode::BAD_REQUEST);
-        assert!(e.message.contains("AI_API_KEY"));
 
-        // 2) base 协议非法：拒绝
-        std::env::set_var("AI_API_KEY", "sk-test");
-        std::env::set_var("AI_API_BASE", "ftp://evil");
-        let e = err_of(ai_config());
-        assert_eq!(e.status, StatusCode::BAD_REQUEST);
-        assert!(e.message.contains("AI_API_BASE"));
-
-        // 3) 缺省值 + 去尾部斜杠
-        std::env::set_var("AI_API_KEY", "sk-test");
-        std::env::set_var("AI_API_BASE", "https://api.example.com/v1/");
-        std::env::remove_var("AI_MODEL");
-        let (base, key, model) = ai_config().expect("valid config should pass");
-        assert_eq!(base, "https://api.example.com/v1");
-        assert_eq!(key, "sk-test");
+        // 2) 仅设置页配置密钥即可用，base/model 回退默认值
+        let stored = StoredAiConfig {
+            key: "sk-stored".into(),
+            ..Default::default()
+        };
+        let (base, key, model) = resolve(&stored).expect("stored key should pass");
+        assert_eq!(base, "https://api.openai.com/v1");
+        assert_eq!(key, "sk-stored");
         assert_eq!(model, "gpt-4o-mini");
+
+        // 3) 环境变量兜底 + 协议校验
+        std::env::set_var("AI_API_KEY", "sk-env");
+        std::env::set_var("AI_API_BASE", "ftp://evil");
+        let e = err_of(resolve(&StoredAiConfig::default()));
+        assert_eq!(e.status, StatusCode::BAD_REQUEST);
+        assert!(e.message.contains("http(s)"));
+
+        // 4) 设置页覆盖环境变量 + 去尾部斜杠
+        let stored = StoredAiConfig {
+            base: "https://api.example.com/v1/".into(),
+            key: "sk-stored".into(),
+            model: "my-model".into(),
+        };
+        std::env::set_var("AI_API_BASE", "https://env.example.com/v1");
+        std::env::set_var("AI_MODEL", "env-model");
+        let (base, key, model) = resolve(&stored).expect("valid config should pass");
+        assert_eq!(base, "https://api.example.com/v1");
+        assert_eq!(key, "sk-stored");
+        assert_eq!(model, "my-model");
+
+        // 5) 设置页字段留空 = 该项回退环境变量
+        let stored = StoredAiConfig {
+            base: "  ".into(),
+            key: "sk-stored".into(),
+            model: String::new(),
+        };
+        let (base, _, model) = resolve(&stored).expect("fallback to env");
+        assert_eq!(base, "https://env.example.com/v1");
+        assert_eq!(model, "env-model");
 
         std::env::remove_var("AI_API_KEY");
         std::env::remove_var("AI_API_BASE");
+        std::env::remove_var("AI_MODEL");
+    }
+
+    #[test]
+    fn parse_stored_tolerates_bad_data() {
+        assert_eq!(parse_stored(None).key, "");
+        assert_eq!(parse_stored(Some(String::new())).key, "");
+        assert_eq!(parse_stored(Some("not json".into())).base, "");
+        let stored = parse_stored(Some(r#"{"base":"https://a/v1","key":"k"}"#.into()));
+        assert_eq!(stored.base, "https://a/v1");
+        assert_eq!(stored.key, "k");
+        assert_eq!(stored.model, "");
     }
 
     #[test]
