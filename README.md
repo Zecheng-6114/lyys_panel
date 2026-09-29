@@ -8,7 +8,7 @@
 
 ## 简介
 
-LYYS Panel 面向单台 Linux 服务器的日常运维，把系统监控、进程与服务管理、日志、文件、软件包、计划任务、网络与 Docker 等操作收进一个 Web 界面。
+LYYS Panel 面向单台 Linux 服务器的日常运维，把系统监控、进程与服务管理、日志、文件、软件包、计划任务、网络、Docker、AI 助手、备份恢复、自更新与告警等操作收进一个 Web 界面。
 
 整个产品编译为一个静态 Rust 二进制，前端构建产物在编译期打入其中，目标机器零运行时依赖——随构建机不同也不需要 Node 环境。适合受信内网自托管。
 
@@ -21,21 +21,30 @@ LYYS Panel 面向单台 Linux 服务器的日常运维，把系统监控、进�
 
 | 模块 | 说明 |
 |---|---|
-| 仪表盘 | CPU / 内存 / 磁盘 / 网络实时快照，历史趋势折线图 |
+| 仪表盘 | CPU / 内存 / 磁盘 / 网络 / 负载 / 进程数实时卡片，历史趋势折线图（可选时间窗） |
 | 进程 | 进程列表查看与结束 |
 | 服务 | systemd 服务查看、启动 / 停止 / 重启 |
+| 运维 | 磁盘 SMART 健康、unit 文件查看、系统快捷入口 |
 | 日志 | journal 日志查询、日志文件列表与实时 tail |
 | 文件 | 目录浏览、在线编辑、上传下载、新建 / 重命名 / 删除 |
 | 软件 | 包列表、可升级查询、搜索、安装 / 卸载 / 升级（Debian 系 apt、Arch 系 pacman） |
 | 计划任务 | crontab 增删改查 |
 | 网络 | 网卡、路由、连接、DNS 查看 |
 | Docker | 容器列表与启动 / 停止 / 重启 / 删除、容器日志、镜像拉取与删除、Compose 项目启停；未安装时页面上可直接安装 |
+| AI 助手 | 流式对话（OpenAI 兼容上游，支持 Ollama 等本地模型），配置可在设置页在线修改 |
+| 备份 | 数据库快照列表 / 立即备份 / 下载 / 删除 / 恢复（重启生效），每日自动备份保留 7 份 |
+| 面板更新 | 检查 GitHub Release、在线下载替换二进制、内网手动上传旁路 |
+| 告警 | CPU / 内存 / 磁盘阈值规则（滞回防抖）、事件历史、可选 webhook 通知 |
+| 账号 | 多用户 + RBAC（admin / viewer）、会话管理、操作审计日志 |
 
 **亮点**
 
 - 单二进制、零 Node 依赖，部署即拷即用
-- 实时监控快照与历史趋势
-- Docker 一键安装与容器 / 镜像 / Compose 管理
+- 默认 HTTPS（自签证书自动生成，可挂正式证书）
+- 实时监控快照与历史趋势（小时聚合 + 保留策略）
+- 在线自更新（GitHub Release 下载 → 校验 → 原子替换 → 重启生效）
+- AI 流式对话，支持接入本地 Ollama 模型
+- 界面使用 HarmonyOS Sans SC 字体（表格数字保证数据列对齐）
 - 所有数据落本地 SQLite，无云端依赖
 
 ## 安全说明
@@ -53,8 +62,8 @@ LYYS Panel 面向单台 Linux 服务器的日常运维，把系统监控、进�
 
 ## 技术栈
 
-- **后端**：Rust · Axum 0.8 · Tokio · rusqlite（bundled，无外部 SQLite 依赖）· JWT + Argon2
-- **前端**：Vue 3 · TypeScript · Vite 5 · Element Plus · Pinia · ECharts
+- **后端**：Rust · Axum 0.8 · Tokio · rusqlite（bundled，无外部 SQLite 依赖）· JWT + Argon2 · rustls（TLS）
+- **前端**：Vue 3 · TypeScript · Vite 5 · Element Plus · Pinia · ECharts · HarmonyOS Sans SC
 - **前端嵌入**：`rust-embed` 编译期把 `frontend/dist` 打入二进制
 
 ## 快速开始
@@ -138,6 +147,9 @@ cd frontend && npm run dev
 | `PANEL_TLS` | `auto` | `auto`=首启生成自签证书启用 HTTPS；`custom`+`PANEL_TLS_CERT`/`PANEL_TLS_KEY`=已有证书；`off`=纯 HTTP |
 | `PANEL_HTTP_PORT` | 未设置 | 设置后额外监听一个纯 HTTP 端口，301 跳转到 HTTPS |
 | `PANEL_JWT_SECRET` | 自动生成 | JWT 签名密钥（≥32 字节）；未设置时使用数据目录下的 0600 密钥文件 |
+| `AI_API_BASE` | `https://api.openai.com/v1` | AI 上游地址（OpenAI 兼容，Ollama 为 `http://<host>:11434/v1`）。设置页配置优先于环境变量 |
+| `AI_API_KEY` | 无 | AI 上游密钥；未配置时 AI 功能拒绝请求。设置页配置优先 |
+| `AI_MODEL` | `gpt-4o-mini` | AI 对话模型名。设置页配置优先 |
 
 未设置 `PANEL_ADMIN_PASSWORD` 时会生成随机密码并打印到日志。
 
@@ -253,9 +265,14 @@ lyys_panel/
 │   │   ├── main.rs         入口、配置、路由装配
 │   │   ├── api.rs          HTTP 处理器与路由表
 │   │   ├── auth.rs         登录、JWT、Argon2、管理员引导、登录退避
-│   │   ├── db.rs           SQLite 连接池与建表
+│   │   ├── db.rs           SQLite 连接池、版本化迁移与建表
 │   │   ├── embed.rs        内嵌前端资源服务（含 SPA 回退与缓存头）
-│   │   ├── monitor.rs      系统指标采集
+│   │   ├── tls.rs          HTTPS：自签证书生成 / 正式证书加载
+│   │   ├── monitor.rs      系统指标采集、小时聚合与保留清理
+│   │   ├── alerts.rs       阈值告警规则（滞回状态机）与 webhook 通知
+│   │   ├── backup.rs       数据库备份 / 恢复（VACUUM INTO + 标记重启生效）
+│   │   ├── update.rs       自更新（GitHub Release 检查 / 下载 / 校验 / 原子替换）
+│   │   ├── ai.rs           AI 流式对话代理（OpenAI 兼容上游，SSE 透传）
 │   │   ├── files.rs        文件浏览 / 读写 / 上传下载
 │   │   ├── distro.rs       发行版检测（仅支持 Debian / Arch 系，不支持则退出）
 │   │   ├── packages.rs     软件包管理（apt / pacman 按家族分派）
@@ -263,20 +280,22 @@ lyys_panel/
 │   │   ├── network.rs      网络信息
 │   │   ├── logs.rs         日志查询
 │   │   ├── docker.rs       Docker 容器 / 镜像 / Compose（含一键安装）
-│   │   ├── opservice.rs / rprocess.rs   systemd 服务与进程操作
-│   │   └── ...
+│   │   ├── ops.rs / opservice.rs / rprocess.rs   SMART 磁盘 / systemd 服务 / 进程操作
+│   │   └── migrations/     SQL 迁移脚本（按版本号顺序应用，事务包裹）
 │   └── Cargo.toml
 ├── frontend/           Vue 3 前端
+│   ├── public/fonts/       HarmonyOS Sans SC 原样 TTF（含许可协议）
 │   └── src/
-│       ├── layout/AppLayout.vue   侧边栏 + 顶栏 + 内容区骨架
+│       ├── layout/AppLayout.vue   侧边栏 + 顶栏（电源 / 改密 / 设置）+ 内容区骨架
 │       ├── views/                 各功能页面
 │       ├── router/                路由与登录守卫
 │       ├── stores/                主题等全局状态
 │       ├── api/                   axios 封装与拦截器
-│       └── styles/theme.css       Element Plus 变量覆盖（黑白主题）
+│       └── styles/theme.css       Element Plus 变量覆盖（黑白无边框主题 + 字体）
 ├── scripts/            git 钩子安装与 install / uninstall 一键部署脚本
 ├── .github/workflows/  CI（PR 检查）与 Release（tag 多平台发布）工作流
-├── CHANGELOG.md        更新日志
+├── CHANGELOG.md        更新日志（Keep a Changelog）
+├── CONTRIBUTING.md     贡献规范（Conventional Commits + SemVer）
 ├── screenshots/        界面预览截图
 └── build.sh            一键构建脚本
 ```
@@ -286,6 +305,7 @@ lyys_panel/
 - **无边框设计**：所有 `--el-border-color*` 均为 `transparent`，层次靠背景色差表达。请勿添加实色边框。
 - **全部圆角**：统一 6px，基准变量为 `theme.css` 中的 `--radius`。新增组件优先引用该变量。
 - 主题为纯黑白灰，无彩色、无阴影。注意浏览器自动填充的输入框底色由浏览器绘制（暗色下是一层暗黄），不受面板变量控制。
+- **字体**：全站统一 HarmonyOS Sans SC（`--el-font-family` 与 `body` 均引用）；数据展示区（`.mono`、日志、路径栏等）用同一字体加 `font-variant-numeric: tabular-nums` 保证数字列对齐——该字体数字字身宽全部一致，无需等宽栈。字体文件必须**原样分发**（Huawei 协议禁止修改/转格式），新增字重或裁剪均不允许。
 - 按钮与输入框并排时不要给按钮写死高度（会变成正方形），也不要给文本域写死 `rows`；让容器 `align-items: stretch`，按钮跟随输入框高度。
 - 圆角容器若内部子元素带背景（表头、hover 行、加载遮罩等），**必须配 `overflow: hidden`**，否则背景会填满四角、把圆角盖成直角。
 
@@ -320,4 +340,11 @@ lyys_panel/
 
 ## License
 
-本项目采用 [GPL-3.0](https://www.gnu.org/licenses/gpl-3.0.txt) 许可证。
+本项目采用 [GPL-3.0](https://www.gnu.org/licenses/gpl-3.0.html) 许可证。
+
+### 第三方字体声明
+
+本面板界面使用 **HarmonyOS Sans** 字体（Copyright 2021 Huawei Device Co., Ltd.），
+按 [HarmonyOS Sans Fonts License Agreement](frontend/public/fonts/HarmonyOS_Sans_SC/LICENSE.txt)
+以**未经修改的原样文件**内嵌分发。该字体不属于本项目 GPL-3.0 授权范围，其使用
+条款以上述协议为准。
