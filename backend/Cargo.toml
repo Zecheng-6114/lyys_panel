@@ -38,6 +38,8 @@ axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
 rcgen = "0.13"
 # 3.2 自更新 / 3.3 告警：出站 HTTPS（GitHub API 与 webhook），复用 rustls 栈
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# AI 助手：把上游 chat/completions 的 SSE 字节流接入 axum Body::from_stream
+tokio-stream = "0.1"
 
 
 [profile.release]

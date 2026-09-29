@@ -2056,7 +2056,9 @@ pub fn router(state: AppState) -> Router {
         .route("/alerts/events", get(alerts_events))
         // 2.3：审计中间件挂在受保护路由上，记录所有非 GET 业务请求
         // （from_fn 不支持 State 提取器，必须用 from_fn_with_state）
-        .layer(middleware::from_fn_with_state(state.clone(), audit_mw));
+        .layer(middleware::from_fn_with_state(state.clone(), audit_mw))
+        // AI 助手：OpenAI 兼容 chat/completions 流式转发，需登录
+        .route("/ai/chat", post(crate::ai::ai_chat));
     Router::new()
         .route("/health", get(health))
         .route("/api/login", post(login))

@@ -1,3 +1,4 @@
+mod ai; // AI 助手：OpenAI 兼容接口流式转发（无状态，无记忆/工具调用）
 mod alerts;
 mod api;
 mod auth;
