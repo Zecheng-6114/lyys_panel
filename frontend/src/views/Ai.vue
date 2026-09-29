@@ -91,9 +91,16 @@ async function send() {
   if (!content || streaming.value) return;
   draft.value = "";
 
-  // 服务端不保存历史：每次把已有对话原样带上（错误提示条不参与）
+  // 服务端不保存历史：每次把已有对话原样带上。
+  // 过滤两类不可发送项：错误提示条（role=error），以及上游报错遗留的
+  // 空 assistant 占位气泡 —— 后端校验拒绝空内容（400），不过滤会
+  // 导致该会话后续每次发送都被拒、无法恢复。
   const history = messages
-    .filter((m) => m.role !== "error")
+    .filter(
+      (m) =>
+        m.role !== "error" &&
+        !(m.role === "assistant" && !m.content.trim()),
+    )
     .map((m) => ({ role: m.role, content: m.content }));
   messages.push({ role: "user", content });
   scrollBottom();
