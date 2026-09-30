@@ -760,7 +760,26 @@ impl Db {
         Ok(rows)
     }
 
+    /// 统计用户创建的房间数（用于限制普通用户最多 5 个）
+    pub fn ai_room_count_by_creator(&self, user_id: i64) -> Result<i64> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM ai_rooms WHERE creator_id = ?1",
+            [user_id],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// 统计用户创建的房间数（异步版本）
+    pub async fn ai_room_count_by_creator_async(&self, user_id: i64) -> Result<i64> {
+        let db = self.clone();
+        blocking(move || db.ai_room_count_by_creator(user_id)).await
+    }
+
+
     /// 删除房间（级联清成员/受邀/消息）
+    ///
     pub fn ai_room_delete(&self, id: i64) -> Result<u64> {
         let conn = self.pool.get().context("获取数据库连接失败")?;
         conn.execute_batch("BEGIN")?;

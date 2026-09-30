@@ -749,8 +749,8 @@ pub(super) async fn rooms_list(
     ))
 }
 
-/// POST /api/ai/rooms —— 创建房间。public 仅面板 admin 可建。
-/// 创建者自动成为成员（私有房间无需邀请自己）。
+/// POST /api/ai/rooms —— 创建房间。public 仅面板 admin 可建；
+/// 普通用户最多创建 5 个房间，超限需联系管理员。
 pub(super) async fn rooms_create(
     State(state): State<AppState>,
     user: AuthUser,
@@ -761,11 +761,22 @@ pub(super) async fn rooms_create(
         return Err(GroupError::bad("房间名称长度须为 1~64 字符"));
     }
     let visibility = match req.visibility.as_deref().map(str::trim) {
-        None | Some("") => "private",
+        None | Some("") | Some("private") => "private",
         Some("public") if user.is_admin() => "public",
         Some("public") => return Err(GroupError::forbidden("仅管理员可创建公开房间")),
         Some(_) => return Err(GroupError::bad("可见性仅支持 private / public")),
     };
+
+    // 普通用户最多创建 5 个房间
+    if !user.is_admin() {
+        let cnt = state.db.ai_room_count_by_creator_async(user.id).await?;
+        if cnt >= 5 {
+            return Err(GroupError::forbidden(
+                "普通用户最多创建 5 个房间，如需更多请联系管理员审批",
+            ));
+        }
+    }
+
     let id = state
         .db
         .ai_room_add_async(name.into(), user.id, visibility.into(), now_ts())
