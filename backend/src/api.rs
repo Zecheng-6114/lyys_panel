@@ -424,6 +424,7 @@ async fn logout(
 /// 当前登录用户信息（前端刷新页面后恢复角色与强制改密状态用）
 #[derive(Serialize)]
 struct MeResp {
+    id: i64,
     username: String,
     role: String,
     must_change: bool,
@@ -431,6 +432,7 @@ struct MeResp {
 
 async fn me(user: AuthUser) -> Result<Json<MeResp>, ApiError> {
     Ok(Json(MeResp {
+        id: user.id,
         username: user.username,
         role: user.role,
         must_change: user.must_change,
@@ -1729,7 +1731,8 @@ struct LogStreamQuery {
 /// WebSocket 日志流的手动鉴权：与 AuthUser 提取器同一套口径
 /// （token 校验 → 吊销名单 → 会话存在 → 账号存在 → 首登改密闸门），
 /// 只是认证载体从 Header 换成了查询串。任意失败一律拒绝升级。
-async fn ws_auth(state: &AppState, token: &str) -> Result<(), ApiError> {
+/// 4.5 群聊 WS 同样复用此函数（故 pub(crate)）。
+pub(crate) async fn ws_auth(state: &AppState, token: &str) -> Result<(), ApiError> {
     let claims = auth::verify_token(&state.jwt_secret, token)
         .map_err(|_| ApiError::unauthorized("登录已过期，请重新登录"))?;
     if state.revocations.is_revoked(&claims.jti) {
@@ -2174,7 +2177,21 @@ pub fn router(state: AppState) -> Router {
         .layer(middleware::from_fn_with_state(state.clone(), audit_mw))
         // AI 助手：OpenAI 兼容 chat/completions 流式转发，需登录
         .route("/ai/chat", post(crate::ai::ai_chat))
-        .route("/ai/config", get(ai_config_get).post(ai_config_set));
+        .route("/ai/config", get(ai_config_get).post(ai_config_set))
+        // 4.5 AI 群聊（第一阶段：仅 AI 之间互相 @ 调度链，无工具调用）
+        .route("/ai/rooms", get(crate::ai_group::rooms_list).post(crate::ai_group::rooms_create))
+        .route("/ai/rooms/default", post(crate::ai_group::rooms_default))
+        .route("/ai/rooms/remove", post(crate::ai_group::rooms_remove))
+        .route("/ai/rooms/invite", post(crate::ai_group::rooms_invite))
+        .route("/ai/rooms/uninvite", post(crate::ai_group::rooms_uninvite))
+        .route("/ai/rooms/users", get(crate::ai_group::rooms_users))
+        .route("/ai/members", get(crate::ai_group::members_list).post(crate::ai_group::members_create))
+        .route("/ai/members/update", post(crate::ai_group::members_update))
+        .route("/ai/members/remove", post(crate::ai_group::members_remove))
+        .route("/ai/messages", get(crate::ai_group::messages_list))
+        // 群聊实时通道（WebSocket）：浏览器 WS 无法带 Authorization 头，
+        // token 走查询串，handler 内做与 AuthUser 同口径的手动鉴权
+        .route("/ai/ws", get(crate::ai_group::ai_group_ws));
     Router::new()
         .route("/health", get(health))
         .route("/api/login", post(login))

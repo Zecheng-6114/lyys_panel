@@ -37,9 +37,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
 rcgen = "0.13"
 # 3.2 自更新 / 3.3 告警：出站 HTTPS（GitHub API 与 webhook），复用 rustls 栈
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# stream feature（4.5 群聊）：流式响应的 bytes_stream 按块读取
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 # AI 助手：把上游 chat/completions 的 SSE 字节流接入 axum Body::from_stream
 tokio-stream = "0.1"
+# 4.5 AI 群聊：reqwest 流式响应按块读取（bytes_stream）+ WS socket 拆分
+futures-util = "0.3"
 
 
 [profile.release]

@@ -70,6 +70,45 @@ pub struct AlertEventRow {
     pub state: String,
 }
 
+/// AI 群聊房间行（4.5）
+#[derive(Clone, Serialize)]
+pub struct AiRoomRow {
+    pub id: i64,
+    pub name: String,
+    pub creator_id: i64,
+    pub visibility: String,
+    pub created: i64,
+}
+
+/// AI 群聊成员行（4.5）。persona 为角色设定（system prompt 素材）；
+/// model / api_base 为空串表示回退全局配置。
+#[derive(Clone, Serialize)]
+pub struct AiMemberRow {
+    pub id: i64,
+    pub room_id: i64,
+    pub name: String,
+    pub persona: String,
+    pub is_admin: bool,
+    pub model: String,
+    pub api_base: String,
+    pub sort: i64,
+}
+
+/// ai_member_get 的返回元组：(room_id, name, persona, is_admin, model, api_base)
+pub type AiMemberTuple = (i64, String, String, bool, String, String);
+
+/// AI 群聊消息行（4.5）。sender_type：user / ai / system。
+#[derive(Serialize)]
+pub struct AiMessageRow {
+    pub id: i64,
+    pub room_id: i64,
+    pub sender_type: String,
+    pub sender_id: i64,
+    pub sender_name: String,
+    pub content: String,
+    pub ts: i64,
+}
+
 impl Db {
     /// 打开（或创建）SQLite 数据库并执行初始化建表
     pub fn open(path: &str) -> Result<Self> {
@@ -122,6 +161,11 @@ impl Db {
             6,
             "0006_alerts.sql",
             include_str!("../migrations/0006_alerts.sql"),
+        ),
+        (
+            7,
+            "0007_ai_group.sql",
+            include_str!("../migrations/0007_ai_group.sql"),
         ),
     ];
 
@@ -646,6 +690,309 @@ impl Db {
         rows.reverse();
         Ok(rows)
     }
+
+    // ---------- AI 群聊（4.5） ----------
+
+    /// 创建房间，返回新房间 id
+    pub fn ai_room_add(
+        &self,
+        name: &str,
+        creator_id: i64,
+        visibility: &str,
+        created: i64,
+    ) -> Result<i64> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        conn.execute(
+            "INSERT INTO ai_rooms (name, creator_id, visibility, created) VALUES (?1, ?2, ?3, ?4)",
+            (name, creator_id, visibility, created),
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// 房间是否存在（返回 (id, creator_id, visibility)）
+    pub fn ai_room_get(&self, id: i64) -> Result<Option<(i64, i64, String)>> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let r = conn
+            .query_row(
+                "SELECT id, creator_id, visibility FROM ai_rooms WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        Ok(r)
+    }
+
+    /// 列出用户可见房间：public 全员 + 自己创建的 + 受邀的（admin 全可见）
+    pub fn ai_room_list(&self, user_id: i64, is_admin: bool) -> Result<Vec<AiRoomRow>> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let sql = if is_admin {
+            "SELECT id, name, creator_id, visibility, created FROM ai_rooms ORDER BY id"
+        } else {
+            "SELECT id, name, creator_id, visibility, created FROM ai_rooms
+             WHERE visibility = 'public' OR creator_id = ?1
+                OR id IN (SELECT room_id FROM ai_room_users WHERE user_id = ?1)
+             ORDER BY id"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let rows = if is_admin {
+            stmt.query_map([], |row| {
+                Ok(AiRoomRow {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    creator_id: row.get(2)?,
+                    visibility: row.get(3)?,
+                    created: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            stmt.query_map([user_id], |row| {
+                Ok(AiRoomRow {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    creator_id: row.get(2)?,
+                    visibility: row.get(3)?,
+                    created: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        Ok(rows)
+    }
+
+    /// 删除房间（级联清成员/受邀/消息）
+    pub fn ai_room_delete(&self, id: i64) -> Result<u64> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        conn.execute_batch("BEGIN")?;
+        let r = (|| -> Result<()> {
+            conn.execute("DELETE FROM ai_messages WHERE room_id = ?1", [id])?;
+            conn.execute("DELETE FROM ai_members WHERE room_id = ?1", [id])?;
+            conn.execute("DELETE FROM ai_room_users WHERE room_id = ?1", [id])?;
+            conn.execute("DELETE FROM ai_rooms WHERE id = ?1", [id])?;
+            Ok(())
+        })();
+        match r {
+            Ok(()) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(1)
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// 添加 AI 成员，返回新成员 id
+    #[allow(clippy::too_many_arguments)]
+    pub fn ai_member_add(
+        &self,
+        room_id: i64,
+        name: &str,
+        persona: &str,
+        is_admin: bool,
+        model: &str,
+        api_base: &str,
+        sort: i64,
+    ) -> Result<i64> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        conn.execute(
+            "INSERT INTO ai_members (room_id, name, persona, is_admin, model, api_base, sort)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                room_id,
+                name,
+                persona,
+                is_admin as i64,
+                model,
+                api_base,
+                sort
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// 列出房间全部 AI 成员（按 sort、id 升序）
+    pub fn ai_member_list(&self, room_id: i64) -> Result<Vec<AiMemberRow>> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let mut stmt = conn.prepare(
+            "SELECT id, room_id, name, persona, is_admin, model, api_base, sort
+             FROM ai_members WHERE room_id = ?1 ORDER BY sort, id",
+        )?;
+        let rows = stmt
+            .query_map([room_id], |row| {
+                Ok(AiMemberRow {
+                    id: row.get(0)?,
+                    room_id: row.get(1)?,
+                    name: row.get(2)?,
+                    persona: row.get(3)?,
+                    is_admin: row.get::<_, i64>(4)? != 0,
+                    model: row.get(5)?,
+                    api_base: row.get(6)?,
+                    sort: row.get(7)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// 单个 AI 成员（返回 (room_id, name, persona, is_admin, model, api_base)）
+    pub fn ai_member_get(&self, id: i64) -> Result<Option<AiMemberTuple>> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let r = conn
+            .query_row(
+                "SELECT room_id, name, persona, is_admin, model, api_base
+                 FROM ai_members WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get::<_, i64>(3)? != 0,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(r)
+    }
+
+    /// 按名字查成员（返回 (id, is_admin)），用于解析 @目标
+    pub fn ai_member_by_name(&self, room_id: i64, name: &str) -> Result<Option<(i64, bool)>> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let r = conn
+            .query_row(
+                "SELECT id, is_admin FROM ai_members WHERE room_id = ?1 AND name = ?2",
+                rusqlite::params![room_id, name],
+                |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0)),
+            )
+            .optional()?;
+        Ok(r)
+    }
+
+    /// 更新 AI 成员（名字/人设/管理员标记/覆盖项）
+    pub fn ai_member_update(
+        &self,
+        id: i64,
+        name: &str,
+        persona: &str,
+        is_admin: bool,
+        model: &str,
+        api_base: &str,
+    ) -> Result<u64> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let n = conn.execute(
+            "UPDATE ai_members SET name = ?2, persona = ?3, is_admin = ?4, model = ?5, api_base = ?6
+             WHERE id = ?1",
+            rusqlite::params![id, name, persona, is_admin as i64, model, api_base],
+        )?;
+        Ok(n as u64)
+    }
+
+    /// 删除 AI 成员
+    pub fn ai_member_delete(&self, id: i64) -> Result<u64> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let n = conn.execute("DELETE FROM ai_members WHERE id = ?1", [id])?;
+        Ok(n as u64)
+    }
+
+    /// 邀请用户进私有房间（幂等）
+    pub fn ai_room_invite(&self, room_id: i64, user_id: i64) -> Result<()> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        conn.execute(
+            "INSERT OR IGNORE INTO ai_room_users (room_id, user_id) VALUES (?1, ?2)",
+            (room_id, user_id),
+        )?;
+        Ok(())
+    }
+
+    /// 撤销邀请
+    pub fn ai_room_uninvite(&self, room_id: i64, user_id: i64) -> Result<u64> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let n = conn.execute(
+            "DELETE FROM ai_room_users WHERE room_id = ?1 AND user_id = ?2",
+            (room_id, user_id),
+        )?;
+        Ok(n as u64)
+    }
+
+    /// 受邀用户 id 列表
+    pub fn ai_room_users(&self, room_id: i64) -> Result<Vec<i64>> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let mut stmt =
+            conn.prepare("SELECT user_id FROM ai_room_users WHERE room_id = ?1 ORDER BY user_id")?;
+        let rows = stmt
+            .query_map([room_id], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<i64>>>()?;
+        Ok(rows)
+    }
+
+    /// 用户是否可访问房间：public / 创建者 / admin（调用方传 is_admin）/ 受邀
+    pub fn ai_room_can_access(
+        &self,
+        room_id: i64,
+        user_id: i64,
+        is_admin: bool,
+    ) -> Result<bool> {
+        if let Some((_, creator, vis)) = self.ai_room_get(room_id)? {
+            if vis == "public" || creator == user_id || is_admin {
+                return Ok(true);
+            }
+            let conn = self.pool.get().context("获取数据库连接失败")?;
+            let n: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM ai_room_users WHERE room_id = ?1 AND user_id = ?2",
+                (room_id, user_id),
+                |r| r.get(0),
+            )?;
+            return Ok(n > 0);
+        }
+        Ok(false)
+    }
+
+    /// 写入一条房间消息，返回 (id, ts)
+    pub fn ai_message_add(
+        &self,
+        room_id: i64,
+        sender_type: &str,
+        sender_id: i64,
+        sender_name: &str,
+        content: &str,
+        ts: i64,
+    ) -> Result<(i64, i64)> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        conn.execute(
+            "INSERT INTO ai_messages (room_id, sender_type, sender_id, sender_name, content, ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            (room_id, sender_type, sender_id, sender_name, content, ts),
+        )?;
+        Ok((conn.last_insert_rowid(), ts))
+    }
+
+    /// 房间最近 limit 条消息（按 id 升序，取窗口尾部）
+    pub fn ai_message_list(&self, room_id: i64, limit: i64) -> Result<Vec<AiMessageRow>> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let mut stmt = conn.prepare(
+            "SELECT id, room_id, sender_type, sender_id, sender_name, content, ts
+             FROM ai_messages WHERE room_id = ?1 ORDER BY id DESC LIMIT ?2",
+        )?;
+        let mut rows = stmt
+            .query_map(rusqlite::params![room_id, limit], |row| {
+                Ok(AiMessageRow {
+                    id: row.get(0)?,
+                    room_id: row.get(1)?,
+                    sender_type: row.get(2)?,
+                    sender_id: row.get(3)?,
+                    sender_name: row.get(4)?,
+                    content: row.get(5)?,
+                    ts: row.get(6)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.reverse();
+        Ok(rows)
+    }
 }
 
 /// 把一个同步的数据库操作挪到阻塞线程池执行。
@@ -893,6 +1240,137 @@ impl Db {
         let db = self.clone();
         blocking(move || db.history(from, to, raw_from, limit)).await
     }
+
+    // ---------- AI 群聊（4.5）异步包装 ----------
+
+    pub async fn ai_room_add_async(
+        &self,
+        name: String,
+        creator_id: i64,
+        visibility: String,
+        created: i64,
+    ) -> Result<i64> {
+        let db = self.clone();
+        blocking(move || db.ai_room_add(&name, creator_id, &visibility, created)).await
+    }
+
+    pub async fn ai_room_get_async(&self, id: i64) -> Result<Option<(i64, i64, String)>> {
+        let db = self.clone();
+        blocking(move || db.ai_room_get(id)).await
+    }
+
+    pub async fn ai_room_list_async(
+        &self,
+        user_id: i64,
+        is_admin: bool,
+    ) -> Result<Vec<AiRoomRow>> {
+        let db = self.clone();
+        blocking(move || db.ai_room_list(user_id, is_admin)).await
+    }
+
+    pub async fn ai_room_delete_async(&self, id: i64) -> Result<u64> {
+        let db = self.clone();
+        blocking(move || db.ai_room_delete(id)).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn ai_member_add_async(
+        &self,
+        room_id: i64,
+        name: String,
+        persona: String,
+        is_admin: bool,
+        model: String,
+        api_base: String,
+        sort: i64,
+    ) -> Result<i64> {
+        let db = self.clone();
+        blocking(move || {
+            db.ai_member_add(room_id, &name, &persona, is_admin, &model, &api_base, sort)
+        })
+        .await
+    }
+
+    pub async fn ai_member_list_async(&self, room_id: i64) -> Result<Vec<AiMemberRow>> {
+        let db = self.clone();
+        blocking(move || db.ai_member_list(room_id)).await
+    }
+
+    pub async fn ai_member_get_async(&self, id: i64) -> Result<Option<AiMemberTuple>> {
+        let db = self.clone();
+        blocking(move || db.ai_member_get(id)).await
+    }
+
+    pub async fn ai_member_by_name_async(&self, room_id: i64, name: String) -> Result<Option<(i64, bool)>> {
+        let db = self.clone();
+        blocking(move || db.ai_member_by_name(room_id, &name)).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn ai_member_update_async(
+        &self,
+        id: i64,
+        name: String,
+        persona: String,
+        is_admin: bool,
+        model: String,
+        api_base: String,
+    ) -> Result<u64> {
+        let db = self.clone();
+        blocking(move || db.ai_member_update(id, &name, &persona, is_admin, &model, &api_base)).await
+    }
+
+    pub async fn ai_member_delete_async(&self, id: i64) -> Result<u64> {
+        let db = self.clone();
+        blocking(move || db.ai_member_delete(id)).await
+    }
+
+    pub async fn ai_room_invite_async(&self, room_id: i64, user_id: i64) -> Result<()> {
+        let db = self.clone();
+        blocking(move || db.ai_room_invite(room_id, user_id)).await
+    }
+
+    pub async fn ai_room_uninvite_async(&self, room_id: i64, user_id: i64) -> Result<u64> {
+        let db = self.clone();
+        blocking(move || db.ai_room_uninvite(room_id, user_id)).await
+    }
+
+    pub async fn ai_room_users_async(&self, room_id: i64) -> Result<Vec<i64>> {
+        let db = self.clone();
+        blocking(move || db.ai_room_users(room_id)).await
+    }
+
+    pub async fn ai_room_can_access_async(
+        &self,
+        room_id: i64,
+        user_id: i64,
+        is_admin: bool,
+    ) -> Result<bool> {
+        let db = self.clone();
+        blocking(move || db.ai_room_can_access(room_id, user_id, is_admin)).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn ai_message_add_async(
+        &self,
+        room_id: i64,
+        sender_type: String,
+        sender_id: i64,
+        sender_name: String,
+        content: String,
+        ts: i64,
+    ) -> Result<(i64, i64)> {
+        let db = self.clone();
+        blocking(move || {
+            db.ai_message_add(room_id, &sender_type, sender_id, &sender_name, &content, ts)
+        })
+        .await
+    }
+
+    pub async fn ai_message_list_async(&self, room_id: i64, limit: i64) -> Result<Vec<AiMessageRow>> {
+        let db = self.clone();
+        blocking(move || db.ai_message_list(room_id, limit)).await
+    }
 }
 
 /// rusqlite 没有 re-export this trait，这里引入供 `.optional()` 使用
@@ -927,13 +1405,13 @@ mod tests {
             > 0
     }
 
-    /// 全新库：迁移建出全部表，版本号为最新（6）；再次打开幂等（不重复执行）
+    /// 全新库：迁移建出全部表，版本号为最新（7）；再次打开幂等（不重复执行）
     #[test]
     fn fresh_db_gets_baseline() {
         let path = temp_db_path("fresh");
         {
             let db = Db::open(&path).unwrap();
-            assert_eq!(db.schema_version().unwrap(), 6);
+            assert_eq!(db.schema_version().unwrap(), 7);
             assert!(table_exists(&db, "settings"));
             assert!(table_exists(&db, "users"));
             assert!(table_exists(&db, "metrics"));
@@ -941,9 +1419,13 @@ mod tests {
             assert!(table_exists(&db, "audit_log"));
             assert!(table_exists(&db, "sessions"));
             assert!(table_exists(&db, "alert_events"));
+            assert!(table_exists(&db, "ai_rooms"));
+            assert!(table_exists(&db, "ai_members"));
+            assert!(table_exists(&db, "ai_room_users"));
+            assert!(table_exists(&db, "ai_messages"));
         }
         let db2 = Db::open(&path).unwrap();
-        assert_eq!(db2.schema_version().unwrap(), 6);
+        assert_eq!(db2.schema_version().unwrap(), 7);
         let _ = std::fs::remove_file(path);
     }
 
@@ -967,7 +1449,7 @@ mod tests {
         }
         {
             let db = Db::open(&path).unwrap();
-            assert_eq!(db.schema_version().unwrap(), 6);
+            assert_eq!(db.schema_version().unwrap(), 7);
             assert_eq!(db.user_count().unwrap(), 1);
             assert!(db.find_user("admin").unwrap().is_some());
             // 旧库升级后 admin 自动获得默认角色 admin、不强制改密（避免锁死现有部署）
@@ -996,7 +1478,7 @@ mod tests {
             .expect_err("半途失败应中止");
             drop(tx);
             assert!(!table_exists(&db, "t_half"), "回滚后不应残留半途建的表");
-            assert_eq!(db.schema_version().unwrap(), 6, "失败的迁移不得推进版本");
+            assert_eq!(db.schema_version().unwrap(), 7, "失败的迁移不得推进版本");
         }
         let _ = std::fs::remove_file(path);
     }

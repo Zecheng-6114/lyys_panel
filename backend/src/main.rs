@@ -1,4 +1,5 @@
 mod ai; // AI 助手：OpenAI 兼容接口流式转发（无状态，无记忆/工具调用）
+mod ai_group; // 4.5 AI 群聊：多用户+多AI 房间、WebSocket 实时推送、@ 调度链
 mod alerts;
 mod api;
 mod auth;

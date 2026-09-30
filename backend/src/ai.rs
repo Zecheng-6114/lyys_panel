@@ -64,23 +64,35 @@ pub(super) struct AiError {
 }
 
 impl AiError {
-    fn bad(msg: impl Into<String>) -> Self {
+    pub(super) fn bad(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
             message: msg.into(),
         }
     }
-    fn internal(msg: impl Into<String>) -> Self {
+    pub(super) fn internal(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: msg.into(),
         }
     }
-    fn upstream(msg: impl Into<String>) -> Self {
+    pub(super) fn upstream(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_GATEWAY,
             message: msg.into(),
         }
+    }
+    /// 群聊模块把 AiError 转 GroupError 时复用同一状态码
+    pub(super) fn status_code(&self) -> StatusCode {
+        self.status
+    }
+}
+
+/// 面向调用方的错误文案（Display 与 IntoResponse 的 message 一致），
+/// 群聊调度把失败原因写进房间系统消息时用。
+impl std::fmt::Display for AiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
     }
 }
 
@@ -98,8 +110,8 @@ pub(super) struct ChatReq {
 
 #[derive(Deserialize, Serialize)]
 pub(super) struct ChatMsg {
-    role: String,
-    content: String,
+    pub(super) role: String,
+    pub(super) content: String,
 }
 
 /// 共享的出站 HTTP 客户端。流式响应不能设整体超时（长回答会被掐断），
@@ -160,6 +172,89 @@ async fn ai_config(db: &Db) -> Result<(String, String, String), AiError> {
         .await
         .map_err(|e| AiError::internal(format!("读取 AI 配置失败：{e}")))?;
     resolve(&parse_stored(raw))
+}
+
+/// 群聊模块复用（4.5）：全局配置 + 成员级覆盖（model / api_base，空串=不覆盖；
+/// 密钥不提供成员级覆盖，一律走全局配置，遵循「密钥不落库」约束）。
+pub(super) async fn ai_config_with_overrides(
+    db: &Db,
+    model_override: &str,
+    base_override: &str,
+) -> Result<(String, String, String), AiError> {
+    let (base, key, model) = ai_config(db).await?;
+    let base = if base_override.trim().is_empty() {
+        base
+    } else {
+        let b = base_override.trim().trim_end_matches('/').to_string();
+        if !b.starts_with("http://") && !b.starts_with("https://") {
+            return Err(AiError::bad("成员级上游地址无效：必须以 http(s):// 开头"));
+        }
+        b
+    };
+    let model = if model_override.trim().is_empty() {
+        model
+    } else {
+        model_override.trim().to_string()
+    };
+    Ok((base, key, model))
+}
+
+/// 群聊模块复用：向流式上游发起一次 chat/completions 请求。
+/// 错误语义与 ai_chat 一致（连接失败/非 2xx 转 AiError，细节只进日志）。
+pub(super) async fn stream_completion(
+    base: &str,
+    key: &str,
+    model: &str,
+    messages: &[ChatMsg],
+) -> Result<reqwest::Response, AiError> {
+    let body = serde_json::json!({
+        "model": model,
+        "messages": messages,
+        "stream": true,
+    });
+    let resp = http_client()
+        .post(format!("{base}/chat/completions"))
+        .bearer_auth(key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::warn!("AI 上游连接失败：{e}（base={base}）");
+            AiError::upstream("无法连接 AI 服务，请检查上游 API 地址与网络配置")
+        })?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        tracing::warn!("AI 上游返回 {status}：{text}");
+        let brief: String = text.chars().take(300).collect();
+        return Err(AiError::upstream(format!(
+            "AI 服务返回错误（HTTP {}）：{brief}",
+            status.as_u16()
+        )));
+    }
+    Ok(resp)
+}
+
+/// 群聊模块复用：从一条 SSE `data:` 负载中提取增量文本。
+/// 返回 Some(text)（可为空串，表示心跳/角色增量）；非 chunk JSON 返回 None。
+/// 上游错误对象（chunk.error）转成 Err 供调用方终止本轮。
+pub(super) fn sse_delta(data: &str) -> Result<Option<String>, AiError> {
+    let chunk: serde_json::Value = serde_json::from_str(data)
+        .map_err(|_| AiError::upstream("AI 上游返回了无法解析的数据块"))?;
+    if let Some(msg) = chunk
+        .get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
+    {
+        return Err(AiError::upstream(msg.to_string()));
+    }
+    Ok(chunk
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("delta"))
+        .and_then(|d| d.get("content"))
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string()))
 }
 
 /// POST /api/ai/chat（需登录）
