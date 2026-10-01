@@ -42,6 +42,12 @@
         <div class="col-head">
           <span class="col-title">{{ currentRoom?.name || "AI 群聊" }}</span>
           <span class="spacer" />
+          <el-switch
+            v-model="useTools"
+            size="small"
+            active-text="启用工具"
+            title="AI 可调用面板只读运维工具查询真实数据"
+          />
           <el-tag v-if="chainActive" size="small" type="warning" effect="dark">调度中</el-tag>
           <el-button
             v-if="auth.isAdmin() && chainActive"
@@ -77,6 +83,13 @@
                   <span class="think-arrow">{{ m.thinkOpen ? "收起 ▲" : "展开 ▼" }}</span>
                 </div>
                 <div v-if="thinkVisible(m)" class="think-body">{{ m.reasoning }}</div>
+              </div>
+              <div v-if="m.tools && m.tools.length" class="tool-lines">
+                <div v-for="(t, ti) in m.tools" :key="ti" class="tool-line">
+                  <span class="tool-icon">{{ t.state === "done" ? "✅" : "🔧" }}</span>
+                  <span>{{ toolLabel(t.name) }}</span>
+                  <span class="tool-state">{{ t.state === "done" ? "已完成" : "查询中…" }}</span>
+                </div>
               </div>
               <div class="bubble">
                 <template v-for="(seg, si) in renderMentions(m.content)" :key="si">
@@ -212,7 +225,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { useAuthStore } from "../stores/auth";
@@ -239,6 +252,10 @@ interface Member {
   api_base: string;
   sort: number;
 }
+interface ToolLine {
+  name: string;
+  state: "start" | "done";
+}
 interface Msg {
   key: string;
   id: number;
@@ -250,6 +267,7 @@ interface Msg {
   streaming?: boolean;
   reasoning?: string;
   thinkOpen?: boolean;
+  tools?: ToolLine[];
 }
 
 // ---------- 状态 ----------
@@ -260,6 +278,29 @@ const messages = reactive<Msg[]>([]);
 const currentRoomId = ref<number | null>(null);
 const myId = ref<number | null>(null);
 const chainActive = ref(false);
+// 启用工具：AI 可调用面板只读运维工具；localStorage 记忆上次选择
+const useTools = ref(localStorage.getItem("ai_use_tools") === "1");
+watch(useTools, (v) => localStorage.setItem("ai_use_tools", v ? "1" : "0"));
+
+// 工具名 → 中文标签（与后端 ai_tools.rs 注册表对应）
+const TOOL_LABELS: Record<string, string> = {
+  get_system_state: "查询系统实时状态",
+  get_system_history: "查询历史监控数据",
+  list_processes: "查询进程列表",
+  list_services: "查询服务列表",
+  list_packages: "查询已安装软件包",
+  list_upgradable_packages: "查询可更新软件包",
+  get_docker_status: "查询 Docker 状态",
+  list_docker_containers: "查询 Docker 容器",
+  list_docker_images: "查询 Docker 镜像",
+  get_network_interfaces: "查询网络接口",
+  get_dns_config: "查询 DNS 配置",
+  get_smart_health: "查询磁盘健康",
+  read_journal_logs: "读取系统日志",
+};
+function toolLabel(name: string): string {
+  return TOOL_LABELS[name] || name;
+}
 
 const currentRoom = computed(() => rooms.find((r) => r.id === currentRoomId.value) || null);
 
@@ -368,6 +409,20 @@ function handleServerEvent(e: any) {
       if (live) {
         if (e.kind === "reasoning") live.reasoning = (live.reasoning || "") + e.delta;
         else live.content += e.delta;
+        scrollBottom();
+      }
+      break;
+    }
+    case "tool_event": {
+      // 工具状态行：挂在对应 AI 的流式气泡上（start→done）
+      const live = messages.find(
+        (x) => x.sender_type === "ai" && x.sender_id === e.member_id && x.streaming,
+      );
+      if (live) {
+        if (!live.tools) live.tools = [];
+        const existing = live.tools.find((t) => t.name === e.name);
+        if (existing) existing.state = e.state;
+        else live.tools.push({ name: e.name, state: e.state });
         scrollBottom();
       }
       break;
@@ -533,7 +588,7 @@ const draftEl = ref<any>();
 function send() {
   const content = draft.value.trim();
   if (!content || !wsReady.value) return;
-  ws?.send(JSON.stringify({ type: "user_msg", content }));
+  ws?.send(JSON.stringify({ type: "user_msg", content, use_tools: useTools.value }));
   draft.value = "";
   mentionOpen.value = false;
 }
@@ -888,6 +943,33 @@ onBeforeUnmount(() => closeWs());
   background: var(--el-fill-color-lighter);
   padding: 2px 10px;
   border-radius: 10px;
+}
+/* 工具调用状态行 */
+.tool-lines {
+  max-width: 78%;
+  margin-bottom: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tool-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  background: var(--el-fill-color-lighter);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: var(--radius);
+  padding: 3px 10px;
+}
+.tool-icon {
+  flex: none;
+}
+.tool-state {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--el-color-info);
 }
 .cursor {
   display: inline-block;

@@ -125,10 +125,10 @@ fn publish(room_id: i64, payload: serde_json::Value) {
 // ---------- 调度链状态 ----------
 
 /// 每房间的运行状态：busy 串行化同房间的链（一次只跑一条），
-/// stop 为 admin 强停标记（逐块检查）。
+/// stop 为 admin 强停标记（工具循环引擎逐块检查，需 Arc 传递）。
 struct ChainState {
     busy: AsyncMutex<()>,
-    stop: AtomicBool,
+    stop: std::sync::Arc<AtomicBool>,
 }
 
 fn chain_state(room_id: i64) -> std::sync::Arc<ChainState> {
@@ -137,7 +137,7 @@ fn chain_state(room_id: i64) -> std::sync::Arc<ChainState> {
     map.entry(room_id)
         .or_insert_with(|| std::sync::Arc::new(ChainState {
             busy: AsyncMutex::new(()),
-            stop: AtomicBool::new(false),
+            stop: std::sync::Arc::new(AtomicBool::new(false)),
         }))
         .clone()
 }
@@ -271,7 +271,7 @@ fn build_history(self_name: &str, rows: &[AiMessageRow]) -> Vec<ChatMsg> {
             "system" => ("user".to_string(), format!("[系统] {}", r.content)),
             _ => ("user".to_string(), format!("[{}] {}", r.sender_name, r.content)),
         };
-        out.push(ChatMsg { role, content });
+        out.push(ChatMsg::text(role, content));
     }
     out
 }
@@ -290,15 +290,24 @@ enum TurnOutcome {
     Failed(String),
 }
 
-/// 执行一轮 AI 发言：组装上下文 → 流式上游 → 广播增量 → 落库广播全文。
+/// 触发者上下文：角色（工具权限上限）+ 是否启用工具。
+/// 收纳成结构体避免 one_turn 参数超限（clippy too_many_arguments）。
+struct TriggerCtx<'a> {
+    role: &'a str,
+    use_tools: bool,
+}
+
+/// 执行一轮 AI 发言：组装上下文 → 工具循环引擎（含面板只读工具往返）
+/// → 广播增量 → 落库广播全文。`trig` 为触发者上下文；
 /// `extra_instruction` 用于"轮数耗尽强制管理员总结"等追加指令。
 async fn one_turn(
     state: &AppState,
     room_id: i64,
     member: &AiMemberRow,
     roster: &[AiMemberRow],
-    cs: &ChainState,
+    stop: std::sync::Arc<AtomicBool>,
     extra_instruction: Option<&str>,
+    trig: &TriggerCtx<'_>,
 ) -> TurnOutcome {
     let admin_names: Vec<String> = roster.iter().filter(|m| m.is_admin).map(|m| m.name.clone()).collect();
     let mut sys = member.persona.clone();
@@ -312,10 +321,7 @@ async fn one_turn(
         Ok(h) => h,
         Err(e) => return TurnOutcome::Failed(format!("读取房间历史失败：{e}")),
     };
-    let mut messages = vec![ChatMsg {
-        role: "system".into(),
-        content: sys,
-    }];
+    let mut messages = vec![ChatMsg::text("system", sys)];
     messages.extend(build_history(&member.name, &history));
 
     let (base, key, model) =
@@ -324,76 +330,58 @@ async fn one_turn(
             Err(e) => return TurnOutcome::Failed(e.to_string()),
         };
 
-    // 整体超时包住"发请求 + 读完流"；逐块检查 admin 强停标记。
+    // 整体超时包住"发请求 + 工具往返 + 读完流"；run_turn 逐块检查强停标记。
     let job = async {
-        let resp = match ai::stream_completion(&base, &key, &model, &messages).await {
-            Ok(r) => r,
-            Err(e) => return TurnOutcome::Failed(e.to_string()),
-        };
-        let mut stream = resp.bytes_stream();
-        let mut buf = String::new(); // 未处理的 SSE 残余
-        let mut full = String::new(); // 已产出正文
-        let mut reasoning = String::new(); // 已产出思维链（reasoning_content）
-        while let Some(item) = stream.next().await {
-            if cs.stop.load(Ordering::Relaxed) {
-                return TurnOutcome::Failed("已被管理员停止".into());
-            }
-            match item {
-                Ok(bytes) => {
-                    buf.push_str(&String::from_utf8_lossy(&bytes));
-                    while let Some(pos) = buf.find('\n') {
-                        let line = buf[..pos].trim_end_matches('\r').to_string();
-                        buf.drain(..=pos);
-                        let Some(data) = line.strip_prefix("data:") else { continue };
-                        let data = data.trim();
-                        if data.is_empty() || data == "[DONE]" {
-                            continue;
-                        }
-                        match ai::sse_delta(data) {
-                            Ok(Some((content, think))) => {
-                                if let Some(t) = think {
-                                    if !t.is_empty() {
-                                        reasoning.push_str(&t);
-                                        publish(
-                                            room_id,
-                                            serde_json::json!({
-                                                "type": "ai_delta",
-                                                "room": room_id,
-                                                "member_id": member.id,
-                                                "kind": "reasoning",
-                                                "delta": t,
-                                            }),
-                                        );
-                                    }
-                                }
-                                if let Some(d) = content {
-                                    if !d.is_empty() {
-                                        full.push_str(&d);
-                                        publish(
-                                            room_id,
-                                            serde_json::json!({
-                                                "type": "ai_delta",
-                                                "room": room_id,
-                                                "member_id": member.id,
-                                                "kind": "content",
-                                                "delta": d,
-                                            }),
-                                        );
-                                    }
-                                }
-                            }
-                            Ok(None) => {}
-                            Err(e) => return TurnOutcome::Failed(e.to_string()),
-                        }
-                    }
+        let (etx, mut erx) = tokio::sync::mpsc::channel::<ai::TurnEvent>(64);
+        // 引擎事件 → WS 广播。只捕获 Copy 值，可独立 spawn。
+        let (rid, mid) = (room_id, member.id);
+        let forward = tokio::spawn(async move {
+            while let Some(ev) = erx.recv().await {
+                match ev {
+                    ai::TurnEvent::Delta { kind, text } => publish(
+                        rid,
+                        serde_json::json!({
+                            "type": "ai_delta", "room": rid,
+                            "member_id": mid, "kind": kind, "delta": text,
+                        }),
+                    ),
+                    ai::TurnEvent::Tool { name, state } => publish(
+                        rid,
+                        serde_json::json!({
+                            "type": "tool_event", "room": rid,
+                            "member_id": mid, "name": name, "state": state,
+                        }),
+                    ),
                 }
-                Err(e) => return TurnOutcome::Failed(format!("读取上游流失败：{e}")),
             }
-        }
-        TurnOutcome::Done {
-            content: full,
-            reasoning,
-            ended: false,
+        });
+        let r = ai::run_turn(
+            state,
+            trig.role,
+            ai::Upstream {
+                base: &base,
+                key: &key,
+                model: &model,
+            },
+            messages,
+            if trig.use_tools {
+                Some(crate::ai_tools::tools_json())
+            } else {
+                None
+            },
+            Some(stop),
+            &etx,
+        )
+        .await;
+        drop(etx);
+        let _ = forward.await;
+        match r {
+            Ok(t) => TurnOutcome::Done {
+                content: t.content,
+                reasoning: t.reasoning,
+                ended: false,
+            },
+            Err(e) => TurnOutcome::Failed(e.to_string()),
         }
     };
 
@@ -506,6 +494,8 @@ async fn run_chain(
     room_id: i64,
     initial: Vec<i64>,
     trigger_is_admin: bool,
+    role: String,
+    use_tools: bool,
 ) {
     let cs = chain_state(room_id);
     // try_lock：已有链在跑则广播提示后退出（消息已持久化，正在跑的链会读到）。
@@ -539,6 +529,10 @@ async fn run_chain(
     let mut queue: VecDeque<i64> = initial.into();
     let mut turns = 0usize;
     let mut ended = false;
+    let trig = TriggerCtx {
+        role: &role,
+        use_tools,
+    };
 
     while let Some(mid) = queue.pop_front() {
         if cs.stop.load(Ordering::Relaxed) {
@@ -563,7 +557,7 @@ async fn run_chain(
                 "member_id": member.id, "member_name": member.name,
             }),
         );
-        let outcome = one_turn(&state, room_id, &member, &roster, &cs, None).await;
+        let outcome = one_turn(&state, room_id, &member, &roster, cs.stop.clone(), None, &trig).await;
         let (content, chain_ended) = match outcome {
             TurnOutcome::Done {
                 content, ended, ..
@@ -610,8 +604,16 @@ async fn run_chain(
                 }),
             );
             let extra = "轮数已用尽，请立即总结当前协作进展并结束本轮调度，在回复末尾输出 [CHAIN_END]。";
-            if let TurnOutcome::Done { ended, .. } =
-                one_turn(&state, room_id, a, &roster, &cs, Some(extra)).await
+            if let TurnOutcome::Done { ended, .. } = one_turn(
+                &state,
+                room_id,
+                a,
+                &roster,
+                cs.stop.clone(),
+                Some(extra),
+                &trig,
+            )
+            .await
             {
                 if ended {
                     return;
@@ -774,13 +776,14 @@ async fn handle_client_frame(state: &AppState, room_id: i64, uid: i64, uname: &s
             let mentions = parse_mentions(content, &roster, None);
             if !mentions.is_empty() {
                 let st = state.clone();
-                let is_admin = {
-                    match st.db.user_by_id_async(uid).await {
-                        Ok(Some(u)) => u.1 == "admin",
-                        _ => false,
-                    }
+                // 触发者角色：工具权限的上限（与面板账号体系一致）
+                let role = match st.db.user_by_id_async(uid).await {
+                    Ok(Some(u)) => u.1,
+                    _ => "viewer".to_string(),
                 };
-                tokio::spawn(run_chain(st, room_id, mentions, is_admin));
+                let is_admin = role == "admin";
+                let use_tools = v.get("use_tools").and_then(|t| t.as_bool()).unwrap_or(false);
+                tokio::spawn(run_chain(st, room_id, mentions, is_admin, role, use_tools));
             }
         }
         Some("stop") => {

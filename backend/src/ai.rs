@@ -1,7 +1,9 @@
 //! AI 助手：把 OpenAI 兼容的 chat/completions 接口以流式方式转发给前端。
 //!
 //! 设计边界（4.4 AI 重写范围）：
-//! - 只做无状态转发：不存会话、不做记忆、不做工具调用，历史由前端随请求携带；
+//! - 默认无状态转发：不存会话、不做记忆，历史由前端随请求携带；
+//!   请求带 `use_tools` 时启用服务端工具循环（面板只读运维工具，见 ai_tools），
+//!   工具消息仅在循环内临时存在，不进前端历史、不落库；
 //! - 上游地址 / 密钥 / 模型来自设置页配置（settings 表）或环境变量，
 //!   密钥不进日志、不向前端明文回显；
 //! - 流式透传上游 SSE 字节流，前端按 SSE 解析，后端不做内容改写。
@@ -12,13 +14,15 @@
 //! 3. 内置默认值（base=`https://api.openai.com/v1`，model=`gpt-4o-mini`）。
 //!    密钥没有默认值：设置页与环境变量都未配置时，对话请求返回 400。
 
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -103,15 +107,40 @@ impl IntoResponse for AiError {
 }
 
 /// 前端请求体：完整对话历史由前端携带（服务端不持久化）。
+/// `use_tools`：为 true 时启用面板只读工具（function calling），服务端跑
+/// 工具循环；为 false（默认）保持纯透传，行为与既有单聊完全一致。
 #[derive(Deserialize)]
 pub(super) struct ChatReq {
     messages: Vec<ChatMsg>,
+    #[serde(default)]
+    use_tools: bool,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub(super) struct ChatMsg {
     pub(super) role: String,
+    /// role=tool 时可为空（结果通过 content 文本回灌，但 OpenAI 允许空串）；
+    /// 其余角色由 validate 保证非空。
     pub(super) content: String,
+    /// assistant 消息携带的工具调用请求（仅服务端工具循环内部使用，
+    /// 前端历史不含此字段）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) tool_calls: Option<Vec<serde_json::Value>>,
+    /// role=tool 消息回填对应的 tool_call_id。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) tool_call_id: Option<String>,
+}
+
+impl ChatMsg {
+    /// 普通文本消息（system/user/assistant），不带工具字段。
+    pub(super) fn text(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: content.into(),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
 }
 
 /// 共享的出站 HTTP 客户端。流式响应不能设整体超时（长回答会被掐断），
@@ -203,18 +232,30 @@ pub(super) async fn ai_config_with_overrides(
 /// 错误语义与 ai_chat 一致（连接失败/非 2xx 转 AiError，细节只进日志）。
 /// `think: true`：Ollama 的思考型模型（Qwen3 等）默认可能不输出思维链，
 /// 显式开启后 delta 里才会带 reasoning 字段；不支持该参数的上游会忽略它。
+/// `tools`：Some 时附带 function calling 工具定义。
+/// 返回 [`StreamErr`]：`client_reject=true` 表示上游以 4xx 拒绝请求
+/// （最常见：不支持 tools 参数），工具循环据此做降级重试。
+pub(super) struct StreamErr {
+    pub err: AiError,
+    pub client_reject: bool,
+}
+
 pub(super) async fn stream_completion(
     base: &str,
     key: &str,
     model: &str,
     messages: &[ChatMsg],
-) -> Result<reqwest::Response, AiError> {
-    let body = serde_json::json!({
+    tools: Option<&serde_json::Value>,
+) -> Result<reqwest::Response, StreamErr> {
+    let mut body = serde_json::json!({
         "model": model,
         "messages": messages,
         "stream": true,
         "think": true,
     });
+    if let Some(t) = tools {
+        body["tools"] = t.clone();
+    }
     let resp = http_client()
         .post(format!("{base}/chat/completions"))
         .bearer_auth(key)
@@ -223,57 +264,265 @@ pub(super) async fn stream_completion(
         .await
         .map_err(|e| {
             tracing::warn!("AI 上游连接失败：{e}（base={base}）");
-            AiError::upstream("无法连接 AI 服务，请检查上游 API 地址与网络配置")
+            StreamErr {
+                err: AiError::upstream("无法连接 AI 服务，请检查上游 API 地址与网络配置"),
+                client_reject: false,
+            }
         })?;
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
         tracing::warn!("AI 上游返回 {status}：{text}");
         let brief: String = text.chars().take(300).collect();
-        return Err(AiError::upstream(format!(
-            "AI 服务返回错误（HTTP {}）：{brief}",
-            status.as_u16()
-        )));
+        return Err(StreamErr {
+            err: AiError::upstream(format!(
+                "AI 服务返回错误（HTTP {}）：{brief}",
+                status.as_u16()
+            )),
+            client_reject: status.is_client_error(),
+        });
     }
     Ok(resp)
 }
 
-/// 群聊模块复用：从一条 SSE `data:` 负载中提取正文与思考增量。
-/// 思考型模型在 delta 里携带思维链，字段名因上游而异：
-/// DeepSeek/vLLM 用 `reasoning_content`，Ollama 用 `reasoning`；
-/// `content` 才是正式回答。两者都返回，调用方分别处理。
-/// 非 chunk JSON 或无增量返回 None。上游错误对象（chunk.error）转成 Err。
-pub(super) type SseDelta = (Option<String>, Option<String>);
+/// 工具循环引擎（单聊 use_tools 与群聊共用）：
+/// - [`TurnEvent`]：引擎向调用方发出的事件流（正文/思维链增量、工具状态、错误）；
+///   调用方各自翻译成 SSE chunk（单聊）或 WS 事件（群聊）。
+/// - [`run_turn`]：完整一轮"上游回答 + 工具往返"。流里聚合到 tool_calls 就执行
+///   面板只读工具、以 role=tool 消息回灌并重新请求，直到产出正文或达到
+///   [`MAX_TOOL_ROUNDS`]；上游以 4xx 拒绝 tools 时自动去掉 tools 重试一次
+///   （兼容不支持 function calling 的上游）。
+/// - 工具消息只存在于本次引擎调用的临时上下文，不持久化、不回传前端历史。
+const MAX_TOOL_ROUNDS: usize = 4;
 
-pub(super) fn sse_delta(data: &str) -> Result<Option<SseDelta>, AiError> {
-    let chunk: serde_json::Value = serde_json::from_str(data)
-        .map_err(|_| AiError::upstream("AI 上游返回了无法解析的数据块"))?;
-    if let Some(msg) = chunk
-        .get("error")
-        .and_then(|e| e.get("message"))
-        .and_then(|m| m.as_str())
-    {
-        return Err(AiError::upstream(msg.to_string()));
+pub(super) enum TurnEvent {
+    /// 增量：kind = "content" | "reasoning"
+    Delta { kind: &'static str, text: String },
+    /// 工具状态：state = "start" | "done"
+    Tool { name: String, state: &'static str },
+}
+
+pub(super) struct TurnResult {
+    pub content: String,
+    pub reasoning: String,
+}
+
+/// 流式 tool_calls 分片聚合：OpenAI 协议里 id/name/arguments 都可能拆成多帧，
+/// 按 index 累积。测试用纯函数。
+#[derive(Default)]
+pub(super) struct ToolCallBuf {
+    pub id: String,
+    pub name: String,
+    pub args: String,
+}
+
+/// 把一条 chunk JSON 里的 delta.tool_calls 分片折叠进聚合表。纯函数便于单测。
+pub(super) fn fold_tool_calls(
+    map: &mut BTreeMap<usize, ToolCallBuf>,
+    delta: &serde_json::Value,
+) {
+    let Some(arr) = delta.get("tool_calls").and_then(|v| v.as_array()) else {
+        return;
+    };
+    for frag in arr {
+        let idx = frag.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let e = map.entry(idx).or_default();
+        if let Some(id) = frag.get("id").and_then(|v| v.as_str()) {
+            e.id = id.to_string();
+        }
+        if let Some(n) = frag
+            .get("function")
+            .and_then(|f| f.get("name"))
+            .and_then(|n| n.as_str())
+        {
+            e.name.push_str(n);
+        }
+        if let Some(a) = frag
+            .get("function")
+            .and_then(|f| f.get("arguments"))
+            .and_then(|a| a.as_str())
+        {
+            e.args.push_str(a);
+        }
     }
-    let delta = chunk
-        .get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("delta"));
-    let content = delta
-        .and_then(|d| d.get("content"))
-        .and_then(|c| c.as_str())
-        .map(|s| s.to_string());
-    let reasoning = delta
-        .and_then(|d| {
-            d.get("reasoning_content")
-                .or_else(|| d.get("reasoning"))
-        })
-        .and_then(|c| c.as_str())
-        .map(|s| s.to_string());
-    if content.is_none() && reasoning.is_none() {
-        return Ok(None);
+}
+
+/// 一次上游调用的生效配置三元组（run_turn 参数收纳用）。
+pub(super) struct Upstream<'a> {
+    pub base: &'a str,
+    pub key: &'a str,
+    pub model: &'a str,
+}
+
+/// 执行一轮（含工具往返）。`stop` 为 Some 时每块检查（群聊 admin 强停）；
+/// `tx` 接收端被 drop（前端断开）时引擎退出。
+/// 返回 Err 仅用于"本轮彻底失败"；工具执行失败不报错（以文本回灌模型）。
+pub(super) async fn run_turn(
+    state: &AppState,
+    role: &str,
+    up: Upstream<'_>,
+    mut messages: Vec<ChatMsg>,
+    mut tools: Option<serde_json::Value>,
+    stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    tx: &mpsc::Sender<TurnEvent>,
+) -> Result<TurnResult, AiError> {
+    use std::sync::atomic::Ordering;
+    let stopped = || stop.as_ref().map(|s| s.load(Ordering::Relaxed)).unwrap_or(false);
+    let mut acc_reasoning = String::new();
+
+    for _round in 0..MAX_TOOL_ROUNDS {
+        if stopped() {
+            return Err(AiError::upstream("已被管理员停止"));
+        }
+        // 发起请求；上游带 tools 时 4xx 拒绝 → 去掉 tools 立即重试一次
+        let resp = loop {
+            match stream_completion(up.base, up.key, up.model, &messages, tools.as_ref()).await {
+                Ok(r) => break r,
+                Err(se) if se.client_reject && tools.is_some() => {
+                    tracing::warn!("上游拒绝 tools 参数，降级为无工具请求");
+                    tools = None;
+                }
+                Err(se) => return Err(se.err),
+            }
+        };
+
+        let mut stream = resp.bytes_stream();
+        let mut buf = String::new();
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let mut calls: BTreeMap<usize, ToolCallBuf> = BTreeMap::new();
+        while let Some(item) = stream.next().await {
+            if stopped() {
+                return Err(AiError::upstream("已被管理员停止"));
+            }
+            match item {
+                Ok(bytes) => {
+                    buf.push_str(&String::from_utf8_lossy(&bytes));
+                    while let Some(pos) = buf.find('\n') {
+                        let line = buf[..pos].trim_end_matches('\r').to_string();
+                        buf.drain(..=pos);
+                        let Some(data) = line.strip_prefix("data:") else {
+                            continue;
+                        };
+                        let data = data.trim();
+                        if data.is_empty() || data == "[DONE]" {
+                            continue;
+                        }
+                        let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) else {
+                            continue;
+                        };
+                        if let Some(msg) = chunk
+                            .get("error")
+                            .and_then(|e| e.get("message"))
+                            .and_then(|m| m.as_str())
+                        {
+                            return Err(AiError::upstream(msg.to_string()));
+                        }
+                        let Some(delta) = chunk
+                            .get("choices")
+                            .and_then(|c| c.get(0))
+                            .and_then(|c| c.get("delta"))
+                        else {
+                            continue;
+                        };
+                        if let Some(t) = delta
+                            .get("reasoning_content")
+                            .or_else(|| delta.get("reasoning"))
+                            .and_then(|c| c.as_str())
+                        {
+                            if !t.is_empty() {
+                                reasoning.push_str(t);
+                                let _ = tx
+                                    .send(TurnEvent::Delta {
+                                        kind: "reasoning",
+                                        text: t.to_string(),
+                                    })
+                                    .await;
+                            }
+                        }
+                        if let Some(d) = delta.get("content").and_then(|c| c.as_str()) {
+                            if !d.is_empty() {
+                                content.push_str(d);
+                                // 接收端被丢弃 = 前端断开，中止本轮
+                                if tx
+                                    .send(TurnEvent::Delta {
+                                        kind: "content",
+                                        text: d.to_string(),
+                                    })
+                                    .await
+                                    .is_err()
+                                {
+                                    return Err(AiError::upstream("客户端已断开"));
+                                }
+                            }
+                        }
+                        fold_tool_calls(&mut calls, delta);
+                    }
+                }
+                Err(e) => return Err(AiError::upstream(format!("读取上游流失败：{e}"))),
+            }
+        }
+        acc_reasoning.push_str(&reasoning);
+
+        if calls.is_empty() {
+            return Ok(TurnResult {
+                content,
+                reasoning: acc_reasoning,
+            });
+        }
+
+        // 有工具调用：assistant 消息（含 tool_calls）+ 逐个执行回灌
+        let tc: Vec<serde_json::Value> = calls
+            .values()
+            .map(|c| {
+                serde_json::json!({
+                    "id": c.id,
+                    "type": "function",
+                    "function": {
+                        "name": c.name,
+                        "arguments": if c.args.is_empty() { "{}" } else { &c.args },
+                    },
+                })
+            })
+            .collect();
+        messages.push(ChatMsg {
+            role: "assistant".into(),
+            content: content.clone(),
+            tool_calls: Some(tc),
+            tool_call_id: None,
+        });
+        for c in calls.values() {
+            let _ = tx
+                .send(TurnEvent::Tool {
+                    name: c.name.clone(),
+                    state: "start",
+                })
+                .await;
+            let parsed: serde_json::Value =
+                serde_json::from_str(if c.args.is_empty() { "{}" } else { &c.args })
+                    .unwrap_or_else(|_| serde_json::json!({}));
+            let result = crate::ai_tools::execute(state, &c.name, &parsed, role).await;
+            messages.push(ChatMsg {
+                role: "tool".into(),
+                content: result,
+                tool_calls: None,
+                tool_call_id: Some(c.id.clone()),
+            });
+            let _ = tx
+                .send(TurnEvent::Tool {
+                    name: c.name.clone(),
+                    state: "done",
+                })
+                .await;
+        }
+        // 下一轮：带着工具结果重新请求
     }
-    Ok(Some((content, reasoning)))
+
+    // 轮数耗尽仍未产出正文：返回空正文，由调用方按"无响应"处理
+    Ok(TurnResult {
+        content: String::new(),
+        reasoning: acc_reasoning,
+    })
 }
 
 /// POST /api/ai/chat（需登录）
@@ -306,66 +555,125 @@ fn validate(req: &ChatReq) -> Result<(), String> {
 pub(super) async fn ai_chat(
     State(state): State<AppState>,
     // 提取器本身即鉴权：token 无效/被吊销直接 401
-    _user: AuthUser,
+    user: AuthUser,
     Json(req): Json<ChatReq>,
 ) -> Result<Response, AiError> {
     validate(&req).map_err(AiError::bad)?;
 
     let (base, key, model) = ai_config(&state.db).await?;
-    let body = serde_json::json!({
-        "model": model,
-        "messages": req.messages,
-        "stream": true,
-    });
 
-    let resp = http_client()
-        .post(format!("{base}/chat/completions"))
-        .bearer_auth(key)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| {
-            // 只记错误与地址，绝不记录密钥
-            tracing::warn!("AI 上游连接失败：{e}（base={base}）");
-            AiError::upstream("无法连接 AI 服务，请检查上游 API 地址与网络配置")
-        })?;
-
-    let status = resp.status();
-    if !status.is_success() {
-        // 上游错误：截取一段错误体帮助定位（多为 quota/key/model 问题），
-        // 同时完整错误进 tracing 日志。
-        let text = resp.text().await.unwrap_or_default();
-        tracing::warn!("AI 上游返回 {status}：{text}");
-        let brief: String = text.chars().take(300).collect();
-        return Err(AiError::upstream(format!(
-            "AI 服务返回错误（HTTP {}）：{brief}",
-            status.as_u16()
-        )));
-    }
-
-    // 上游 2xx：把响应体按字节块搬到下游 SSE 流。用独立任务做搬运，
-    // 前端中断（AbortController）时接收端被丢弃，send 失败自然退出。
-    // 通道元素类型由 chunk 的类型反推（Result<Bytes, anyhow::Error>）。
-    let (tx, rx) = mpsc::channel(16);
-    tokio::spawn(async move {
-        let mut resp = resp;
-        loop {
-            match resp.chunk().await {
-                Ok(Some(chunk)) => {
-                    if tx.send(Ok(chunk)).await.is_err() {
+    // 未启用工具：纯透传（既有行为，零变化）
+    if !req.use_tools {
+        let body = serde_json::json!({
+            "model": model,
+            "messages": req.messages,
+            "stream": true,
+        });
+        let resp = http_client()
+            .post(format!("{base}/chat/completions"))
+            .bearer_auth(key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::warn!("AI 上游连接失败：{e}（base={base}）");
+                AiError::upstream("无法连接 AI 服务，请检查上游 API 地址与网络配置")
+            })?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            tracing::warn!("AI 上游返回 {status}：{text}");
+            let brief: String = text.chars().take(300).collect();
+            return Err(AiError::upstream(format!(
+                "AI 服务返回错误（HTTP {}）：{brief}",
+                status.as_u16()
+            )));
+        }
+        let (tx, rx) = mpsc::channel(16);
+        tokio::spawn(async move {
+            let mut resp = resp;
+            loop {
+                match resp.chunk().await {
+                    Ok(Some(chunk)) => {
+                        if tx.send(Ok(chunk)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        let _ = tx.send(Err(anyhow::anyhow!(e))).await;
                         break;
                     }
                 }
-                Ok(None) => break,
-                Err(e) => {
-                    let _ = tx.send(Err(anyhow::anyhow!(e))).await;
-                    break;
-                }
+            }
+        });
+        let stream = Body::from_stream(ReceiverStream::new(rx));
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .header(header::CACHE_CONTROL, "no-cache")
+            .body(stream)
+            .map_err(|_| AiError::upstream("构造流式响应失败"));
+    }
+
+    // 启用工具：服务端跑工具循环，把引擎事件翻译成 OpenAI 兼容 SSE chunk。
+    // 前端解析逻辑不变：content 增量照常渲染，工具状态以合成 chunk
+    // {"tool": {...}} 出现（前端识别后显示 🔧 状态行）。
+    let (out_tx, out_rx) = mpsc::channel::<Result<Bytes, anyhow::Error>>(16);
+    let st = state.clone();
+    let role = user.role.clone();
+    let mut msgs = req.messages.clone();
+    tokio::spawn(async move {
+        let (etx, mut erx) = mpsc::channel(64);
+        let engine = tokio::spawn(async move {
+            run_turn(
+                &st,
+                &role,
+                Upstream {
+                    base: &base,
+                    key: &key,
+                    model: &model,
+                },
+                std::mem::take(&mut msgs),
+                Some(crate::ai_tools::tools_json()),
+                None,
+                &etx,
+            )
+            .await
+        });
+        while let Some(ev) = erx.recv().await {
+            let chunk = match ev {
+                TurnEvent::Delta { kind, text } => serde_json::json!({
+                    "choices": [{"delta": if kind == "content" {
+                        serde_json::json!({"content": text})
+                    } else {
+                        serde_json::json!({"reasoning_content": text})
+                    }}]
+                }),
+                TurnEvent::Tool { name, state } => serde_json::json!({
+                    "tool": {"name": name, "state": state}
+                }),
+            };
+            let line = format!("data: {}\n\n", chunk);
+            if out_tx.send(Ok(Bytes::from(line))).await.is_err() {
+                engine.abort();
+                return;
             }
         }
+        match engine.await {
+            Ok(Ok(_)) => {
+                let _ = out_tx.send(Ok(Bytes::from("data: [DONE]\n\n"))).await;
+            }
+            Ok(Err(e)) => {
+                let c = serde_json::json!({"error": {"message": e.to_string()}});
+                let _ = out_tx
+                    .send(Ok(Bytes::from(format!("data: {c}\n\n"))))
+                    .await;
+            }
+            Err(_) => {}
+        }
     });
-
-    let stream = Body::from_stream(ReceiverStream::new(rx));
+    let stream = Body::from_stream(ReceiverStream::new(out_rx));
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/event-stream")
@@ -467,25 +775,53 @@ mod tests {
 
         // 非法角色 / 空内容 / 超长内容
         let bad_role = ChatReq {
-            messages: vec![ChatMsg {
-                role: "tool".into(),
-                content: "x".into(),
-            }],
+            messages: vec![ChatMsg::text("tool", "x")],
+            use_tools: false,
         };
         assert!(validate(&bad_role).is_err());
         let empty_content = ChatReq {
-            messages: vec![ChatMsg {
-                role: "user".into(),
-                content: String::new(),
-            }],
+            messages: vec![ChatMsg::text("user", "")],
+            use_tools: false,
         };
         assert!(validate(&empty_content).is_err());
         let too_long = ChatReq {
-            messages: vec![ChatMsg {
-                role: "user".into(),
-                content: "a".repeat(MAX_CONTENT_BYTES + 1),
-            }],
+            messages: vec![ChatMsg::text("user", "a".repeat(MAX_CONTENT_BYTES + 1))],
+            use_tools: false,
         };
         assert!(validate(&too_long).is_err());
+    }
+
+    #[test]
+    fn fold_tool_calls_accumulates_fragments() {
+        // 典型流式分片：第一帧带 id+name，后续帧只带 arguments 片段
+        let mut m: BTreeMap<usize, ToolCallBuf> = BTreeMap::new();
+        let f1 = serde_json::json!({
+            "tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "get_", "arguments": "{\"li"}}]
+        });
+        let f2 = serde_json::json!({
+            "tool_calls": [{"index": 0, "function": {"name": "limit", "arguments": "mit\":50}"}}]
+        });
+        // 第二个并行调用（index 1）
+        let f3 = serde_json::json!({
+            "tool_calls": [{"index": 1, "id": "call_2", "function": {"name": "list_services", "arguments": "{}"}}]
+        });
+        fold_tool_calls(&mut m, &f1);
+        fold_tool_calls(&mut m, &f2);
+        fold_tool_calls(&mut m, &f3);
+        assert_eq!(m.len(), 2);
+        assert_eq!(m[&0].id, "call_1");
+        assert_eq!(m[&0].name, "get_limit");
+        assert_eq!(m[&0].args, "{\"limit\":50}");
+        assert_eq!(m[&1].name, "list_services");
+        // 无 tool_calls 的 delta 不影响聚合
+        fold_tool_calls(&mut m, &serde_json::json!({"content": "hi"}));
+        assert_eq!(m.len(), 2);
+    }
+
+    #[test]
+    fn chatmsg_serializes_without_tool_fields() {
+        // skip_serializing_if：普通消息的请求体与改造前一致
+        let j = serde_json::to_string(&ChatMsg::text("user", "你好")).unwrap();
+        assert_eq!(j, r#"{"role":"user","content":"你好"}"#);
     }
 }
