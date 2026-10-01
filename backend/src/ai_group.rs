@@ -214,16 +214,36 @@ pub(super) fn parse_mentions(
 }
 
 /// 房间协作规则（注入每个 AI 的 system prompt 末尾）。
-fn collab_rules(roster: &[AiMemberRow], admin_names: &[String]) -> String {
-    let mut s = String::from(
-        "\n\n【群聊协作规则】\
+/// 措辞核心：@ 是"要求对方行动"的信号，不是礼貌用语——
+/// 上一版"完成任务必须@管理员汇报"被模型泛化成每条回复都@，
+/// 管理员又被汇报反复触发，一条消息炸出十几条回复（反馈风暴）。
+/// self_name/is_admin 用于身份锚定：模型分不清"你我他"时会自己 @ 自己汇报。
+fn collab_rules(self_name: &str, is_admin: bool, roster: &[AiMemberRow], admin_names: &[String]) -> String {
+    let mut s = "\n\n【你的身份】\
+         \n你在群聊中的名字是「{self}」。下面对话历史里的 [名字] 前缀表示该消息的发送者：\
+         没有前缀的 assistant 消息才是你自己说过的话。人类成员是房间的用户，\
+         其他 AI 名字（见下方名单）都是你的对话伙伴，不是你自己。"
+        .replace("{self}", self_name);
+    s.push_str(
+        &"\n\n【群聊协作规则】\
          \n1. 只有消息明确 @ 你时你才需要回复；未 @ 任何 AI 的消息是人类闲聊，保持沉默（服务端已过滤，此规则供你理解上下文）。\
-         \n2. 你完成任务后，必须在回复末尾 @ 管理员AI 汇报任务完成。\
-         \n3. 遇到无法解决的问题时，@ 管理员AI 求助，或直接 @ 更合适的其他 AI 协作。\
-         \n4. 被 @ 只是收到汇报/求助信号，对话不会自动结束：管理员AI 必须思考并决定\
+         \n2. @ 是「要求对方接着处理」的信号，不是寒暄或收尾用语。回复普通用户或其他 AI 时，\
+         默认不 @ 任何人；只有你确实需要某个对象下一步做点什么时才 @ 它。\
+         永远不要 @ 你自己（「{self}」）。\
+         \n3. 当管理员AI @ 你、让你做某件事（回答、介绍、处理任务等）时，你必须在回复末尾\
+         @ 管理员AI 用一句话汇报完成（例如「@主管 已完成」），好让管理员AI 汇总收尾。\
+         这是唯一需要你主动 @ 管理员AI 的情形；若你自己就是管理员AI，则永远不做此汇报。\
+         \n4. 遇到无法解决的问题时，@ 管理员AI 求助，或直接 @ 更合适的其他 AI 协作。\
+         \n5. 被 @ 只是收到信号，对话不会自动结束：管理员AI 必须思考并决定\
          自己输出、继续委托其他 AI，或总结结束。\
-         \n5. 管理员AI 决定结束时，输出总结并在末尾单独写 [CHAIN_END]；除此之外任何成员不得使用该标记。",
+         \n6. 管理员AI：成员的汇报不需要你逐条回复，更不要为了回话去 @ 成员（会引发互相 @ 刷屏）；\
+         等本轮该到的汇报到齐后，直接输出一段总结，并在末尾单独一行写 [CHAIN_END] 结束本轮，总结里不要再 @ 任何成员。\
+         \n7. [CHAIN_END] 是内部协议标记：只有管理员AI在结束时可输出，其他成员不得提及或使用它。"
+            .replace("{self}", self_name),
     );
+    if is_admin {
+        s.push_str("\n（你是本房间的管理员AI，负责调度与总结收尾。）");
+    }
     if !roster.is_empty() {
         s.push_str("\n【房间 AI 成员名单】");
         for m in roster {
@@ -260,8 +280,12 @@ fn build_history(self_name: &str, rows: &[AiMessageRow]) -> Vec<ChatMsg> {
 
 /// 单轮结果
 enum TurnOutcome {
-    /// AI 正常产出：最终文本（已剥离 [CHAIN_END]）、是否由管理员显式结束
-    Done { content: String, ended: bool },
+    /// AI 正常产出：正文（已剥离 [CHAIN_END]）、思维链、是否由管理员显式结束
+    Done {
+        content: String,
+        reasoning: String,
+        ended: bool,
+    },
     /// 无响应：上游错误 / 超时 / 空回复
     Failed(String),
 }
@@ -278,7 +302,7 @@ async fn one_turn(
 ) -> TurnOutcome {
     let admin_names: Vec<String> = roster.iter().filter(|m| m.is_admin).map(|m| m.name.clone()).collect();
     let mut sys = member.persona.clone();
-    sys.push_str(&collab_rules(roster, &admin_names));
+    sys.push_str(&collab_rules(&member.name, member.is_admin, roster, &admin_names));
     if let Some(x) = extra_instruction {
         sys.push('\n');
         sys.push_str(x);
@@ -308,7 +332,8 @@ async fn one_turn(
         };
         let mut stream = resp.bytes_stream();
         let mut buf = String::new(); // 未处理的 SSE 残余
-        let mut full = String::new(); // 已产出全文
+        let mut full = String::new(); // 已产出正文
+        let mut reasoning = String::new(); // 已产出思维链（reasoning_content）
         while let Some(item) = stream.next().await {
             if cs.stop.load(Ordering::Relaxed) {
                 return TurnOutcome::Failed("已被管理员停止".into());
@@ -325,19 +350,39 @@ async fn one_turn(
                             continue;
                         }
                         match ai::sse_delta(data) {
-                            Ok(Some(d)) if !d.is_empty() => {
-                                full.push_str(&d);
-                                publish(
-                                    room_id,
-                                    serde_json::json!({
-                                        "type": "ai_delta",
-                                        "room": room_id,
-                                        "member_id": member.id,
-                                        "delta": d,
-                                    }),
-                                );
+                            Ok(Some((content, think))) => {
+                                if let Some(t) = think {
+                                    if !t.is_empty() {
+                                        reasoning.push_str(&t);
+                                        publish(
+                                            room_id,
+                                            serde_json::json!({
+                                                "type": "ai_delta",
+                                                "room": room_id,
+                                                "member_id": member.id,
+                                                "kind": "reasoning",
+                                                "delta": t,
+                                            }),
+                                        );
+                                    }
+                                }
+                                if let Some(d) = content {
+                                    if !d.is_empty() {
+                                        full.push_str(&d);
+                                        publish(
+                                            room_id,
+                                            serde_json::json!({
+                                                "type": "ai_delta",
+                                                "room": room_id,
+                                                "member_id": member.id,
+                                                "kind": "content",
+                                                "delta": d,
+                                            }),
+                                        );
+                                    }
+                                }
                             }
-                            Ok(_) => {}
+                            Ok(None) => {}
                             Err(e) => return TurnOutcome::Failed(e.to_string()),
                         }
                     }
@@ -345,7 +390,11 @@ async fn one_turn(
                 Err(e) => return TurnOutcome::Failed(format!("读取上游流失败：{e}")),
             }
         }
-        TurnOutcome::Done { content: full, ended: false }
+        TurnOutcome::Done {
+            content: full,
+            reasoning,
+            ended: false,
+        }
     };
 
     let outcome = match tokio::time::timeout(
@@ -359,15 +408,20 @@ async fn one_turn(
     };
 
     // 落库 + 广播全文（仅成功轮）
-    if let TurnOutcome::Done { content, .. } = &outcome {
+    if let TurnOutcome::Done {
+        content, reasoning, ..
+    } = &outcome
+    {
         let mut content = content.clone();
         let mut ended = false;
-        if member.is_admin {
-            if let Some(pos) = content.find(CHAIN_END) {
-                ended = true;
-                content.replace_range(pos..pos + CHAIN_END.len(), "");
-                content = content.trim_end().to_string();
-            }
+        // [CHAIN_END] 一律从正文剥离（任何成员都可能误输出）；
+        // 但只有管理员AI的输出才构成"链结束"信号。
+        // 若不过滤，标记会残留在消息与历史里，诱发其它 AI 模仿、
+        // 在角色扮演中讨论标记本身，破坏人设与调度语义。
+        if let Some(pos) = content.find(CHAIN_END) {
+            ended = member.is_admin;
+            content.replace_range(pos..pos + CHAIN_END.len(), "");
+            content = content.trim_end().to_string();
         }
         if content.trim().is_empty() {
             return TurnOutcome::Failed("上游返回空内容".into());
@@ -382,6 +436,7 @@ async fn one_turn(
                 member.name.clone(),
                 content.clone(),
                 ts,
+                reasoning.clone(),
             )
             .await
         {
@@ -393,13 +448,17 @@ async fn one_turn(
                     "message": {
                         "id": id, "room_id": room_id, "sender_type": "ai",
                         "sender_id": member.id, "sender_name": member.name,
-                        "content": content, "ts": ts,
+                        "content": content, "ts": ts, "reasoning": reasoning,
                     },
                 }),
             ),
             Err(e) => return TurnOutcome::Failed(format!("消息落库失败：{e}")),
         }
-        return TurnOutcome::Done { content, ended };
+        return TurnOutcome::Done {
+            content,
+            reasoning: reasoning.clone(),
+            ended,
+        };
     }
     outcome
 }
@@ -409,7 +468,15 @@ async fn system_note(state: &AppState, room_id: i64, text: &str) {
     let ts = now_ts();
     if let Ok((id, ts)) = state
         .db
-        .ai_message_add_async(room_id, "system".into(), 0, "系统".into(), text.into(), ts)
+        .ai_message_add_async(
+            room_id,
+            "system".into(),
+            0,
+            "系统".into(),
+            text.into(),
+            ts,
+            String::new(),
+        )
         .await
     {
         publish(
@@ -498,7 +565,9 @@ async fn run_chain(
         );
         let outcome = one_turn(&state, room_id, &member, &roster, &cs, None).await;
         let (content, chain_ended) = match outcome {
-            TurnOutcome::Done { content, ended } => (content, ended),
+            TurnOutcome::Done {
+                content, ended, ..
+            } => (content, ended),
             TurnOutcome::Failed(msg) => {
                 system_note(&state, room_id, &format!("「{}」无响应：{msg}", member.name)).await;
                 // 无响应 → 管理员接管（失败者本身是管理员则不再自举）
@@ -680,6 +749,7 @@ async fn handle_client_frame(state: &AppState, room_id: i64, uid: i64, uname: &s
                     uname.to_string(),
                     content.to_string(),
                     ts,
+                    String::new(),
                 )
                 .await
             else {
@@ -1109,10 +1179,10 @@ mod tests {
     #[test]
     fn history_maps_own_speech_to_assistant() {
         let rows = vec![
-            AiMessageRow { id: 1, room_id: 1, sender_type: "user".into(), sender_id: 9, sender_name: "alice".into(), content: "做个页面".into(), ts: 0 },
-            AiMessageRow { id: 2, room_id: 1, sender_type: "ai".into(), sender_id: 2, sender_name: "Coder".into(), content: "我来".into(), ts: 1 },
-            AiMessageRow { id: 3, room_id: 1, sender_type: "ai".into(), sender_id: 1, sender_name: "助手".into(), content: "收到".into(), ts: 2 },
-            AiMessageRow { id: 4, room_id: 1, sender_type: "system".into(), sender_id: 0, sender_name: "系统".into(), content: "超时".into(), ts: 3 },
+            AiMessageRow { id: 1, room_id: 1, sender_type: "user".into(), sender_id: 9, sender_name: "alice".into(), content: "做个页面".into(), ts: 0, reasoning: String::new() },
+            AiMessageRow { id: 2, room_id: 1, sender_type: "ai".into(), sender_id: 2, sender_name: "Coder".into(), content: "我来".into(), ts: 1, reasoning: String::new() },
+            AiMessageRow { id: 3, room_id: 1, sender_type: "ai".into(), sender_id: 1, sender_name: "助手".into(), content: "收到".into(), ts: 2, reasoning: String::new() },
+            AiMessageRow { id: 4, room_id: 1, sender_type: "system".into(), sender_id: 0, sender_name: "系统".into(), content: "超时".into(), ts: 3, reasoning: String::new() },
         ];
         let h = build_history("助手", &rows);
         assert_eq!(h[0].role, "user");

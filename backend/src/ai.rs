@@ -201,6 +201,8 @@ pub(super) async fn ai_config_with_overrides(
 
 /// 群聊模块复用：向流式上游发起一次 chat/completions 请求。
 /// 错误语义与 ai_chat 一致（连接失败/非 2xx 转 AiError，细节只进日志）。
+/// `think: true`：Ollama 的思考型模型（Qwen3 等）默认可能不输出思维链，
+/// 显式开启后 delta 里才会带 reasoning 字段；不支持该参数的上游会忽略它。
 pub(super) async fn stream_completion(
     base: &str,
     key: &str,
@@ -211,6 +213,7 @@ pub(super) async fn stream_completion(
         "model": model,
         "messages": messages,
         "stream": true,
+        "think": true,
     });
     let resp = http_client()
         .post(format!("{base}/chat/completions"))
@@ -235,10 +238,14 @@ pub(super) async fn stream_completion(
     Ok(resp)
 }
 
-/// 群聊模块复用：从一条 SSE `data:` 负载中提取增量文本。
-/// 返回 Some(text)（可为空串，表示心跳/角色增量）；非 chunk JSON 返回 None。
-/// 上游错误对象（chunk.error）转成 Err 供调用方终止本轮。
-pub(super) fn sse_delta(data: &str) -> Result<Option<String>, AiError> {
+/// 群聊模块复用：从一条 SSE `data:` 负载中提取正文与思考增量。
+/// 思考型模型在 delta 里携带思维链，字段名因上游而异：
+/// DeepSeek/vLLM 用 `reasoning_content`，Ollama 用 `reasoning`；
+/// `content` 才是正式回答。两者都返回，调用方分别处理。
+/// 非 chunk JSON 或无增量返回 None。上游错误对象（chunk.error）转成 Err。
+pub(super) type SseDelta = (Option<String>, Option<String>);
+
+pub(super) fn sse_delta(data: &str) -> Result<Option<SseDelta>, AiError> {
     let chunk: serde_json::Value = serde_json::from_str(data)
         .map_err(|_| AiError::upstream("AI 上游返回了无法解析的数据块"))?;
     if let Some(msg) = chunk
@@ -248,13 +255,25 @@ pub(super) fn sse_delta(data: &str) -> Result<Option<String>, AiError> {
     {
         return Err(AiError::upstream(msg.to_string()));
     }
-    Ok(chunk
+    let delta = chunk
         .get("choices")
         .and_then(|c| c.get(0))
-        .and_then(|c| c.get("delta"))
+        .and_then(|c| c.get("delta"));
+    let content = delta
         .and_then(|d| d.get("content"))
         .and_then(|c| c.as_str())
-        .map(|s| s.to_string()))
+        .map(|s| s.to_string());
+    let reasoning = delta
+        .and_then(|d| {
+            d.get("reasoning_content")
+                .or_else(|| d.get("reasoning"))
+        })
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string());
+    if content.is_none() && reasoning.is_none() {
+        return Ok(None);
+    }
+    Ok(Some((content, reasoning)))
 }
 
 /// POST /api/ai/chat（需登录）

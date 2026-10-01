@@ -98,7 +98,8 @@ pub struct AiMemberRow {
 pub type AiMemberTuple = (i64, String, String, bool, String, String);
 
 /// AI 群聊消息行（4.5）。sender_type：user / ai / system。
-#[derive(Serialize)]
+/// reasoning 为思考型上游的思维链（reasoning_content），无则为空串。
+#[derive(Clone, Serialize)]
 pub struct AiMessageRow {
     pub id: i64,
     pub room_id: i64,
@@ -107,6 +108,7 @@ pub struct AiMessageRow {
     pub sender_name: String,
     pub content: String,
     pub ts: i64,
+    pub reasoning: String,
 }
 
 impl Db {
@@ -166,6 +168,11 @@ impl Db {
             7,
             "0007_ai_group.sql",
             include_str!("../migrations/0007_ai_group.sql"),
+        ),
+        (
+            8,
+            "0008_ai_reasoning.sql",
+            include_str!("../migrations/0008_ai_reasoning.sql"),
         ),
     ];
 
@@ -970,7 +977,8 @@ impl Db {
         Ok(false)
     }
 
-    /// 写入一条房间消息，返回 (id, ts)
+    /// 写入一条房间消息，返回 (id, ts)。reasoning 为思维链（无则空串）。
+    #[allow(clippy::too_many_arguments)]
     pub fn ai_message_add(
         &self,
         room_id: i64,
@@ -979,12 +987,13 @@ impl Db {
         sender_name: &str,
         content: &str,
         ts: i64,
+        reasoning: &str,
     ) -> Result<(i64, i64)> {
         let conn = self.pool.get().context("获取数据库连接失败")?;
         conn.execute(
-            "INSERT INTO ai_messages (room_id, sender_type, sender_id, sender_name, content, ts)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            (room_id, sender_type, sender_id, sender_name, content, ts),
+            "INSERT INTO ai_messages (room_id, sender_type, sender_id, sender_name, content, ts, reasoning)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            (room_id, sender_type, sender_id, sender_name, content, ts, reasoning),
         )?;
         Ok((conn.last_insert_rowid(), ts))
     }
@@ -993,7 +1002,7 @@ impl Db {
     pub fn ai_message_list(&self, room_id: i64, limit: i64) -> Result<Vec<AiMessageRow>> {
         let conn = self.pool.get().context("获取数据库连接失败")?;
         let mut stmt = conn.prepare(
-            "SELECT id, room_id, sender_type, sender_id, sender_name, content, ts
+            "SELECT id, room_id, sender_type, sender_id, sender_name, content, ts, reasoning
              FROM ai_messages WHERE room_id = ?1 ORDER BY id DESC LIMIT ?2",
         )?;
         let mut rows = stmt
@@ -1006,6 +1015,7 @@ impl Db {
                     sender_name: row.get(4)?,
                     content: row.get(5)?,
                     ts: row.get(6)?,
+                    reasoning: row.get(7)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1378,10 +1388,19 @@ impl Db {
         sender_name: String,
         content: String,
         ts: i64,
+        reasoning: String,
     ) -> Result<(i64, i64)> {
         let db = self.clone();
         blocking(move || {
-            db.ai_message_add(room_id, &sender_type, sender_id, &sender_name, &content, ts)
+            db.ai_message_add(
+                room_id,
+                &sender_type,
+                sender_id,
+                &sender_name,
+                &content,
+                ts,
+                &reasoning,
+            )
         })
         .await
     }
@@ -1424,13 +1443,13 @@ mod tests {
             > 0
     }
 
-    /// 全新库：迁移建出全部表，版本号为最新（7）；再次打开幂等（不重复执行）
+    /// 全新库：迁移建出全部表，版本号为最新（8）；再次打开幂等（不重复执行）
     #[test]
     fn fresh_db_gets_baseline() {
         let path = temp_db_path("fresh");
         {
             let db = Db::open(&path).unwrap();
-            assert_eq!(db.schema_version().unwrap(), 7);
+            assert_eq!(db.schema_version().unwrap(), 8);
             assert!(table_exists(&db, "settings"));
             assert!(table_exists(&db, "users"));
             assert!(table_exists(&db, "metrics"));
@@ -1444,7 +1463,7 @@ mod tests {
             assert!(table_exists(&db, "ai_messages"));
         }
         let db2 = Db::open(&path).unwrap();
-        assert_eq!(db2.schema_version().unwrap(), 7);
+        assert_eq!(db2.schema_version().unwrap(), 8);
         let _ = std::fs::remove_file(path);
     }
 
@@ -1468,7 +1487,7 @@ mod tests {
         }
         {
             let db = Db::open(&path).unwrap();
-            assert_eq!(db.schema_version().unwrap(), 7);
+            assert_eq!(db.schema_version().unwrap(), 8);
             assert_eq!(db.user_count().unwrap(), 1);
             assert!(db.find_user("admin").unwrap().is_some());
             // 旧库升级后 admin 自动获得默认角色 admin、不强制改密（避免锁死现有部署）
@@ -1497,7 +1516,7 @@ mod tests {
             .expect_err("半途失败应中止");
             drop(tx);
             assert!(!table_exists(&db, "t_half"), "回滚后不应残留半途建的表");
-            assert_eq!(db.schema_version().unwrap(), 7, "失败的迁移不得推进版本");
+            assert_eq!(db.schema_version().unwrap(), 8, "失败的迁移不得推进版本");
         }
         let _ = std::fs::remove_file(path);
     }

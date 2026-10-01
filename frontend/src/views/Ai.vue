@@ -71,8 +71,19 @@
             <div v-if="m.sender_type === 'system'" class="sys-note">{{ m.content }}</div>
             <template v-else>
               <div class="who">{{ m.sender_name }}</div>
+              <div v-if="m.reasoning" class="think">
+                <div class="think-head" @click="m.thinkOpen = !m.thinkOpen">
+                  <span class="think-tag">深度思考</span>
+                  <span class="think-arrow">{{ m.thinkOpen ? "收起 ▲" : "展开 ▼" }}</span>
+                </div>
+                <div v-if="thinkVisible(m)" class="think-body">{{ m.reasoning }}</div>
+              </div>
               <div class="bubble">
-                {{ m.content }}<span v-if="m.streaming" class="cursor">▍</span>
+                <template v-for="(seg, si) in renderMentions(m.content)" :key="si">
+                  <span v-if="seg.mention" class="mention">@{{ seg.text }}</span>
+                  <template v-else>{{ seg.text }}</template>
+                </template>
+                <span v-if="m.streaming" class="cursor">▍</span>
               </div>
             </template>
           </div>
@@ -237,6 +248,8 @@ interface Msg {
   content: string;
   ts: number;
   streaming?: boolean;
+  reasoning?: string;
+  thinkOpen?: boolean;
 }
 
 // ---------- 状态 ----------
@@ -314,6 +327,7 @@ function handleServerEvent(e: any) {
         );
         if (live) {
           live.content = msg.content;
+          if (msg.reasoning) live.reasoning = msg.reasoning;
           live.streaming = false;
           live.id = msg.id;
           live.ts = msg.ts;
@@ -352,7 +366,8 @@ function handleServerEvent(e: any) {
         (x) => x.sender_type === "ai" && x.sender_id === e.member_id && x.streaming,
       );
       if (live) {
-        live.content += e.delta;
+        if (e.kind === "reasoning") live.reasoning = (live.reasoning || "") + e.delta;
+        else live.content += e.delta;
         scrollBottom();
       }
       break;
@@ -377,7 +392,14 @@ function toMsg(m: any): Msg {
     sender_name: m.sender_name,
     content: m.content,
     ts: m.ts,
+    reasoning: m.reasoning || undefined,
   };
+}
+
+// 深度思考块的可见性：流式期间自动展开；定稿后由用户折叠状态决定（默认收起）
+function thinkVisible(m: Msg): boolean {
+  if (!m.reasoning) return false;
+  return m.streaming ? true : !!m.thinkOpen;
 }
 
 // ---------- 房间 ----------
@@ -592,6 +614,52 @@ function onKey(e: KeyboardEvent) {
   }
 }
 
+// ---------- @ 高亮 ----------
+// 把消息文本按房间内成员名切段：@名字（与后端 parse_mentions 同口径：
+// '@' 后连续非空白非 '@' 字符，全名不中时逐次剥离末尾标点）标为 mention 段。
+const TRAILING_PUNCT = new Set([
+  ",", ".", ";", ":", "!", "?", '"', "'", ")", "]", "}",
+  "，", "。", "、", "；", "：", "！", "？", "）", "】", "」", "』",
+]);
+function renderMentions(text: string): { text: string; mention: boolean }[] {
+  if (!text) return [];
+  if (!members.length) return [{ text, mention: false }];
+  const segs: { text: string; mention: boolean }[] = [];
+  const chars = [...text];
+  let plain = "";
+  let i = 0;
+  while (i < chars.length) {
+    if (chars[i] === "@") {
+      let j = i + 1;
+      while (j < chars.length && !/\s/.test(chars[j]) && chars[j] !== "@") j++;
+      let cand = chars.slice(i + 1, j).join("");
+      let hit: string | null = null;
+      while (cand) {
+        if (members.some((m) => m.name === cand)) {
+          hit = cand;
+          break;
+        }
+        const last = cand[cand.length - 1];
+        if (!TRAILING_PUNCT.has(last)) break;
+        cand = cand.slice(0, -1);
+      }
+      if (hit) {
+        if (plain) {
+          segs.push({ text: plain, mention: false });
+          plain = "";
+        }
+        segs.push({ text: hit, mention: true });
+        i = i + 1 + hit.length;
+        continue;
+      }
+    }
+    plain += chars[i];
+    i++;
+  }
+  if (plain) segs.push({ text: plain, mention: false });
+  return segs;
+}
+
 // ---------- 滚动跟随 ----------
 const msgsEl = ref<HTMLElement>();
 const stickBottom = ref(true);
@@ -761,6 +829,57 @@ onBeforeUnmount(() => closeWs());
 .msg.user .bubble {
   background: var(--el-color-primary);
   color: var(--el-bg-color);
+}
+/* @ 高亮：主题色加粗；用户自己的蓝色气泡内改用白色 */
+.bubble .mention {
+  color: var(--el-color-primary);
+  font-weight: 600;
+}
+.msg.user .bubble .mention {
+  color: #fff;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+/* 深度思考折叠块 */
+.think {
+  max-width: 78%;
+  margin-bottom: 4px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: var(--radius);
+  background: var(--el-fill-color-lighter);
+  overflow: hidden;
+}
+.think-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+  color: var(--el-text-color-secondary);
+}
+.think-head:hover {
+  background: var(--el-fill-color-light);
+}
+.think-tag {
+  font-weight: 600;
+  color: var(--el-color-info);
+}
+.think-arrow {
+  font-size: 11px;
+}
+.think-body {
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--el-text-color-secondary);
+  border-top: 1px dashed var(--el-border-color-lighter);
+  max-height: 260px;
+  overflow: auto;
 }
 .sys-note {
   align-self: center;
