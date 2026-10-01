@@ -1,5 +1,4 @@
-mod ai; // AI 助手：OpenAI 兼容接口流式转发（无状态，无记忆）
-mod ai_group; // 4.5 AI 群聊：多用户+多AI 房间、WebSocket 实时推送、@ 调度链
+mod ai; // 4.5 AI 助手：悬浮球单助手（人格提示词 + 工具调用 + 按用户持久化历史）
 mod ai_tools; // AI 工具调用：面板只读运维查询暴露为 function calling 工具
 mod alerts;
 mod api;
@@ -234,7 +233,7 @@ async fn security_headers(req: Request, next: Next) -> Response {
         header::REFERRER_POLICY,
         HeaderValue::from_static("no-referrer"),
     );
-    // Permissions-Policy 未在 http crate 注册为标准常量，用 HeaderName 构造
+    // Permissions-Policy 未在 http crate 注册为标准常量，用 HeaderName 构造。
     headers.insert(
         HeaderName::from_static("permissions-policy"),
         HeaderValue::from_static("camera=(), microphone=(), geolocation=(), payment=(), usb=()"),

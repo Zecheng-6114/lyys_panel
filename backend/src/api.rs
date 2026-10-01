@@ -1581,8 +1581,8 @@ async fn dashboard_config_set(
 
 /// settings 表键名与解析逻辑都在 ai.rs，保持单一事实来源
 const AI_CONFIG_KEY: &str = crate::ai::AI_CONFIG_KEY;
-/// 配置 JSON 字节上限：三个短字符串而已，4KB 已远超需要，纯防滥用
-const AI_CONFIG_MAX_BYTES: usize = 4 * 1024;
+/// 配置 JSON 字节上限：API 三元组 + 人格/技能文本，64KB 足够宽松
+const AI_CONFIG_MAX_BYTES: usize = 64 * 1024;
 const AI_BASE_MAX_LEN: usize = 512;
 const AI_KEY_MAX_LEN: usize = 512;
 const AI_MODEL_MAX_LEN: usize = 128;
@@ -1648,13 +1648,16 @@ async fn ai_config_get(
             "key_masked": if key_set { Some(mask_key(stored.key.trim())) } else { None },
             "env_key_set": env_key,
             "configured": key_set || env_key,
+            "persona": stored.persona,
+            "skills": stored.skills,
         }
     })))
 }
 
-/// 保存 AI API 配置（仅 admin）。字段语义：
+/// 保存 AI 配置（仅 admin）。字段语义：
 /// - `base`/`model`：传值即覆盖（空串=清除，回退环境变量/默认值）；
-/// - `key`：`None` = 不改（前端不传即保留原密钥），空串 = 清除，非空 = 覆盖。
+/// - `key`：`None` = 不改（前端不传即保留原密钥），空串 = 清除，非空 = 覆盖；
+/// - `persona`/`skills`：传值即覆盖（空串=清除，回退内置默认人格）。
 async fn ai_config_set(
     State(state): State<AppState>,
     _: RequireRole<2>,
@@ -1670,6 +1673,8 @@ async fn ai_config_set(
         base: Option<String>,
         key: Option<String>,
         model: Option<String>,
+        persona: Option<String>,
+        skills: Option<String>,
     }
     let req: Req =
         serde_json::from_str(&text).map_err(|_| ApiError::bad("AI 配置 JSON 无法解析"))?;
@@ -1684,6 +1689,12 @@ async fn ai_config_set(
     }
     if let Some(v) = req.model {
         stored.model = v.trim().to_string();
+    }
+    if let Some(v) = req.persona {
+        stored.persona = v;
+    }
+    if let Some(v) = req.skills {
+        stored.skills = v;
     }
     validate_ai_config(&stored.base, &stored.key, &stored.model).map_err(ApiError::bad)?;
     let json = serde_json::to_string(&stored)
@@ -1731,7 +1742,7 @@ struct LogStreamQuery {
 /// WebSocket 日志流的手动鉴权：与 AuthUser 提取器同一套口径
 /// （token 校验 → 吊销名单 → 会话存在 → 账号存在 → 首登改密闸门），
 /// 只是认证载体从 Header 换成了查询串。任意失败一律拒绝升级。
-/// 4.5 群聊 WS 同样复用此函数（故 pub(crate)）。
+/// 4.5 会话 WS 同样复用此函数（故 pub(crate)）。
 pub(crate) async fn ws_auth(state: &AppState, token: &str) -> Result<(), ApiError> {
     let claims = auth::verify_token(&state.jwt_secret, token)
         .map_err(|_| ApiError::unauthorized("登录已过期，请重新登录"))?;
@@ -2175,23 +2186,11 @@ pub fn router(state: AppState) -> Router {
         // 2.3：审计中间件挂在受保护路由上，记录所有非 GET 业务请求
         // （from_fn 不支持 State 提取器，必须用 from_fn_with_state）
         .layer(middleware::from_fn_with_state(state.clone(), audit_mw))
-        // AI 助手：OpenAI 兼容 chat/completions 流式转发，需登录
+        // 4.5 AI 悬浮球助手：对话/历史 + 配置（人格提示词与技能说明）
         .route("/ai/chat", post(crate::ai::ai_chat))
-        .route("/ai/config", get(ai_config_get).post(ai_config_set))
-        // 4.5 AI 群聊（第一阶段：仅 AI 之间互相 @ 调度链，无工具调用）
-        .route("/ai/rooms", get(crate::ai_group::rooms_list).post(crate::ai_group::rooms_create))
-        .route("/ai/rooms/default", post(crate::ai_group::rooms_default))
-        .route("/ai/rooms/remove", post(crate::ai_group::rooms_remove))
-        .route("/ai/rooms/invite", post(crate::ai_group::rooms_invite))
-        .route("/ai/rooms/uninvite", post(crate::ai_group::rooms_uninvite))
-        .route("/ai/rooms/users", get(crate::ai_group::rooms_users))
-        .route("/ai/members", get(crate::ai_group::members_list).post(crate::ai_group::members_create))
-        .route("/ai/members/update", post(crate::ai_group::members_update))
-        .route("/ai/members/remove", post(crate::ai_group::members_remove))
-        .route("/ai/messages", get(crate::ai_group::messages_list))
-        // 群聊实时通道（WebSocket）：浏览器 WS 无法带 Authorization 头，
-        // token 走查询串，handler 内做与 AuthUser 同口径的手动鉴权
-        .route("/ai/ws", get(crate::ai_group::ai_group_ws));
+        .route("/ai/history", get(crate::ai::ai_history))
+        .route("/ai/history/clear", post(crate::ai::ai_history_clear))
+        .route("/ai/config", get(ai_config_get).post(ai_config_set));
     Router::new()
         .route("/health", get(health))
         .route("/api/login", post(login))
