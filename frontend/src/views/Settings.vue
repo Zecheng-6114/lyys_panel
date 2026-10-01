@@ -37,6 +37,24 @@
             <el-form-item label="模型名">
               <el-input v-model="form.model" placeholder="gpt-4o-mini" clearable />
             </el-form-item>
+            <el-form-item label="人格提示词（persona）">
+              <el-input
+                v-model="form.persona"
+                type="textarea"
+                :rows="4"
+                resize="vertical"
+                placeholder="留空使用内置默认人格：服务器运维助手，回答简洁直接"
+              />
+            </el-form-item>
+            <el-form-item label="技能说明（skills）">
+              <el-input
+                v-model="form.skills"
+                type="textarea"
+                :rows="4"
+                resize="vertical"
+                placeholder="可选。追加在人格后的技能描述，如擅长回答的问题范围、操作规范等"
+              />
+            </el-form-item>
             <el-form-item>
               <el-button type="primary" :loading="saving" @click="save">保存配置</el-button>
             </el-form-item>
@@ -151,6 +169,8 @@ interface AiConfigResp {
   key_masked: string | null;
   env_key_set: boolean;
   configured: boolean;
+  persona: string;
+  skills: string;
 }
 
 // 生效配置（后端已做 settings → env → 默认值合并）
@@ -164,7 +184,7 @@ const config = reactive({
 });
 
 // 表单：key 不回显明文，仅输入新密钥时提交
-const form = reactive({ base: "", key: "", model: "" });
+const form = reactive({ base: "", key: "", model: "", persona: "", skills: "" });
 const saving = ref(false);
 
 const keyPlaceholder = computed(() =>
@@ -184,6 +204,8 @@ async function load() {
   form.base = c.base;
   form.model = c.model;
   form.key = "";
+  form.persona = c.persona;
+  form.skills = c.skills;
 }
 
 async function save() {
@@ -198,6 +220,9 @@ async function save() {
       model: form.model.trim(),
       // key 为空表示保持原密钥不变（后端 None=不改）
       ...(form.key.trim() ? { key: form.key.trim() } : {}),
+      // persona/skills 传值即覆盖，空串=清除回退默认人格
+      persona: form.persona,
+      skills: form.skills,
     });
     ElMessage.success("AI API 配置已保存，对话即时生效");
     form.key = "";
@@ -212,7 +237,13 @@ async function save() {
 async function clearKey() {
   saving.value = true;
   try {
-    await http.post("/ai/config", { base: form.base.trim(), model: form.model.trim(), key: "" });
+    await http.post("/ai/config", {
+      base: form.base.trim(),
+      model: form.model.trim(),
+      key: "",
+      persona: form.persona,
+      skills: form.skills,
+    });
     ElMessage.success("已清除设置页密钥（如配置了环境变量将回退）");
     await load();
   } catch (e: any) {

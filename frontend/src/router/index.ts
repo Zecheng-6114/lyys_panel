@@ -66,12 +66,6 @@ const routes: RouteRecordRaw[] = [
         component: () => import("../views/Ops.vue"),
       },
       {
-        // AI 助手：OpenAI 兼容接口流式对话（会话仅存于页面内存）
-        path: "ai",
-        name: "ai",
-        component: () => import("../views/Ai.vue"),
-      },
-      {
         path: "sessions",
         name: "sessions",
         component: () => import("../views/Sessions.vue"),

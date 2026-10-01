@@ -48,10 +48,6 @@
           <el-icon><Tools /></el-icon>
           <span>深度运维</span>
         </el-menu-item>
-        <el-menu-item index="/ai">
-          <el-icon><ChatDotRound /></el-icon>
-          <span>AI 助手</span>
-        </el-menu-item>
         <el-menu-item index="/sessions">
           <el-icon><ChatLineRound /></el-icon>
           <span>在线会话</span>
@@ -154,6 +150,9 @@
         <el-button :loading="pwdLoading" @click="submitPwd">确认修改</el-button>
       </template>
     </el-dialog>
+
+    <!-- 全局 AI 助手悬浮球（4.5：取代独立页面，点击展开对话面板） -->
+    <AiBall />
   </div>
 </template>
 
@@ -161,6 +160,7 @@
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import http from "../api/http";
+import AiBall from "../components/AiBall.vue";
 import { useThemeStore } from "../stores/theme";
 import { useAuthStore } from "../stores/auth";
 import {
@@ -174,7 +174,6 @@ import {
   Connection,
   Ship,
   Tools,
-  ChatDotRound,
   ChatLineRound,
   User,
   CopyDocument,
@@ -255,7 +254,6 @@ const titles: Record<string, string> = {
   "/network": "网络",
   "/docker": "Docker",
   "/ops": "深度运维",
-  "/ai": "AI 助手",
   "/sessions": "在线会话",
   "/users": "账号管理",
   "/backups": "备份管理",
