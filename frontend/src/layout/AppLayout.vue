@@ -120,31 +120,6 @@
             </template>
           </el-dropdown>
           <button class="mini-btn" type="button" @click="openPwdDialog">改密</button>
-          <button
-            v-if="auth.isAdmin()"
-            class="mini-btn icon-btn"
-            type="button"
-            aria-label="界面设置"
-            title="界面设置"
-            @click="settingsOpen = true"
-          >
-            <!-- 齿轮图标 -->
-            <svg
-              viewBox="0 0 24 24"
-              width="17"
-              height="17"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            >
-              <circle cx="12" cy="12" r="3" />
-              <path
-                d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"
-              />
-            </svg>
-          </button>
           <button class="mini-btn" type="button" @click="logout">退出</button>
         </div>
       </header>
@@ -152,7 +127,6 @@
         <router-view />
       </section>
     </div>
-    <SettingsDialog v-model="settingsOpen" />
 
     <!-- 2.2 修改密码：首登强制改密（不可关闭）或用户主动改密 -->
     <el-dialog
@@ -189,7 +163,6 @@ import { useRoute, useRouter } from "vue-router";
 import http from "../api/http";
 import { useThemeStore } from "../stores/theme";
 import { useAuthStore } from "../stores/auth";
-import SettingsDialog from "../components/SettingsDialog.vue";
 import {
   Odometer,
   Cpu,
@@ -216,8 +189,6 @@ const theme = useThemeStore();
 const auth = useAuthStore();
 const appVersion = __APP_VERSION__;
 
-// 界面设置弹窗（主题定制）
-const settingsOpen = ref(false);
 // 进入布局（已登录）时拉取服务端主题定制配置与当前账号信息（角色/强制改密）
 onMounted(async () => {
   theme.load();
