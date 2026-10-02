@@ -49,6 +49,14 @@ const RUNTIME_HINTS: [&str; 6] = [
 /// 系统目录前缀。落在这里的可执行文件按系统组件对待。
 const SYSTEM_PREFIXES: [&str; 6] = ["/usr/", "/bin/", "/sbin/", "/lib/", "/lib64/", "/etc/"];
 
+/// 位于根目录、但确属系统基础设施的可执行文件。
+///
+/// `/init` 是 WSL 发行版的引导与 Windows 互操作中继：`init-systemd(...)`、
+/// `SessionLeader`、`Relay(...)` 以及 9p 文件服务器（挂载 `/mnt/c` 等）都指向它。
+/// 它不在任何系统目录下，只按前缀判定会被当成用户应用，在实例页里冒出一张
+/// 名为 `init` 的卡片 —— 而它既不是被托管的负载，也不该占用应用视图。
+const SYSTEM_EXES: [&str; 1] = ["/init"];
+
 /// 进程是否跑在容器内
 pub fn in_container(pid: u32) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
@@ -58,7 +66,9 @@ pub fn in_container(pid: u32) -> bool {
 /// 可执行路径是否属于系统组件。
 /// 空路径（内核线程没有 exe，或权限不足读不到）算系统 —— 这类进程都属于主机本身。
 fn is_system_exe(exe: &str) -> bool {
-    exe.is_empty() || SYSTEM_PREFIXES.iter().any(|p| exe.starts_with(p))
+    exe.is_empty()
+        || SYSTEM_EXES.contains(&exe)
+        || SYSTEM_PREFIXES.iter().any(|p| exe.starts_with(p))
 }
 
 /// 判定进程属于应用侧还是系统侧
@@ -161,6 +171,17 @@ mod tests {
         assert!(is_system_exe("/sbin/init"));
         assert!(!is_system_exe("/opt/app/run"));
         assert!(!is_system_exe("/home/deploy/bin/svc"));
+    }
+
+    #[test]
+    fn system_exe_covers_wsl_bootstrap_at_the_root() {
+        // /init 是 WSL 的引导与 Windows 互操作中继，位于根目录所以不在任何系统
+        // 前缀之下；它属于主机基础设施，不能以「应用」的身份出现在实例页里。
+        assert!(is_system_exe("/init"));
+        assert!(
+            !is_system_exe("/myapp"),
+            "根目录下的普通可执行文件仍应算应用"
+        );
     }
 
     #[test]
