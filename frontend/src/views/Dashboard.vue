@@ -340,7 +340,10 @@ function renderChart() {
       borderColor: grid,
       textStyle: { color: line },
     },
-    legend: { data: ["CPU %", "内存 %"], textStyle: { color: sub } },
+    // ECharts 6 起 legend 的默认位置由顶部改成了贴底（LegendModel.defaultOption
+    // 里 top 被注释、改设 bottom），于是图例会压在 x 轴标签上。这里显式钉回顶部，
+    // 正好落在 grid.top 预留的空间里；bottom 保留默认值不影响 top 的解析。
+    legend: { data: ["CPU %", "内存 %"], textStyle: { color: sub }, top: 0 },
     grid: { left: 40, right: 20, top: 40, bottom: 30 },
     xAxis: {
       type: "category",
