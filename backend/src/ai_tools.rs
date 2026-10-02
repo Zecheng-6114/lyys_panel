@@ -204,7 +204,8 @@ pub(super) async fn execute(
                 .await
                 .and_then(|v| serde_json::to_string(&v).map_err(Into::into))
         }
-        "list_processes" => crate::rprocess::list(state)
+        // 助手做系统诊断时要看完整进程视图，不套用进程页「只看系统进程」的默认筛选
+        "list_processes" => crate::rprocess::list(state, crate::rprocess::Scope::All, None)
             .await
             .and_then(|v| serde_json::to_string(&v).map_err(Into::into)),
         "list_services" => crate::opservice::list()

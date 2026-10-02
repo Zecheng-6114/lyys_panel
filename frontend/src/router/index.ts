@@ -61,9 +61,10 @@ const routes: RouteRecordRaw[] = [
         component: () => import("../views/Network.vue"),
       },
       {
-        path: "docker",
-        name: "docker",
-        component: () => import("../views/Docker.vue"),
+        // 实例视图：容器与主机应用的统一入口，块内直达文件 / 日志 / 进程
+        path: "instances",
+        name: "instances",
+        component: () => import("../views/Instances.vue"),
       },
       {
         // 4.3 深度运维：SMART 磁盘健康、unit 文件查看、容器日志流

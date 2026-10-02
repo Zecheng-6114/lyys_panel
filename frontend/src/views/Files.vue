@@ -10,6 +10,11 @@
         </template>
       </div>
       <div class="spacer"></div>
+      <!-- 容器文件只读：容器内写操作要同时应付挂载卷、只读层与镜像内用户权限，
+           收益不足以抵消风险，这一层的用途是"看看里面有什么" -->
+      <el-tag v-if="isContainer" closable type="info" size="small" @close="clearInstance">
+        容器文件 · {{ containerShort }}
+      </el-tag>
       <div v-if="uploading" class="upload-progress">
         <span>上传 {{ uploadDone }}/{{ uploadTotal }}</span>
         <el-progress
@@ -20,10 +25,13 @@
         />
       </div>
       <el-button @click="load(current)">刷新</el-button>
-      <el-button @click="showMkdir = true">新建目录</el-button>
-      <el-button @click="showNewFile = true">新建文件</el-button>
-      <el-button @click="pickUpload">上传</el-button>
+      <template v-if="!isContainer">
+        <el-button @click="showMkdir = true">新建目录</el-button>
+        <el-button @click="showNewFile = true">新建文件</el-button>
+        <el-button @click="pickUpload">上传</el-button>
+      </template>
       <input
+        v-if="!isContainer"
         ref="fileInput"
         type="file"
         multiple
@@ -59,10 +67,14 @@
       </el-table-column>
       <el-table-column label="操作" width="230" align="right">
         <template #default="{ row }">
-          <el-button v-if="!row.is_dir" link size="small" @click="editFile(row)">编辑</el-button>
-          <el-button v-if="!row.is_dir" link size="small" @click="downloadFile(row)">下载</el-button>
-          <el-button link size="small" @click="startRename(row)">重命名</el-button>
-          <el-button link size="small" @click="removeEntry(row)">删除</el-button>
+          <el-button v-if="!row.is_dir" link size="small" @click="editFile(row)">
+            {{ isContainer ? "查看" : "编辑" }}
+          </el-button>
+          <template v-if="!isContainer">
+            <el-button v-if="!row.is_dir" link size="small" @click="downloadFile(row)">下载</el-button>
+            <el-button link size="small" @click="startRename(row)">重命名</el-button>
+            <el-button link size="small" @click="removeEntry(row)">删除</el-button>
+          </template>
         </template>
       </el-table-column>
     </el-table>
@@ -90,11 +102,11 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showEdit" :title="editPath" width="760px" top="6vh">
-      <el-input v-model="editContent" type="textarea" :rows="22" class="editor" />
+    <el-dialog v-model="showEdit" :title="isContainer ? `查看 ${editPath}` : editPath" width="760px" top="6vh">
+      <el-input v-model="editContent" type="textarea" :rows="22" class="editor" :readonly="isContainer" />
       <template #footer>
-        <el-button @click="showEdit = false">取消</el-button>
-        <el-button :loading="saving" @click="doSave">保存</el-button>
+        <el-button @click="showEdit = false">{{ isContainer ? "关闭" : "取消" }}</el-button>
+        <el-button v-if="!isContainer" :loading="saving" @click="doSave">保存</el-button>
       </template>
     </el-dialog>
 
@@ -109,7 +121,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import http from "../api/http";
 
 interface FEntry {
@@ -121,6 +134,20 @@ interface FEntry {
   mode: string;
   mtime: number;
 }
+
+const route = useRoute();
+const router = useRouter();
+
+/**
+ * 从实例卡片跳进来时带的实例 id。
+ * 形如 `container:<短ID>` 时走容器文件系统；主机应用则由实例页直接给出 `path=`，
+ * 落到它的可执行文件所在目录，走的还是宿主机文件接口。
+ */
+const instance = ref(String(route.query.instance ?? ""));
+const isContainer = computed(() => instance.value.startsWith("container:"));
+const containerShort = computed(() =>
+  isContainer.value ? instance.value.slice("container:".length) : "",
+);
 
 const current = ref("/");
 const entries = ref<FEntry[]>([]);
@@ -152,10 +179,23 @@ function joinPath(dir: string, name: string) {
   return dir === "/" ? `/${name}` : `${dir}/${name}`;
 }
 
+/** 容器文件走实例接口，其余走宿主机文件接口；两者返回同一套目录结构 */
+function dirUrl() {
+  return isContainer.value
+    ? `/instances/${encodeURIComponent(instance.value)}/files`
+    : "/files/list";
+}
+
+function fileUrl() {
+  return isContainer.value
+    ? `/instances/${encodeURIComponent(instance.value)}/file`
+    : "/files/read";
+}
+
 async function load(path: string) {
   loading.value = true;
   try {
-    const { data } = await http.get("/files/list", { params: { path } });
+    const { data } = await http.get(dirUrl(), { params: { path } });
     current.value = data.path;
     entries.value = data.entries;
   } catch (e: any) {
@@ -167,6 +207,13 @@ async function load(path: string) {
 
 function go(path: string) {
   load("/" + path);
+}
+
+/** 清掉实例限定，回到整机文件系统 */
+function clearInstance() {
+  instance.value = "";
+  router.replace({ path: "/files" });
+  load("/");
 }
 
 // 目录行加 dir-row 类，提示整行可点击进入
@@ -229,7 +276,7 @@ async function doNewFile() {
 
 async function editFile(row: FEntry) {
   try {
-    const { data } = await http.get("/files/read", { params: { path: row.path } });
+    const { data } = await http.get(fileUrl(), { params: { path: row.path } });
     editPath.value = row.path;
     editContent.value = data.content;
     showEdit.value = true;
@@ -348,7 +395,19 @@ async function onUpload(ev: Event) {
   load(current.value);
 }
 
-onMounted(() => load("/"));
+// 从另一个实例跳过来时重新限定（组件复用时 query 变了但不会重新挂载）
+watch(
+  () => route.query.instance,
+  (v) => {
+    instance.value = String(v ?? "");
+    if (isContainer.value) load("/");
+  },
+);
+
+onMounted(() => {
+  // 主机应用由实例页给出具体目录；容器与直接进入都从根开始
+  load(String(route.query.path ?? "/"));
+});
 </script>
 
 <style scoped>

@@ -1,11 +1,16 @@
 <template>
   <div class="logs">
     <div class="toolbar">
-      <el-radio-group v-model="mode">
+      <!-- 从实例卡片跳进来时只有一种日志来源，不再给切换项 -->
+      <el-radio-group v-if="!isContainer" v-model="mode">
         <el-radio-button value="journal">系统日志</el-radio-button>
         <el-radio-button value="file">文件日志</el-radio-button>
         <el-radio-button v-if="auth.isAdmin()" value="audit">操作审计</el-radio-button>
       </el-radio-group>
+      <el-tag v-else closable type="info" size="small" @close="clearInstance">
+        容器日志 · {{ containerShort }}
+      </el-tag>
+
       <template v-if="mode === 'journal'">
         <el-input v-model="unit" placeholder="单元名（如 sshd，留空为全部）" clearable style="width: 240px" />
         <el-input-number v-model="lines" :min="50" :max="2000" :step="100" />
@@ -17,6 +22,10 @@
         </el-select>
         <el-input-number v-model="lines" :min="50" :max="2000" :step="100" />
         <el-button @click="load">加载</el-button>
+      </template>
+      <template v-else-if="mode === 'container'">
+        <el-input-number v-model="lines" :min="50" :max="2000" :step="100" />
+        <el-button @click="load">刷新</el-button>
       </template>
       <template v-else>
         <el-button @click="loadAudit">刷新</el-button>
@@ -40,7 +49,8 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import http from "../api/http";
 import { useAuthStore } from "../stores/auth";
 
@@ -54,8 +64,20 @@ interface AuditRow {
   ip: string;
 }
 
+const route = useRoute();
+const router = useRouter();
 const auth = useAuthStore();
-const mode = ref<"journal" | "file" | "audit">("journal");
+
+/** 从实例卡片跳进来时带的实例 id（形如 container:<短ID>） */
+const instance = ref(String(route.query.instance ?? ""));
+const isContainer = computed(() => instance.value.startsWith("container:"));
+const containerShort = computed(() =>
+  isContainer.value ? instance.value.slice("container:".length) : "",
+);
+
+const mode = ref<"journal" | "file" | "audit" | "container">(
+  isContainer.value ? "container" : "journal",
+);
 const unit = ref("");
 const file = ref("");
 const files = ref<string[]>([]);
@@ -69,6 +91,14 @@ const auditLimit = 100;
 
 function fmt(ts: number) {
   return new Date(ts * 1000).toLocaleString();
+}
+
+/** 清掉实例限定，回到常规日志视图 */
+function clearInstance() {
+  instance.value = "";
+  mode.value = "journal";
+  router.replace({ path: "/logs" });
+  text.value = "";
 }
 
 async function loadAudit() {
@@ -104,6 +134,14 @@ watch(mode, (m) => {
 
 async function load() {
   try {
+    // 容器日志由 docker 提供，不是某个文件也不是 journal 单元
+    if (mode.value === "container") {
+      const { data } = await http.get("/docker/logs", {
+        params: { id: containerShort.value, tail: lines.value },
+      });
+      text.value = data.logs || "（无日志）";
+      return;
+    }
     if (mode.value === "journal") {
       const { data } = await http.get("/logs/journal", {
         params: { unit: unit.value || undefined, lines: lines.value },
@@ -129,7 +167,22 @@ async function loadFiles() {
   files.value = data;
 }
 
-onMounted(loadFiles);
+// 从另一个实例跳过来时重新限定（组件复用时 query 变了但不会重新挂载）
+watch(
+  () => route.query.instance,
+  (v) => {
+    instance.value = String(v ?? "");
+    mode.value = isContainer.value ? "container" : "journal";
+    text.value = "";
+    if (isContainer.value) load();
+  },
+);
+
+onMounted(async () => {
+  await loadFiles();
+  // 容器实例进来就该直接看到日志，而不是一个空框
+  if (isContainer.value) await load();
+});
 </script>
 
 <style scoped>

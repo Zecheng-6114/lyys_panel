@@ -832,11 +832,72 @@ async fn system_history(
     }
 }
 
+#[derive(Deserialize)]
+struct ProcessesQuery {
+    /// system（默认）/ app / all
+    scope: Option<String>,
+    /// 实例 id（container:<短ID> / app:<路径>）；给了就只看该实例的进程
+    instance: Option<String>,
+}
+
 async fn processes_list(
     State(state): State<AppState>,
     _user: AuthUser,
+    Query(q): Query<ProcessesQuery>,
 ) -> Result<Json<Vec<monitor::ProcessInfo>>, ApiError> {
-    Ok(Json(rprocess::list(&state).await?))
+    let scope = rprocess::Scope::parse(q.scope.as_deref());
+    Ok(Json(
+        rprocess::list(&state, scope, q.instance.as_deref()).await?,
+    ))
+}
+
+/// 实例列表：容器 + 主机应用，作为各自文件/日志/进程的入口
+async fn instances_list(
+    State(state): State<AppState>,
+    _user: AuthUser,
+) -> Result<Json<Vec<crate::instances::Instance>>, ApiError> {
+    crate::instances::list(&state)
+        .await
+        .map(Json)
+        .map_err(ApiError::file_err)
+}
+
+#[derive(Deserialize)]
+struct InstanceFileQuery {
+    path: String,
+}
+
+/// 从实例 id 取容器短 ID。主机应用没有容器文件系统，
+/// 明确报错而不是静默退化成宿主机路径——那会让人以为在看容器里的东西。
+fn container_of(id: &str) -> Result<&str, ApiError> {
+    id.strip_prefix(crate::instances::CONTAINER_PREFIX)
+        .ok_or_else(|| ApiError::bad("该实例不是容器，没有独立的文件系统"))
+}
+
+/// 容器内目录列表（只读）
+async fn instance_files(
+    _user: AuthUser,
+    Path(id): Path<String>,
+    Query(q): Query<InstanceFileQuery>,
+) -> Result<Json<crate::files::DirListing>, ApiError> {
+    let cid = container_of(&id)?;
+    crate::container_files::list_dir(cid, &q.path)
+        .await
+        .map(Json)
+        .map_err(ApiError::file_err)
+}
+
+/// 容器内文本文件内容（只读）
+async fn instance_file_read(
+    _user: AuthUser,
+    Path(id): Path<String>,
+    Query(q): Query<InstanceFileQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let cid = container_of(&id)?;
+    let text = crate::container_files::read_file(cid, &q.path)
+        .await
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({ "content": text })))
 }
 
 #[derive(Deserialize)]
@@ -2455,6 +2516,9 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/kick", post(sessions_kick))
         .route("/system/state", get(system_state))
         .route("/system/history", get(system_history))
+        .route("/instances", get(instances_list))
+        .route("/instances/{id}/files", get(instance_files))
+        .route("/instances/{id}/file", get(instance_file_read))
         .route("/processes", get(processes_list).post(processes_kill))
         .route("/services", get(services_list).post(services_action))
         .route("/power", post(power_action))

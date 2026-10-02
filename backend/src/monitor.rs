@@ -151,6 +151,10 @@ impl Monitor {
                 mem: p.memory() as i64,
                 user: p.user_id().map(|u| u.to_string()).unwrap_or_default(),
                 status: p.status().to_string(),
+                exe: p
+                    .exe()
+                    .map(|e| e.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
             })
             .collect();
         list.sort_by(|a, b| b.cpu.total_cmp(&a.cpu));
@@ -174,6 +178,9 @@ pub struct ProcessInfo {
     pub mem: i64,
     pub user: String,
     pub status: String,
+    /// 可执行文件的绝对路径。内核线程没有 exe，权限不足时也读不到，
+    /// 两种情况都留空串 —— 调用方（rprocess 的系统/应用判定）把空值当系统进程。
+    pub exe: String,
 }
 
 /// 后台采样任务：每 5 秒写入一条监控历史，每小时聚合降采样 + 清理过期数据

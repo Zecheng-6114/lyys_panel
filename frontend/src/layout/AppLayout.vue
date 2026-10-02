@@ -44,9 +44,9 @@
           <el-icon><Connection /></el-icon>
           <span>网络</span>
         </el-menu-item>
-        <el-menu-item index="/docker">
+        <el-menu-item index="/instances">
           <el-icon><Ship /></el-icon>
-          <span>Docker</span>
+          <span>实例</span>
         </el-menu-item>
         <el-menu-item index="/ops">
           <el-icon><Tools /></el-icon>
@@ -257,7 +257,7 @@ const titles: Record<string, string> = {
   "/packages": "软件",
   "/cron": "计划任务",
   "/network": "网络",
-  "/docker": "Docker",
+  "/instances": "实例",
   "/ops": "深度运维",
   "/sessions": "在线会话",
   "/users": "账号管理",

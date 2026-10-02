@@ -81,6 +81,18 @@ pub struct DirListing {
     pub entries: Vec<Entry>,
 }
 
+/// 目录列表排序：非目录在前，同类按名称升序。
+///
+/// 容器文件浏览（`container_files`）复用本函数 —— 两种来源会在同一个页面里切换，
+/// 各排各的会让人以为列表跳了。
+pub fn sort_entries(entries: &mut [Entry]) {
+    entries.sort_by(|a, b| match (b.is_dir, a.is_dir) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.cmp(&b.name),
+    });
+}
+
 /// 路径安全校验：必须是绝对路径，且不含 `..`。
 ///
 /// `exists` 为 true 时 canonicalize 出真实路径再返回（这样后续读写跟随的是
@@ -172,11 +184,7 @@ pub async fn list_dir(path: &str) -> anyhow::Result<DirListing> {
                 entries.push(entry);
             }
         }
-        entries.sort_by(|a, b| match (b.is_dir, a.is_dir) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.name.cmp(&b.name),
-        });
+        sort_entries(&mut entries);
         let cur = to_string_path(&dir);
         let parent = if cur == "/" {
             None

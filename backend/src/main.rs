@@ -5,12 +5,14 @@ mod api;
 mod auth;
 mod backup;
 mod cmd; // P1-1 统一命令执行器：超时 + 分组互斥 + 输出上限，全后端唯一的外部进程出口
+mod container_files; // 容器内文件浏览：只读，走 docker exec
 mod crontab;
 mod db;
 mod distro;
 mod docker;
 mod embed;
 mod files;
+mod instances; // 实例视图：容器与主机应用聚合，作为各自文件/日志/进程的入口
 mod jobs; // P2-1 作业队列：长操作脱离请求生命周期，输出落表并经 SSE 增量推送
 mod logs;
 mod monitor;
