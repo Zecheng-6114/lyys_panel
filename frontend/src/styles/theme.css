@@ -375,3 +375,28 @@ body {
   font-size: 12px;
   padding: 3px 10px;
 }
+
+/* ---------- 动效 ---------- */
+
+/* 页面切换入场。
+ *
+ * 写在全局而非 AppLayout 的 scoped 块里：scoped 会给选择器补上组件属性，
+ * 而路由组件的根元素属于另一个组件，匹配不到。
+ *
+ * 也不需要 <transition>：路由变化时 <router-view> 会销毁旧组件、挂载新组件，
+ * 新的根元素自然重播这段动画。用 <transition> 反而要求页面组件必须是单根，
+ * 凭空给自己加一条约束。
+ *
+ * 只动 opacity / transform（不触发布局），200ms —— 面板的定位是「点开即读」，
+ * 过渡长了就是纯粹的等待。 */
+@media (prefers-reduced-motion: no-preference) {
+  .content > * {
+    animation: page-in 200ms cubic-bezier(0.16, 1, 0.3, 1) backwards;
+  }
+}
+@keyframes page-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}

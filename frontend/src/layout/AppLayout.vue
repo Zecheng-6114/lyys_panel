@@ -8,74 +8,21 @@
         class="side-menu"
         :ellipsis="false"
       >
-        <el-menu-item index="/dashboard">
-          <el-icon><Odometer /></el-icon>
-          <span>仪表盘</span>
-        </el-menu-item>
-        <el-menu-item index="/processes">
-          <el-icon><Cpu /></el-icon>
-          <span>进程</span>
-        </el-menu-item>
-        <el-menu-item index="/services">
-          <el-icon><SetUp /></el-icon>
-          <span>服务</span>
-        </el-menu-item>
-        <el-menu-item index="/logs">
-          <el-icon><Document /></el-icon>
-          <span>日志</span>
-        </el-menu-item>
-        <el-menu-item index="/files">
-          <el-icon><Folder /></el-icon>
-          <span>文件</span>
-        </el-menu-item>
-        <el-menu-item index="/packages">
-          <el-icon><Box /></el-icon>
-          <span>软件</span>
-        </el-menu-item>
-        <el-menu-item index="/tasks">
-          <el-icon><Tickets /></el-icon>
-          <span>任务</span>
-        </el-menu-item>
-        <el-menu-item index="/cron">
-          <el-icon><Timer /></el-icon>
-          <span>计划任务</span>
-        </el-menu-item>
-        <el-menu-item index="/network">
-          <el-icon><Connection /></el-icon>
-          <span>网络</span>
-        </el-menu-item>
-        <el-menu-item index="/instances">
-          <el-icon><Ship /></el-icon>
-          <span>实例</span>
-        </el-menu-item>
-        <el-menu-item index="/ops">
-          <el-icon><Tools /></el-icon>
-          <span>深度运维</span>
-        </el-menu-item>
-        <el-menu-item index="/sessions">
-          <el-icon><ChatLineRound /></el-icon>
-          <span>在线会话</span>
-        </el-menu-item>
-        <el-menu-item v-if="auth.isAdmin()" index="/users">
-          <el-icon><User /></el-icon>
-          <span>账号管理</span>
-        </el-menu-item>
-        <el-menu-item v-if="auth.isAdmin()" index="/backups">
-          <el-icon><CopyDocument /></el-icon>
-          <span>备份管理</span>
-        </el-menu-item>
-        <el-menu-item v-if="auth.isAdmin()" index="/alerts">
-          <el-icon><Bell /></el-icon>
-          <span>告警通知</span>
-        </el-menu-item>
-        <el-menu-item v-if="auth.isAdmin()" index="/settings">
-          <el-icon><Setting /></el-icon>
-          <span>系统设置</span>
-        </el-menu-item>
-        <el-menu-item v-if="auth.isAdmin()" index="/update">
-          <el-icon><Download /></el-icon>
-          <span>面板更新</span>
-        </el-menu-item>
+        <!-- 菜单由 navGroups 单一数据源渲染；顶栏标题也从它派生，
+             菜单与标题不再可能各写一份而彼此脱节 -->
+        <template v-for="g in navGroups" :key="g.label">
+          <el-menu-item-group v-if="!g.admin || auth.isAdmin()" :title="g.label">
+            <el-menu-item
+              v-for="item in g.items"
+              :key="item.path"
+              :index="item.path"
+              :style="{ animationDelay: `${(navOrder.get(item.path) ?? 0) * 18}ms` }"
+            >
+              <el-icon><component :is="item.icon" /></el-icon>
+              <span>{{ item.title }}</span>
+            </el-menu-item>
+          </el-menu-item-group>
+        </template>
       </el-menu>
       <div class="version">v{{ appVersion }}</div>
     </aside>
@@ -91,7 +38,11 @@
         >
           <span class="bars" />
         </button>
-        <div class="page-title">{{ pageTitle }}</div>
+        <div class="page-head">
+          <!-- 分组小字与侧栏分组呼应：不只看出「在哪一页」，也知道属于哪一组 -->
+          <span v-if="pageGroup" class="page-group">{{ pageGroup }}</span>
+          <div class="page-title">{{ pageTitle }}</div>
+        </div>
         <div class="top-actions">
           <!-- 服务器电源操作：危险动作，仅 admin，二次确认 -->
           <el-dropdown v-if="auth.isAdmin()" trigger="click" @command="onPower">
@@ -161,7 +112,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onMounted, reactive, ref, watch, type Component } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import http from "../api/http";
 import AiBall from "../components/AiBall.vue";
@@ -248,25 +199,80 @@ watch(() => route.path, () => {
   menuOpen.value = false;
 });
 
-const titles: Record<string, string> = {
-  "/dashboard": "仪表盘",
-  "/processes": "进程",
-  "/services": "服务",
-  "/logs": "日志",
-  "/files": "文件",
-  "/packages": "软件",
-  "/cron": "计划任务",
-  "/network": "网络",
-  "/instances": "实例",
-  "/ops": "深度运维",
-  "/sessions": "在线会话",
-  "/users": "账号管理",
-  "/backups": "备份管理",
-  "/alerts": "告警通知",
-  "/update": "面板更新",
-  "/settings": "系统设置",
-};
-const pageTitle = computed(() => titles[route.path] ?? "LYYS Panel");
+interface NavItem {
+  path: string;
+  title: string;
+  icon: Component;
+}
+interface NavGroup {
+  label: string;
+  /** 整组仅 admin 可见 */
+  admin?: boolean;
+  items: NavItem[];
+}
+
+/* 侧边栏导航的**单一数据源**：菜单渲染与顶栏标题都从这里派生。
+ * 写在两处必然会有漏项（此前 /tasks 标题就漏了），同源则结构上不可能不一致。
+ *
+ * 顺序按运维操作流排：看（监控）→ 管（资源）→ 调（调度）→ 护（运维）→ 配（系统）。
+ * 「实例」与「软件」同属负载资源，从原来的第 10 位并入资源组。
+ * 末组整体 admin-only —— 让权限边界与分组边界重合，普通用户看到的
+ * 每一组都是完整的，不会出现「某组里少一项」的碎裂感。 */
+const navGroups: NavGroup[] = [
+  {
+    label: "监控",
+    items: [
+      { path: "/dashboard", title: "仪表盘", icon: Odometer },
+      { path: "/processes", title: "进程", icon: Cpu },
+      { path: "/services", title: "服务", icon: SetUp },
+      { path: "/logs", title: "日志", icon: Document },
+    ],
+  },
+  {
+    label: "资源",
+    items: [
+      { path: "/files", title: "文件", icon: Folder },
+      { path: "/packages", title: "软件", icon: Box },
+      { path: "/instances", title: "实例", icon: Ship },
+      { path: "/network", title: "网络", icon: Connection },
+    ],
+  },
+  {
+    label: "调度",
+    items: [
+      { path: "/tasks", title: "任务", icon: Tickets },
+      { path: "/cron", title: "计划任务", icon: Timer },
+    ],
+  },
+  {
+    label: "运维",
+    items: [
+      { path: "/ops", title: "深度运维", icon: Tools },
+      { path: "/sessions", title: "在线会话", icon: ChatLineRound },
+    ],
+  },
+  {
+    label: "系统",
+    admin: true,
+    items: [
+      { path: "/users", title: "账号管理", icon: User },
+      { path: "/backups", title: "备份管理", icon: CopyDocument },
+      { path: "/alerts", title: "告警通知", icon: Bell },
+      { path: "/settings", title: "系统设置", icon: Setting },
+      { path: "/update", title: "面板更新", icon: Download },
+    ],
+  },
+];
+
+// 拍平一份用于按当前路由反查标题与所属分组
+const flatNav = navGroups.flatMap((g) =>
+  g.items.map((item) => ({ ...item, group: g.label })),
+);
+/// path → 在导航中的序号，供侧栏入场动画按顺序错开（跨分组连续编号）
+const navOrder = new Map(flatNav.map((item, i) => [item.path, i]));
+const currentNav = computed(() => flatNav.find((i) => i.path === route.path));
+const pageTitle = computed(() => currentNav.value?.title ?? "LYYS Panel");
+const pageGroup = computed(() => currentNav.value?.group ?? "");
 
 // 登出（P1-1）：先请求服务端吊销当前 token（旧 token 立即失效），
 // 再清本地凭证。吊销请求失败（如后端已不可达）不阻断本地登出，
@@ -388,20 +394,73 @@ async function logout() {
   /* 占满剩余高度，把版本号顶到侧边栏底部 */
   flex: 1;
   min-height: 0;
+  /* 分组后条目增多，矮屏必须能滚动，否则底部几组会被裁掉且无法触达 */
+  overflow-y: auto;
   /* 紧凑菜单项：按钮间留足间距，文字贴紧按钮 */
   --el-menu-item-height: 32px;
   --el-menu-base-level-padding: 12px;
 }
+/* 侧栏滚动条做得极窄且默认透明：导航区不该常驻一条深色竖条，
+   只在鼠标移入侧栏时才显形提示可滚动 */
+.side-menu::-webkit-scrollbar {
+  width: 4px;
+}
+.side-menu::-webkit-scrollbar-track {
+  background: transparent;
+}
+.side-menu::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: var(--radius);
+}
+.side-menu:hover::-webkit-scrollbar-thumb {
+  background: var(--el-fill-color-darker);
+}
+/* 分组标题：小字 + 宽字距，只靠字号与颜色分层 —— 主题约定无边框，
+   所以不用分隔线，分组感由标题留白承担 */
+.side-menu :deep(.el-menu-item-group__title) {
+  padding: 14px 12px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  line-height: 1.4;
+  color: var(--el-text-color-placeholder);
+}
+/* 首组紧贴品牌区，不需要额外上间距 */
+.side-menu :deep(.el-menu-item-group:first-child .el-menu-item-group__title) {
+  padding-top: 2px;
+}
 .side-menu :deep(.el-menu-item) {
   height: 32px;
   line-height: 32px;
-  margin: 6px 0;
+  /* 组内收紧到 2px，组与组之间的层次交给分组标题的留白 */
+  margin: 2px 0;
   padding: 0 12px;
   border-radius: var(--radius);
   font-size: 13px;
+  transition: background-color 160ms ease-out;
 }
 .side-menu :deep(.el-menu-item:hover) {
   background: var(--el-fill-color-light);
+}
+/* 键盘可达性：EP 默认不给菜单项可见焦点，补一个内描边
+   （用负 offset 内收，外描边会被侧栏边缘裁掉） */
+.side-menu :deep(.el-menu-item:focus-visible) {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: -2px;
+}
+/* 侧栏入场：菜单项自上而下依次自左浮入（延迟由模板内联给出）。
+ * 菜单只在挂载时构建一次，路由切换不会重建，所以全程只播一遍，
+ * 不会在每次跳转时反复打扰。分组标题与品牌不动，留着当视觉锚点。 */
+@media (prefers-reduced-motion: no-preference) {
+  .side-menu :deep(.el-menu-item) {
+    animation: nav-in 240ms cubic-bezier(0.16, 1, 0.3, 1) backwards;
+  }
+}
+@keyframes nav-in {
+  from {
+    opacity: 0;
+    transform: translateX(-6px);
+  }
 }
 .side-menu :deep(.el-menu-item.is-active) {
   /* 反色块用主色而非文本色：定制只改文本色时不该把选中块一起染色 */
@@ -534,6 +593,15 @@ async function logout() {
     width: 44px;
     padding: 0;
   }
+  /* 手机垂直空间紧张：分组标题与条目的间距收紧。
+     分组后条目总数未变但多了 5 个组标题，抽屉必然要滚动 ——
+     这里只是把滚出去的条目数从 5 个减到 3 个，让「系统」组不至于整组看不见。 */
+  .side-menu :deep(.el-menu-item-group__title) {
+    padding: 10px 12px 2px;
+  }
+  .side-menu :deep(.el-menu-item) {
+    margin: 1px 0;
+  }
   .content {
     padding: 12px;
     /* 内凹圆角是为「侧边栏右边界 × 顶栏下沿」设计的。窄屏侧边栏不再常驻，
@@ -555,6 +623,23 @@ async function logout() {
   justify-content: space-between;
   padding: 0 20px;
   background: var(--el-bg-color);
+}
+.page-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+/* 分组标识：与侧栏同一份数据源，形成「侧栏在哪一组 → 顶栏再确认一次」的闭环 */
+.page-group {
+  flex: none;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--el-text-color-secondary);
+  background: var(--el-fill-color-light);
+  border-radius: var(--radius);
 }
 .page-title {
   font-size: 16px;
