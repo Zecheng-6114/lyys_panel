@@ -3,6 +3,21 @@
 本文件记录 LYYS Panel 的显著变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循语义化版本（[SemVer](https://semver.org/lang/zh-CN/)）。
 
+## [1.7.0] - 2026-10-03
+
+### 新增
+- 实例页纳入管理员定义的 systemd 服务：unit 文件位于 `/etc/systemd/system/`
+  或 `/run/systemd/system/` 的 service 单元作为实例列出，卡片可直达日志（按
+  unit 查 journal）与进程，并支持启动 / 停止 / 重启；以解释器（如 java）启动的
+  服务端不再被漏掉（4de7592）
+
+### 移除
+- 进程扫描自动发现主机应用（按可执行文件路径聚合成实例卡片）：主流面板的实例
+  边界都是显式注册，靠扫描猜身份既会漏报 java 等解释器应用，也会把恰好在
+  `/opt` 下的进程凭空认成应用（4de7592）
+- 进程页的「系统 / 应用」筛选，进程页回到全量进程列表（4de7592）
+- `rprocess.rs` 中针对 WSL 的 `/init` 特判及其测试（4de7592）
+
 ## [1.6.0] - 2026-10-02
 
 ### 新增
