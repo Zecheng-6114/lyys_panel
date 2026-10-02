@@ -32,6 +32,10 @@
           <el-icon><Box /></el-icon>
           <span>软件</span>
         </el-menu-item>
+        <el-menu-item index="/tasks">
+          <el-icon><Tickets /></el-icon>
+          <span>任务</span>
+        </el-menu-item>
         <el-menu-item index="/cron">
           <el-icon><Timer /></el-icon>
           <span>计划任务</span>
@@ -180,6 +184,7 @@ import {
   Bell,
   Setting,
   Download,
+  Tickets,
 } from "@element-plus/icons-vue";
 
 const route = useRoute();

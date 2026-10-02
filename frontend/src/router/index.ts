@@ -45,6 +45,12 @@ const routes: RouteRecordRaw[] = [
         component: () => import("../views/Packages.vue"),
       },
       {
+        // P2-1 作业队列：长操作的后台进度与输出
+        path: "tasks",
+        name: "tasks",
+        component: () => import("../views/Tasks.vue"),
+      },
+      {
         path: "cron",
         name: "cron",
         component: () => import("../views/Cron.vue"),

@@ -17,9 +17,11 @@
         </template>
       </p>
       <el-button type="primary" :loading="installing" @click="install">
-        {{ installing ? "安装中…" : "安装 Docker" }}
+        {{ installing ? "提交中…" : "安装 Docker" }}
       </el-button>
-      <pre v-if="installLog" class="log-box">{{ installLog }}</pre>
+      <p class="hint">
+        安装与拉取都是后台作业，提交后可在「任务」页实时查看输出。
+      </p>
     </div>
 
     <!-- 已装但守护进程没起来 -->
@@ -134,6 +136,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import http from "../api/http";
 import { pkgMetaSafe, type PkgMeta } from "../api/meta";
+import { submitJob } from "../api/jobs";
 
 interface DockerStatus {
   installed: boolean;
@@ -192,7 +195,6 @@ const projects = ref<Project[]>([]);
 const pullName = ref("");
 
 const installing = ref(false);
-const installLog = ref("");
 const starting = ref(false);
 const pulling = ref(false);
 
@@ -213,18 +215,19 @@ async function loadStatus() {
   status.value = data;
 }
 
+/**
+ * 安装 Docker 改为后台作业（P2-1）。
+ *
+ * 这条链要装包、启守护进程、再自检，几分钟起步；原来的同步请求既看不到进度，
+ * 也容易被中途的网关超时切断，用户只能对着一句"安装失败"猜。
+ */
 async function install() {
   installing.value = true;
-  installLog.value = "";
   try {
-    const { data } = await http.post("/docker/install");
-    installLog.value = data.output || "安装完成";
-    ElMessage.success("Docker 安装完成");
-    await loadStatus();
-    await loadAll();
+    await submitJob("docker_install");
+    ElMessage.success("已加入任务队列，可在「任务」页查看进度");
   } catch (e: any) {
-    installLog.value = e.response?.data?.error ?? "安装失败";
-    ElMessage.error("安装失败");
+    ElMessage.error(e.response?.data?.error ?? "提交安装失败");
   } finally {
     installing.value = false;
   }
@@ -308,12 +311,11 @@ async function pullImage() {
   }
   pulling.value = true;
   try {
-    await http.post("/docker/image/action", { action: "pull", target: name });
-    ElMessage.success("拉取完成");
+    await submitJob("docker_pull", { target: name });
+    ElMessage.success("已加入任务队列，可在「任务」页查看进度");
     pullName.value = "";
-    await loadImages();
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error ?? "拉取失败");
+    ElMessage.error(e.response?.data?.error ?? "提交拉取失败");
   } finally {
     pulling.value = false;
   }

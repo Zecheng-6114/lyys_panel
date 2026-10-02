@@ -37,6 +37,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import http from "../api/http";
+import { submitJob } from "../api/jobs";
 
 interface BackupInfo {
   name: string;
@@ -71,14 +72,14 @@ async function load() {
   }
 }
 
+/** 备份改为后台作业（P2-1）：VACUUM 在大库上耗时较久，不该让请求挂着等 */
 async function createNow() {
   creating.value = true;
   try {
-    const { data } = await http.post("/backups");
-    ElMessage.success(`已创建备份 ${data.name}`);
-    load();
+    await submitJob("backup_create");
+    ElMessage.success("已加入任务队列，可在「任务」页查看进度");
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error ?? "备份失败");
+    ElMessage.error(e.response?.data?.error ?? "提交备份失败");
   } finally {
     creating.value = false;
   }

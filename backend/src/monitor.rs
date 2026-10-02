@@ -309,6 +309,13 @@ pub fn spawn_sampler(state: AppState) {
                 {
                     tracing::warn!("清理过期告警事件失败：{e}");
                 }
+                // P2-1：作业行同样 90 天；只删终态行，running/pending 不会被误清
+                if let Err(e) = db
+                    .job_prune_async(now - crate::db::AUDIT_RETENTION_SECS)
+                    .await
+                {
+                    tracing::warn!("清理过期作业失败：{e}");
+                }
                 // 3.1：每日自动备份（VACUUM 是重 IO 操作，放 spawn_blocking）
                 let db3 = db.clone();
                 let dir3 = data_dir.clone();

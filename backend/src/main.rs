@@ -11,6 +11,7 @@ mod distro;
 mod docker;
 mod embed;
 mod files;
+mod jobs; // P2-1 作业队列：长操作脱离请求生命周期，输出落表并经 SSE 增量推送
 mod logs;
 mod monitor;
 mod network;
@@ -53,6 +54,9 @@ pub struct AppState {
     pub data_dir: Arc<PathBuf>,
     /// 数据库文件路径（3.1 恢复流程在启动时需要原始路径字符串）
     pub db_path: Arc<String>,
+    /// P2-1 作业运行时索引：句柄用于取消、广播通道用于 SSE 推送。
+    /// 作业的事实来源是 jobs 表，这里只是进程内索引，重启即清空。
+    pub jobs: Arc<jobs::JobHub>,
 }
 
 #[tokio::main]
@@ -118,6 +122,17 @@ async fn main() -> anyhow::Result<()> {
     // 首次启动时引导管理员账号（P0-1：随机密码写 0600 文件，不落日志）
     auth::ensure_admin(&db, &data_dir)?;
 
+    // P2-1 重启收尾：上次运行中被中断的作业不能永远停在「运行中」。
+    // 刻意不自动续跑 —— 安装类操作被中断后系统可能停在半完成状态，
+    // 自动重试比重做更危险，交回用户在界面上重新提交。
+    match db.job_mark_interrupted(time::OffsetDateTime::now_utc().unix_timestamp()) {
+        Ok(n) if n > 0 => {
+            tracing::warn!("已将 {n} 个重启前遗留的作业标记为 interrupted");
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("作业重启收尾失败：{e:#}"),
+    }
+
     // P2-3：退避计数与吊销名单改存数据库（重启不再清零），各自持一份连接池句柄
     let throttle = Arc::new(auth::LoginThrottle::new(db.clone()));
     let revocations = Arc::new(auth::TokenRevocations::new(db.clone()));
@@ -133,6 +148,7 @@ async fn main() -> anyhow::Result<()> {
         alert_reload: Arc::new(alert_reload),
         data_dir: Arc::new(data_dir),
         db_path: Arc::new(db_path),
+        jobs: Arc::new(jobs::JobHub::new()),
     };
 
     // 启动后台监控采样任务

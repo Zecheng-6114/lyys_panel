@@ -1172,12 +1172,14 @@ async fn packages_action(
     _: RequireRole<1>,
     SafeJson(req): SafeJson<PkgActionReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    // 同步路径：P2-1 起前端长操作默认走 /api/jobs，这里保留原语义供
+    // 脚本调用与灰度回退；空回调表示不需要逐行输出。
     let output = match req.action.as_str() {
-        "update" => crate::packages::update_index().await,
-        "install" => crate::packages::install(&req.names).await,
-        "upgrade" => crate::packages::upgrade(&req.names).await,
-        "sysupgrade" => crate::packages::system_upgrade().await,
-        "remove" => crate::packages::remove(&req.names).await,
+        "update" => crate::packages::update_index(&mut |_: &str| {}).await,
+        "install" => crate::packages::install(&req.names, &mut |_: &str| {}).await,
+        "upgrade" => crate::packages::upgrade(&req.names, &mut |_: &str| {}).await,
+        "sysupgrade" => crate::packages::system_upgrade(&mut |_: &str| {}).await,
+        "remove" => crate::packages::remove(&req.names, &mut |_: &str| {}).await,
         _ => Err(anyhow::anyhow!("未知操作")),
     }
     .map_err(ApiError::file_err)?;
@@ -1300,9 +1302,11 @@ async fn docker_status(_user: AuthUser) -> Result<Json<crate::docker::DockerStat
         .map_err(ApiError::file_err)
 }
 
-/// 一键安装 Docker（耗时较长，前端应给出等待提示）
+/// 一键安装 Docker（同步路径；前端长操作走 /api/jobs 的 docker_install）
 async fn docker_install(_: RequireRole<2>) -> Result<Json<serde_json::Value>, ApiError> {
-    let output = crate::docker::install().await.map_err(ApiError::file_err)?;
+    let output = crate::docker::install(&mut |_: &str| {})
+        .await
+        .map_err(ApiError::file_err)?;
     Ok(Json(serde_json::json!({ "ok": true, "output": output })))
 }
 
@@ -1372,7 +1376,7 @@ async fn docker_image_action(
     SafeJson(req): SafeJson<ImageActionReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let output = match req.action.as_str() {
-        "pull" => crate::docker::pull(&req.target).await,
+        "pull" => crate::docker::pull(&req.target, &mut |_: &str| {}).await,
         "remove" => crate::docker::remove_image(&req.target).await,
         _ => return Err(ApiError::bad("未知的镜像操作")),
     }
@@ -2255,6 +2259,185 @@ async fn health() -> &'static str {
 }
 
 /// 组装路由：/api/* 下所有业务接口都需要认证，其余走前端 SPA
+// ---------- P2-1 作业队列 ----------
+
+#[derive(Deserialize)]
+struct JobSubmitReq {
+    /// 作业类型标签，取值见 `jobs::JobKind::parse`
+    kind: String,
+    /// 作业参数（包名列表 / 镜像引用等），原样落进 jobs.payload
+    #[serde(default)]
+    payload: serde_json::Value,
+}
+
+/// 提交作业：立即返回 id，不等命令跑完。
+/// 参数校验与命令构造在执行体内完成（与同步路径同一套函数），
+/// 因此这里唯一可能的失败原因是写库。
+async fn jobs_submit(
+    State(state): State<AppState>,
+    _: RequireRole<1>,
+    SafeJson(req): SafeJson<JobSubmitReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let kind = crate::jobs::JobKind::parse(&req.kind)
+        .ok_or_else(|| ApiError::bad(format!("未知的作业类型：{}", req.kind)))?;
+    let id = crate::jobs::submit(&state, kind, req.payload)
+        .await
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({ "ok": true, "id": id })))
+}
+
+#[derive(Deserialize)]
+struct JobListQuery {
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+/// 作业列表（创建时间倒序分页）
+async fn jobs_list(
+    State(state): State<AppState>,
+    _user: AuthUser,
+    Query(q): Query<JobListQuery>,
+) -> Result<Json<Vec<crate::db::JobRow>>, ApiError> {
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let offset = q.offset.unwrap_or(0).max(0);
+    state
+        .db
+        .job_list_async(limit, offset)
+        .await
+        .map(Json)
+        .map_err(ApiError::file_err)
+}
+
+/// 单条作业详情
+async fn jobs_get(
+    State(state): State<AppState>,
+    _user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<crate::db::JobRow>, ApiError> {
+    match state
+        .db
+        .job_get_async(&id)
+        .await
+        .map_err(ApiError::file_err)?
+    {
+        Some(row) => Ok(Json(row)),
+        None => Err(ApiError::bad("作业不存在")),
+    }
+}
+
+/// 取消作业。SSE 是单向的，所以取消必须走这个独立的 POST。
+async fn jobs_cancel(
+    State(state): State<AppState>,
+    _: RequireRole<1>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // 顺序要紧：先 abort 执行体（子进程靠 kill_on_drop 带走），再落状态。
+    // 反过来的话，执行体可能在两次写之间把状态改成 failed，与用户的取消对不上。
+    state.jobs.cancel(&id);
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let n = state
+        .db
+        .job_set_status_async(&id, "cancelled", now)
+        .await
+        .map_err(ApiError::file_err)?;
+    if n == 0 {
+        return Err(ApiError::bad("作业不存在或已结束"));
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// 作业输出流（SSE）：先回放库里的输出尾部，再续推增量。
+///
+/// 断流不丢进度 —— 前端刷新页面会重连并按尾部重放；但超过 `jobs::TAIL_LINES`
+/// 的早期内容不可追溯，这是刻意的取舍。
+async fn jobs_stream(
+    State(state): State<AppState>,
+    _user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let Some(job) = state
+        .db
+        .job_get_async(&id)
+        .await
+        .map_err(ApiError::file_err)?
+    else {
+        return Err(ApiError::bad("作业不存在"));
+    };
+    let rx = state.jobs.subscribe(&id);
+
+    let (tx, out_rx) =
+        tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::convert::Infallible>>(64);
+    tokio::spawn(async move {
+        // 回放已有尾部（一次发一段，前端按行追加）
+        if !job.stdout_tail.is_empty() {
+            let ev = crate::jobs::JobEvent::Lines {
+                text: job.stdout_tail.clone(),
+            };
+            if send_event(&tx, &ev).await.is_err() {
+                return;
+            }
+        }
+
+        // 已到终态：补一条 done 后收流，不必等增量
+        let terminal = matches!(
+            job.status.as_str(),
+            "success" | "failed" | "cancelled" | "interrupted"
+        );
+        if terminal {
+            let ev = crate::jobs::JobEvent::Done {
+                status: job.status.clone(),
+                exit_code: job.exit_code,
+                error: job.error.clone(),
+            };
+            let _ = send_event(&tx, &ev).await;
+            return;
+        }
+
+        let Some(mut rx) = rx else {
+            return;
+        };
+        loop {
+            match rx.recv().await {
+                Ok(ev) => {
+                    let done = matches!(ev, crate::jobs::JobEvent::Done { .. });
+                    if send_event(&tx, &ev).await.is_err() {
+                        return;
+                    }
+                    if done {
+                        return;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    // 前端消费慢导致丢行：只告警，不断连（尾部仍完整）
+                    tracing::warn!("作业 {id} 的流订阅落后 {n} 行");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    });
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(out_rx);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(axum::body::Body::from_stream(stream))
+        .map_err(|_| ApiError::internal())
+}
+
+/// 把一条作业事件编码成 SSE 帧写入通道；接收端已断开时返回 Err
+async fn send_event(
+    tx: &tokio::sync::mpsc::Sender<Result<axum::body::Bytes, std::convert::Infallible>>,
+    ev: &crate::jobs::JobEvent,
+) -> Result<(), ()> {
+    let Ok(body) = serde_json::to_string(ev) else {
+        return Ok(());
+    };
+    tx.send(Ok(axum::body::Bytes::from(format!("data: {body}\n\n"))))
+        .await
+        .map_err(|_| ())
+}
+
 pub fn router(state: AppState) -> Router {
     let protected = Router::new()
         .route("/logout", post(logout))
@@ -2295,6 +2478,12 @@ pub fn router(state: AppState) -> Router {
         .route("/packages/upgradable", get(packages_upgradable))
         .route("/packages/search", get(packages_search))
         .route("/packages/action", post(packages_action))
+        // P2-1 作业队列：长操作改由这里登记，输出走 SSE 增量推送。
+        // SSE 单向，故取消另走 POST /jobs/{id}/cancel
+        .route("/jobs", get(jobs_list).post(jobs_submit))
+        .route("/jobs/{id}", get(jobs_get))
+        .route("/jobs/{id}/cancel", post(jobs_cancel))
+        .route("/jobs/{id}/stream", get(jobs_stream))
         .route(
             "/cron",
             get(cron_list)

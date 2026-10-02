@@ -112,7 +112,10 @@ async fn run(program: &str, args: &[&str], secs: u64, what: &str) -> Result<Stri
             "{what}失败，{program} stderr：{}",
             String::from_utf8_lossy(&out.stderr).trim()
         );
-        anyhow::bail!("{what}失败，详见服务端日志");
+        return Err(anyhow::Error::new(crate::cmd::CommandFailed {
+            code: out.status.code(),
+            message: format!("{what}失败，详见服务端日志"),
+        }));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -383,10 +386,27 @@ pub async fn images() -> Result<Vec<ImageInfo>> {
     Ok(list)
 }
 
-/// 拉取镜像
-pub async fn pull(reference: &str) -> Result<String> {
+/// 拉取镜像。
+///
+/// 不走 [`docker`] helper：拉取是四类长操作之一，进度必须能逐行给到作业
+/// （`sink`），所以这里直接调流式执行入口。
+pub async fn pull(reference: &str, sink: &mut (dyn FnMut(&str) + Send)) -> Result<String> {
     check_image_ref(reference)?;
-    docker(&["pull", reference], LONG_TIMEOUT).await
+    let mut cmd = Command::new("docker");
+    cmd.args(["pull", reference]);
+    let out = crate::cmd::run_streaming(&mut cmd, crate::cmd::Budget::docker(LONG_TIMEOUT), sink)
+        .await
+        .context("执行 docker 命令失败")?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    if !out.status.success() {
+        // P1-3：完整输出只进日志，响应体不回显
+        tracing::warn!("docker pull 失败，输出：\n{text}");
+        return Err(anyhow::Error::new(crate::cmd::CommandFailed {
+            code: out.status.code(),
+            message: "docker 命令执行失败，详见服务端日志".into(),
+        }));
+    }
+    Ok(text)
 }
 
 /// 删除镜像（强制，允许被容器占用时一并移除）
@@ -584,7 +604,12 @@ async fn locate_project(name: &str) -> Result<(String, String)> {
 ///
 /// apt 会因「另一个进程持锁」之类的瞬时原因直接返回退出码 100（pacman 同样有锁冲突），
 /// 重试一次能挡掉绝大多数偶发失败，比让用户再点一遍按钮友好。
-async fn pkg_retry(program: &str, args: &[&str], what: &str) -> Result<String> {
+async fn pkg_retry(
+    program: &str,
+    args: &[&str],
+    what: &str,
+    sink: &mut (dyn FnMut(&str) + Send),
+) -> Result<String> {
     let mut last = anyhow::anyhow!("{what}失败");
     for attempt in 1..=2 {
         let mut cmd = Command::new(program);
@@ -592,7 +617,8 @@ async fn pkg_retry(program: &str, args: &[&str], what: &str) -> Result<String> {
         if program == "apt-get" {
             cmd.env("DEBIAN_FRONTEND", "noninteractive");
         }
-        match crate::packages::run_pkg_cmd(&mut cmd, what).await {
+        // 重试时输出会再走一遍 sink：用户看到两段日志，比看到"卡住了"更容易理解
+        match crate::packages::run_pkg_cmd(&mut cmd, what, &mut *sink).await {
             Ok(mut out) => {
                 if attempt > 1 {
                     out.push_str(&format!("\n（第 {attempt} 次尝试成功）\n"));
@@ -617,7 +643,7 @@ async fn pkg_retry(program: &str, args: &[&str], what: &str) -> Result<String> {
 ///   加了 `--no-install-recommends` 就只装到守护进程，`docker` 命令不会出现 —— 所以必须显式列出；
 ///   源里没有 `docker-compose-plugin`，只能装独立的 `docker-compose`（Debian 里它同样是 v2 内核）；
 /// - Arch 的 `docker-compose` 是官方包，直接可装。
-pub async fn install() -> Result<String> {
+pub async fn install(sink: &mut (dyn FnMut(&str) + Send)) -> Result<String> {
     use crate::distro::Family;
     let mut log = String::new();
 
@@ -642,13 +668,14 @@ pub async fn install() -> Result<String> {
         ),
     };
 
-    log.push_str("=== 刷新软件源 ===\n");
-    log.push_str(&pkg_retry(prog, update_args, "刷新索引").await?);
-    log.push('\n');
+    push_log(&mut log, sink, "=== 刷新软件源 ===");
+    let t = pkg_retry(prog, update_args, "刷新索引", &mut *sink).await?;
+    push_log(&mut log, sink, &t);
 
-    log.push_str("\n=== 安装 Docker ===\n");
-    log.push_str(&pkg_retry(prog, install_args, "安装 Docker").await?);
-    log.push('\n');
+    push_log(&mut log, sink, "");
+    push_log(&mut log, sink, "=== 安装 Docker ===");
+    let t = pkg_retry(prog, install_args, "安装 Docker", &mut *sink).await?;
+    push_log(&mut log, sink, &t);
 
     // 启动守护进程：docker.io 装完默认已 enable，这里保证它现在就在跑
     // P1-1：安装路径的 systemctl 写操作给 60s（后台启动 daemon 可能慢于常规写操作）
@@ -657,15 +684,19 @@ pub async fn install() -> Result<String> {
     let out = crate::cmd::run(&mut cmd, crate::cmd::Budget::systemd(60))
         .await
         .context("调用 systemctl 失败")?;
-    log.push_str("\n=== 启动 docker 服务 ===\n");
-    log.push_str(&String::from_utf8_lossy(&out.stdout));
+    push_log(&mut log, sink, "");
+    push_log(&mut log, sink, "=== 启动 docker 服务 ===");
+    push_log(&mut log, sink, &String::from_utf8_lossy(&out.stdout));
     if !out.status.success() {
         // P1-3：命令 stderr 只进日志，响应体不回显
         tracing::warn!(
             "启动 docker 服务失败，systemctl stderr：{}",
             String::from_utf8_lossy(&out.stderr).trim()
         );
-        anyhow::bail!("启动 docker 服务失败，详见服务端日志");
+        return Err(anyhow::Error::new(crate::cmd::CommandFailed {
+            code: out.status.code(),
+            message: "启动 docker 服务失败，详见服务端日志".into(),
+        }));
     }
 
     // 装完自检：CLI 与 daemon 都在才算成功，否则明确告诉用户缺什么
@@ -678,5 +709,18 @@ pub async fn install() -> Result<String> {
     {
         bail!("安装结束后仍未找到 docker 命令，请检查上方安装输出");
     }
+    push_log(&mut log, sink, "Docker 安装完成，守护进程已启动");
     Ok(log)
+}
+
+/// 把一段输出同时追加到返回日志、并逐行递给流式接收器。
+/// 两处都要：返回值供同步接口展示，sink 供作业页实时滚动。
+fn push_log(log: &mut String, sink: &mut (dyn FnMut(&str) + Send), text: &str) {
+    log.push_str(text);
+    if !text.ends_with('\n') {
+        log.push('\n');
+    }
+    for line in text.lines() {
+        sink(line);
+    }
 }

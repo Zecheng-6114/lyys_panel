@@ -117,9 +117,6 @@
       <el-table-column label="描述" prop="description" min-width="300" show-overflow-tooltip />
     </el-table>
 
-    <el-dialog v-model="showOutput" :title="outputTitle" width="720px" top="6vh">
-      <pre class="output">{{ output }}</pre>
-    </el-dialog>
   </div>
 </template>
 
@@ -127,6 +124,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import http from "../api/http";
 import { pkgMetaSafe, type PkgMeta } from "../api/meta";
+import { submitJob, type JobKind } from "../api/jobs";
 
 interface Pkg {
   name: string;
@@ -147,8 +145,6 @@ const rows = ref<Pkg[]>([]);
 const selected = ref<Pkg[]>([]);
 const loading = ref(false);
 const acting = ref(false);
-const showOutput = ref(false);
-const output = ref("");
 const hideInstalled = ref(false);
 const meta = ref<PkgMeta>({ family: "", pretty: "", manager: "", rolling: false });
 
@@ -169,9 +165,6 @@ const truncated = computed(() =>
     : mode.value === "installed" && rows.value.length >= LIST_LIMIT
 );
 
-const outputTitle = computed(() =>
-  meta.value.manager ? `${meta.value.manager} 输出` : "包管理器输出"
-);
 
 const modeHint = computed(() => {
   if (mode.value === "installed") {
@@ -253,15 +246,30 @@ const ACTION_LABEL: Record<string, string> = {
   remove: "卸载",
 };
 
-async function doAction(action: string, names: string[], timeout: number) {
+/** 动作 → 作业类型（P2-1）：写操作一律提交后台作业，不再同步等待 */
+const ACTION_KIND: Record<string, JobKind> = {
+  update: "pkg_update",
+  install: "pkg_install",
+  upgrade: "pkg_upgrade",
+  sysupgrade: "pkg_sysupgrade",
+  remove: "pkg_remove",
+};
+
+/** 提交成功的统一提示：具体进度在「任务」页看，这里不再转圈等待 */
+const QUEUED_HINT = "已加入任务队列，可在「任务」页查看进度";
+
+async function doAction(action: string, names: string[]) {
+  const kind = ACTION_KIND[action];
+  if (!kind) {
+    ElMessage.error(`未知操作：${action}`);
+    return false;
+  }
   acting.value = true;
   try {
-    const { data } = await http.post("/packages/action", { action, names }, { timeout });
-    output.value = data.output;
-    showOutput.value = true;
+    await submitJob(kind, { action, names });
     return true;
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error ?? `${ACTION_LABEL[action] ?? action}失败`);
+    ElMessage.error(e.response?.data?.error ?? `${ACTION_LABEL[action] ?? action}提交失败`);
     return false;
   } finally {
     acting.value = false;
@@ -269,9 +277,8 @@ async function doAction(action: string, names: string[], timeout: number) {
 }
 
 async function doUpdate() {
-  if (await doAction("update", [], 600000)) {
-    ElMessage.success("索引已刷新");
-    load();
+  if (await doAction("update", [])) {
+    ElMessage.success(QUEUED_HINT);
   }
 }
 
@@ -287,9 +294,8 @@ async function doSysUpgrade() {
   } catch {
     return;
   }
-  if (await doAction("sysupgrade", [], 1800000)) {
-    ElMessage.success("滚动更新完成");
-    load();
+  if (await doAction("sysupgrade", [])) {
+    ElMessage.success(QUEUED_HINT);
   }
 }
 
@@ -303,9 +309,8 @@ async function doInstall() {
   } catch {
     return;
   }
-  if (await doAction("install", names, 600000)) {
-    ElMessage.success("安装完成");
-    load();
+  if (await doAction("install", names)) {
+    ElMessage.success(QUEUED_HINT);
   }
 }
 
@@ -319,9 +324,8 @@ async function doUpgrade() {
   } catch {
     return;
   }
-  if (await doAction("upgrade", names, 600000)) {
-    ElMessage.success("升级完成");
-    load();
+  if (await doAction("upgrade", names)) {
+    ElMessage.success(QUEUED_HINT);
   }
 }
 
@@ -336,9 +340,8 @@ async function doRemove() {
   } catch {
     return;
   }
-  if (await doAction("remove", names, 600000)) {
-    ElMessage.success("卸载完成");
-    load();
+  if (await doAction("remove", names)) {
+    ElMessage.success(QUEUED_HINT);
   }
 }
 

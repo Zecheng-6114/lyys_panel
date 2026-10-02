@@ -81,6 +81,46 @@ pub struct AiMsgRow {
     pub ts: i64,
 }
 
+/// P2-1 作业行。
+///
+/// 数据库是作业的**唯一事实来源**：进程内的 JoinHandle 索引只用于取消，
+/// 两者以 `id` 对齐。这样面板重启后 frontend 仍能看到历史作业及其输出尾部。
+#[derive(Clone, Serialize)]
+pub struct JobRow {
+    pub id: String,
+    /// pkg_install / pkg_remove / pkg_upgrade / pkg_sysupgrade / pkg_update /
+    /// backup_create / docker_pull / docker_install
+    pub kind: String,
+    /// 提交参数 JSON（包名列表、镜像引用等）
+    pub payload: String,
+    /// pending / running / success / failed / cancelled / interrupted
+    pub status: String,
+    pub exit_code: Option<i64>,
+    /// 最后 200 行输出（环形截断）
+    pub stdout_tail: String,
+    /// 面板自造的错误文案；不回显命令 stderr 原文（P1-3 口径）
+    pub error: Option<String>,
+    pub created_at: i64,
+    pub started_at: Option<i64>,
+    pub finished_at: Option<i64>,
+}
+
+/// jobs 表整行映射，供 `job_get` / `job_list` 共用（列顺序必须与查询一致）
+fn job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
+    Ok(JobRow {
+        id: row.get(0)?,
+        kind: row.get(1)?,
+        payload: row.get(2)?,
+        status: row.get(3)?,
+        exit_code: row.get(4)?,
+        stdout_tail: row.get(5)?,
+        error: row.get(6)?,
+        created_at: row.get(7)?,
+        started_at: row.get(8)?,
+        finished_at: row.get(9)?,
+    })
+}
+
 impl Db {
     /// 打开（或创建）SQLite 数据库并执行初始化建表
     pub fn open(path: &str) -> Result<Self> {
@@ -158,6 +198,11 @@ impl Db {
             11,
             "0011_audit_detail.sql",
             include_str!("../migrations/0011_audit_detail.sql"),
+        ),
+        (
+            12,
+            "0012_jobs.sql",
+            include_str!("../migrations/0012_jobs.sql"),
         ),
     ];
 
@@ -797,6 +842,124 @@ impl Db {
         let n = conn.execute("DELETE FROM ai_messages WHERE user_id = ?1", [user_id])?;
         Ok(n as u64)
     }
+
+    // ---------- P2-1 作业表 ----------
+
+    /// 登记作业（初始 pending）。id 由调用方生成的 32 位十六进制串保证唯一
+    pub fn job_insert(&self, id: &str, kind: &str, payload: &str, created_at: i64) -> Result<()> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        conn.execute(
+            "INSERT INTO jobs (id, kind, payload, status, stdout_tail, created_at) \
+             VALUES (?1, ?2, ?3, 'pending', '', ?4)",
+            (id, kind, payload, created_at),
+        )?;
+        Ok(())
+    }
+
+    /// pending → running
+    pub fn job_mark_running(&self, id: &str, started_at: i64) -> Result<()> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        conn.execute(
+            "UPDATE jobs SET status = 'running', started_at = ?2 WHERE id = ?1",
+            (id, started_at),
+        )?;
+        Ok(())
+    }
+
+    /// 覆盖输出尾部。执行体按批写（默认 ~300ms 一次），避免逐行落库
+    pub fn job_set_tail(&self, id: &str, tail: &str) -> Result<()> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        conn.execute("UPDATE jobs SET stdout_tail = ?2 WHERE id = ?1", (id, tail))?;
+        Ok(())
+    }
+
+    /// 写入终态：状态、退出码、输出尾部、错误文案、结束时间。
+    ///
+    /// 条件限制在 pending/running：执行体是被 abort 之后才轮到写终态的，
+    /// 若不加这道闸，「已取消」会被随后赶到的「失败」覆盖，用户看到的状态
+    /// 就与他刚才点的取消按钮对不上。
+    pub fn job_finish(
+        &self,
+        id: &str,
+        status: &str,
+        exit_code: Option<i64>,
+        tail: &str,
+        error: Option<&str>,
+        finished_at: i64,
+    ) -> Result<()> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        conn.execute(
+            "UPDATE jobs SET status = ?2, exit_code = ?3, stdout_tail = ?4, \
+             error = ?5, finished_at = ?6 \
+             WHERE id = ?1 AND status IN ('pending', 'running')",
+            (id, status, exit_code, tail, error, finished_at),
+        )?;
+        Ok(())
+    }
+
+    /// 仅改状态（取消：running → cancelled），返回受影响行数。
+    /// 返回 0 表示该作业已是终态或不存在，调用方据此判断「是否真的取消了」。
+    pub fn job_set_status(&self, id: &str, status: &str, finished_at: i64) -> Result<u64> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let n = conn.execute(
+            "UPDATE jobs SET status = ?2, finished_at = ?3 \
+             WHERE id = ?1 AND status IN ('pending', 'running')",
+            (id, status, finished_at),
+        )?;
+        Ok(n as u64)
+    }
+
+    /// 单条作业详情
+    pub fn job_get(&self, id: &str) -> Result<Option<JobRow>> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let mut stmt = conn.prepare(
+            "SELECT id, kind, payload, status, exit_code, stdout_tail, error, \
+             created_at, started_at, finished_at FROM jobs WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map([id], job_from_row)?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    /// 作业列表（创建时间倒序分页）
+    pub fn job_list(&self, limit: i64, offset: i64) -> Result<Vec<JobRow>> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let mut stmt = conn.prepare(
+            "SELECT id, kind, payload, status, exit_code, stdout_tail, error, \
+             created_at, started_at, finished_at FROM jobs \
+             ORDER BY created_at DESC, id DESC LIMIT ?1 OFFSET ?2",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![limit, offset], job_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// 重启收尾：遗留的 pending / running 一律记为 interrupted，返回受影响行数。
+    ///
+    /// 刻意**不自动续跑**：安装类操作被中断后系统可能停在半完成状态
+    /// （包已下载未配置、dpkg 事务未提交），自动重试比重做更危险。
+    pub fn job_mark_interrupted(&self, finished_at: i64) -> Result<u64> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let n = conn.execute(
+            "UPDATE jobs SET status = 'interrupted', finished_at = ?1 \
+             WHERE status IN ('pending', 'running')",
+            [finished_at],
+        )?;
+        Ok(n as u64)
+    }
+
+    /// 清理过期作业（仅终态行，按结束时间）
+    pub fn job_prune(&self, before: i64) -> Result<u64> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let n = conn.execute(
+            "DELETE FROM jobs WHERE finished_at IS NOT NULL AND finished_at < ?1",
+            [before],
+        )?;
+        Ok(n as u64)
+    }
 }
 
 /// 把一个同步的数据库操作挪到阻塞线程池执行。
@@ -1045,6 +1208,95 @@ impl Db {
     pub async fn auth_state_prune_async(&self, now: i64, throttle_cap: i64) -> Result<u64> {
         let db = self.clone();
         blocking(move || db.auth_state_prune(now, throttle_cap)).await
+    }
+
+    // ---------- P2-1 作业表（异步包装） ----------
+
+    pub async fn job_insert_async(
+        &self,
+        id: &str,
+        kind: &str,
+        payload: &str,
+        created_at: i64,
+    ) -> Result<()> {
+        let db = self.clone();
+        let id = id.to_string();
+        let kind = kind.to_string();
+        let payload = payload.to_string();
+        blocking(move || db.job_insert(&id, &kind, &payload, created_at)).await
+    }
+
+    pub async fn job_mark_running_async(&self, id: &str, started_at: i64) -> Result<()> {
+        let db = self.clone();
+        let id = id.to_string();
+        blocking(move || db.job_mark_running(&id, started_at)).await
+    }
+
+    pub async fn job_set_tail_async(&self, id: &str, tail: &str) -> Result<()> {
+        let db = self.clone();
+        let id = id.to_string();
+        let tail = tail.to_string();
+        blocking(move || db.job_set_tail(&id, &tail)).await
+    }
+
+    pub async fn job_finish_async(
+        &self,
+        id: &str,
+        status: &str,
+        exit_code: Option<i64>,
+        tail: &str,
+        error: Option<&str>,
+        finished_at: i64,
+    ) -> Result<()> {
+        let db = self.clone();
+        let id = id.to_string();
+        let status = status.to_string();
+        let tail = tail.to_string();
+        let error = error.map(|s| s.to_string());
+        blocking(move || {
+            db.job_finish(
+                &id,
+                &status,
+                exit_code,
+                &tail,
+                error.as_deref(),
+                finished_at,
+            )
+        })
+        .await
+    }
+
+    pub async fn job_set_status_async(
+        &self,
+        id: &str,
+        status: &str,
+        finished_at: i64,
+    ) -> Result<u64> {
+        let db = self.clone();
+        let id = id.to_string();
+        let status = status.to_string();
+        blocking(move || db.job_set_status(&id, &status, finished_at)).await
+    }
+
+    pub async fn job_get_async(&self, id: &str) -> Result<Option<JobRow>> {
+        let db = self.clone();
+        let id = id.to_string();
+        blocking(move || db.job_get(&id)).await
+    }
+
+    pub async fn job_list_async(&self, limit: i64, offset: i64) -> Result<Vec<JobRow>> {
+        let db = self.clone();
+        blocking(move || db.job_list(limit, offset)).await
+    }
+
+    pub async fn job_mark_interrupted_async(&self, finished_at: i64) -> Result<u64> {
+        let db = self.clone();
+        blocking(move || db.job_mark_interrupted(finished_at)).await
+    }
+
+    pub async fn job_prune_async(&self, before: i64) -> Result<u64> {
+        let db = self.clone();
+        blocking(move || db.job_prune(before)).await
     }
 
     pub async fn insert_metric_async(&self, p: &crate::monitor::Snapshot) -> Result<()> {

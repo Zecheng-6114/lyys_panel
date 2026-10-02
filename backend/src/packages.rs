@@ -1,7 +1,6 @@
 use anyhow::Context;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::process::Stdio;
 use tokio::process::Command;
 
 use crate::distro::Family;
@@ -395,12 +394,12 @@ fn parse_search_arch(
 /// 数据库新了而系统没升，就是所谓的「部分升级」，会让依赖关系对不上、
 /// 属于不受支持的状态。Arch 下同步数据库与升级系统是同一件事，统一走
 /// `system_upgrade()`（`pacman -Syu`），因此这里直接拒绝，避免接口层留坑。
-pub async fn update_index() -> anyhow::Result<String> {
+pub async fn update_index(sink: &mut (dyn FnMut(&str) + Send)) -> anyhow::Result<String> {
     match crate::distro::family() {
         Family::Debian => {
             let mut cmd = Command::new("apt-get");
             cmd.arg("update").env("DEBIAN_FRONTEND", "noninteractive");
-            run_pkg_cmd(&mut cmd, "刷新索引").await
+            run_pkg_cmd(&mut cmd, "刷新索引", &mut *sink).await
         }
         Family::Arch => anyhow::bail!(
             "Arch 系不支持单独刷新索引（会造成部分升级）：请使用「滚动更新」一次完成同步与升级"
@@ -410,25 +409,28 @@ pub async fn update_index() -> anyhow::Result<String> {
 
 /// 全量更新系统：Debian 系 `apt-get full-upgrade`，Arch 系 `pacman -Syu`。
 /// 这是 Arch 系唯一的「刷新 + 升级」入口（滚动更新）。
-pub async fn system_upgrade() -> anyhow::Result<String> {
+pub async fn system_upgrade(sink: &mut (dyn FnMut(&str) + Send)) -> anyhow::Result<String> {
     match crate::distro::family() {
         Family::Debian => {
             let mut cmd = Command::new("apt-get");
             cmd.args(["full-upgrade", "-y"])
                 .env("DEBIAN_FRONTEND", "noninteractive");
-            run_pkg_cmd(&mut cmd, "全量升级").await
+            run_pkg_cmd(&mut cmd, "全量升级", sink).await
         }
         Family::Arch => {
             // -Syu：同步数据库 + 升级全部已安装包，一步到位，不存在中间态
             let mut cmd = Command::new("pacman");
             cmd.args(["-Syu", "--noconfirm"]);
-            run_pkg_cmd(&mut cmd, "滚动更新").await
+            run_pkg_cmd(&mut cmd, "滚动更新", sink).await
         }
     }
 }
 
 /// 安装软件包（一次性，返回包管理器输出）
-pub async fn install(names: &[String]) -> anyhow::Result<String> {
+pub async fn install(
+    names: &[String],
+    sink: &mut (dyn FnMut(&str) + Send),
+) -> anyhow::Result<String> {
     if names.is_empty() || names.len() > 50 {
         anyhow::bail!("一次安装 1~50 个包");
     }
@@ -451,14 +453,17 @@ pub async fn install(names: &[String]) -> anyhow::Result<String> {
     for n in names {
         cmd.arg(n);
     }
-    run_pkg_cmd(&mut cmd, "安装").await
+    run_pkg_cmd(&mut cmd, "安装", sink).await
 }
 
 /// 升级指定软件包（Debian 系专有）
 ///
 /// Arch 系不提供：只升一部分包而其余留在旧版本，正是 Arch 明令不支持的
 /// 「部分升级」。Arch 下升级只有一种正确形态——连同数据库一起全量滚动更新。
-pub async fn upgrade(names: &[String]) -> anyhow::Result<String> {
+pub async fn upgrade(
+    names: &[String],
+    sink: &mut (dyn FnMut(&str) + Send),
+) -> anyhow::Result<String> {
     if names.is_empty() || names.len() > 50 {
         anyhow::bail!("一次升级 1~50 个包");
     }
@@ -479,11 +484,14 @@ pub async fn upgrade(names: &[String]) -> anyhow::Result<String> {
     for n in names {
         cmd.arg(n);
     }
-    run_pkg_cmd(&mut cmd, "升级").await
+    run_pkg_cmd(&mut cmd, "升级", sink).await
 }
 
 /// 卸载软件包（不自动清理依赖）
-pub async fn remove(names: &[String]) -> anyhow::Result<String> {
+pub async fn remove(
+    names: &[String],
+    sink: &mut (dyn FnMut(&str) + Send),
+) -> anyhow::Result<String> {
     if names.is_empty() || names.len() > 50 {
         anyhow::bail!("一次卸载 1~50 个包");
     }
@@ -506,38 +514,37 @@ pub async fn remove(names: &[String]) -> anyhow::Result<String> {
     for n in names {
         cmd.arg(n);
     }
-    run_pkg_cmd(&mut cmd, "卸载").await
+    run_pkg_cmd(&mut cmd, "卸载", sink).await
 }
 
-/// 运行包管理命令，将 stdout/stderr 合并到同一临时文件按时间顺序捕获。
+/// 运行包管理命令，stdout/stderr 合并到同一临时文件按时间顺序捕获。
+///
 /// 注意：apt 非 TTY 输出不含进度百分比与 "Done" 后缀，属正常现象；
-/// 若用 .output() 分开捕获，stdout 与 stderr 拼接会打乱时间顺序。
-/// P1-1 起：锁（Package 组全局串行）与超时（1800s）由 cmd::run_status 统一提供。
-pub async fn run_pkg_cmd(cmd: &mut Command, what: &str) -> anyhow::Result<String> {
-    let mut tmp = std::env::temp_dir();
-    let tag: u32 = rand::random();
-    tmp.push(format!("lyys-pkg-{tag}.log"));
-    let file = std::fs::File::create(&tmp).context("创建包管理输出临时文件失败")?;
-    let cloned = tmp.clone();
-    // try_clone 的错误若不包 context 会以裸 io 错误（含 errno）成为错误链最外层，
-    // 进而进入响应体（P1-3）
-    cmd.stdout(Stdio::from(
-        file.try_clone().context("复制临时文件句柄失败")?,
-    ))
-    .stderr(Stdio::from(file))
-    .stdin(Stdio::null());
-    let status = crate::cmd::run_status(cmd, crate::cmd::Budget::package(1800))
+/// 若用 .output() 分开捕获，stdout 与 stderr 拼接会打乱时间顺序 —— 这正是
+/// 走「合并到单文件」而非两个管道的原因，流式改造后该语义保持不变。
+///
+/// `sink` 是逐行输出回调：同步接口传空闭包，作业执行体传环形缓冲 + SSE 广播。
+/// 锁（Package 组全局串行）与超时（1800s）仍由 cmd 层统一提供。
+pub async fn run_pkg_cmd(
+    cmd: &mut Command,
+    what: &str,
+    sink: &mut (dyn FnMut(&str) + Send),
+) -> anyhow::Result<String> {
+    let out = crate::cmd::run_streaming(cmd, crate::cmd::Budget::package(1800), sink)
         .await
         .context("调用包管理器失败")?;
-    let output = tokio::fs::read_to_string(&cloned).await.unwrap_or_default();
-    let _ = tokio::fs::remove_file(&cloned).await;
-    if !status.success() {
+    let output = String::from_utf8_lossy(&out.stdout).into_owned();
+    if !out.status.success() {
         // P1-3：完整命令输出（含 stderr）只进日志，响应体不回显
         tracing::warn!("{what}失败，包管理器输出：\n{output}");
-        anyhow::bail!(
-            "{what}失败（退出码 {}），详见服务端日志",
-            status.code().unwrap_or(-1)
-        );
+        // 退出码随错误类型上传，作业队列据此写 jobs.exit_code
+        return Err(anyhow::Error::new(crate::cmd::CommandFailed {
+            code: out.status.code(),
+            message: format!(
+                "{what}失败（退出码 {}），详见服务端日志",
+                out.status.code().unwrap_or(-1)
+            ),
+        }));
     }
     Ok(output)
 }
@@ -625,10 +632,13 @@ mod tests {
         // 注意：这些断言不依赖 distro::init（校验先于 family() 分派），
         // 若校验失效走到命令执行，要么 panic（expect）要么报包管理器错误
         let evil = "nginx; touch /tmp/lyys_should_not_exist".to_string();
+        let one = std::slice::from_ref(&evil);
+        // 同步路径传空回调：作业路径的 sink 行为由 jobs 模块的单测覆盖
+        let mut sink = |_: &str| {};
         for r in [
-            install(std::slice::from_ref(&evil)).await,
-            upgrade(std::slice::from_ref(&evil)).await,
-            remove(std::slice::from_ref(&evil)).await,
+            install(one, &mut sink).await,
+            upgrade(one, &mut sink).await,
+            remove(one, &mut sink).await,
         ] {
             let err = r.expect_err("注入包名必须被拒绝");
             let msg = format!("{err:#}");
@@ -640,11 +650,11 @@ mod tests {
         assert!(!std::path::Path::new("/tmp/lyys_should_not_exist").exists());
 
         // 数量边界：0 个与超过 50 个都在执行前拒绝
-        assert!(install(&[]).await.is_err());
+        assert!(install(&[], &mut sink).await.is_err());
         let many = vec!["nginx".to_string(); 51];
-        assert!(install(&many).await.is_err());
-        assert!(upgrade(&[]).await.is_err());
-        assert!(remove(&many).await.is_err());
+        assert!(install(&many, &mut sink).await.is_err());
+        assert!(upgrade(&[], &mut sink).await.is_err());
+        assert!(remove(&many, &mut sink).await.is_err());
     }
 
     /// 搜索词校验：空串、超长、以 - 开头走私选项均被拒（不触发 apt-cache/pacman）。

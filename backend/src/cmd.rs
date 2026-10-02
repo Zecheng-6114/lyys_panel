@@ -30,7 +30,7 @@
 use anyhow::{Context, Result};
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{Mutex, MutexGuard};
 
@@ -120,6 +120,28 @@ impl Output {
     }
 }
 
+/// 命令以非零退出码结束。
+///
+/// 单独成型而不是只 `bail!` 一段文案，是为了让调用方拿得到**结构化**的退出码：
+/// 作业队列要把它落进 `jobs.exit_code`，而错误文案里的数字是给人看的，
+/// 让程序去正则里捞退出码是错的。`anyhow` 的 `downcast_ref` 能穿透 `.context()`
+/// 包装取回本类型，故各调用方无需改签名。
+#[derive(Debug)]
+pub struct CommandFailed {
+    /// 进程退出码；被信号杀死时为 None
+    pub code: Option<i32>,
+    /// 面向用户的原因（不含命令原始输出，P1-3）
+    pub message: String,
+}
+
+impl std::fmt::Display for CommandFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CommandFailed {}
+
 static PKG_LOCK: Mutex<()> = Mutex::const_new(());
 static DOCKER_LOCK: Mutex<()> = Mutex::const_new(());
 static SYSTEMD_LOCK: Mutex<()> = Mutex::const_new(());
@@ -191,6 +213,98 @@ pub async fn run_with_stdin(cmd: &mut Command, input: &[u8], budget: Budget) -> 
     collect_and_wait(child, budget).await
 }
 
+/// 流式执行命令：stdout 与 stderr 各走一条管道，并发逐行读出并回调 `on_line`，
+/// 供作业写 `stdout_tail` 与 SSE 推送。
+///
+/// 与 [`run`] 的差别只在"边跑边给"：超时 kill + wait、输出上限、进程回收的口径
+/// 完全一致。同步调用方想复用它，把 `on_line` 传空闭包即可。
+///
+/// **刻意不用「重定向到同一文件再尾随」**：文件没有背压，写入方可以全速把磁盘
+/// 写满，而读取方每个轮询周期才来看一眼 —— `yes` 这类无限输出的命令能在一个
+/// 周期内写下 GB 级数据（实测写爆 /tmp 这个 16G 的 tmpfs，连带拖垮 WSL 服务）。
+/// 管道有内核缓冲，读端不消费时子进程会被挡住，这是唯一安全的流式形态。
+///
+/// 代价是两条流的行序不再严格按时间交错。实际影响很小：apt/pacman 在非 TTY 下
+/// 主要输出走 stdout，stderr 只有零星警告。
+pub async fn run_streaming(
+    cmd: &mut Command,
+    budget: Budget,
+    on_line: &mut (dyn FnMut(&str) + Send),
+) -> Result<Output> {
+    let _guard = acquire(budget.group).await;
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = cmd.spawn().context("启动外部命令失败")?;
+
+    let stdout = child.stdout.take().context("取得命令 stdout 失败")?;
+    let stderr = child.stderr.take().context("取得命令 stderr 失败")?;
+    let mut out_lines = BufReader::new(stdout).lines();
+    let mut err_lines = BufReader::new(stderr).lines();
+
+    let cap = budget.max_output;
+    let mut stdout_buf: Vec<u8> = Vec::new();
+    let mut stderr_buf: Vec<u8> = Vec::new();
+    let mut total: usize = 0;
+    let mut truncated = false;
+    let mut out_done = false;
+    let mut err_done = false;
+
+    // 两路并发读：任一路阻塞都不会让另一路积压
+    let pump = async {
+        while !(out_done && err_done) {
+            tokio::select! {
+                r = out_lines.next_line(), if !out_done => match r {
+                    Ok(Some(line)) => {
+                        total += line.len() + 1;
+                        if stdout_buf.len() + line.len() < cap {
+                            stdout_buf.extend_from_slice(line.as_bytes());
+                            stdout_buf.push(b'\n');
+                        }
+                        on_line(&line);
+                    }
+                    _ => out_done = true,
+                },
+                r = err_lines.next_line(), if !err_done => match r {
+                    Ok(Some(line)) => {
+                        total += line.len() + 1;
+                        if stderr_buf.len() + line.len() < cap {
+                            stderr_buf.extend_from_slice(line.as_bytes());
+                            stderr_buf.push(b'\n');
+                        }
+                        on_line(&line);
+                    }
+                    _ => err_done = true,
+                },
+            }
+            if total > cap {
+                truncated = true;
+                break;
+            }
+        }
+    };
+
+    let secs = budget.timeout.as_secs();
+    let timed_out = tokio::time::timeout(budget.timeout, pump).await.is_err();
+    if timed_out || truncated {
+        let _ = child.start_kill();
+    }
+    let status = child.wait().await.context("等待命令退出失败")?;
+    if timed_out {
+        return Err(anyhow::anyhow!("命令超时（{secs} 秒），已强制终止"));
+    }
+    if truncated {
+        tracing::warn!("命令输出超过 {cap} 字节上限，已截断并终止");
+    }
+    Ok(Output {
+        status,
+        stdout: stdout_buf,
+        stderr: stderr_buf,
+        truncated,
+    })
+}
+
 /// 共用收尾：并发抽干两路管道（各按上限截断），超时或截断时终止子进程。
 async fn collect_and_wait(mut child: tokio::process::Child, budget: Budget) -> Result<Output> {
     let cap = budget.max_output;
@@ -236,19 +350,6 @@ async fn collect_and_wait(mut child: tokio::process::Child, budget: Budget) -> R
     let secs = budget.timeout.as_secs();
     match tokio::time::timeout(budget.timeout, wait).await {
         Ok(res) => res,
-        Err(_) => Err(kill_and_bail(child, secs).await),
-    }
-}
-
-/// 执行命令只等退出状态，不捕获输出（stdout / stderr 由调用方重定向到文件）。
-/// 包管理器的合并输出捕获（packages::run_pkg_cmd）走这里：保序落文件 + 本模块的锁与超时。
-pub async fn run_status(cmd: &mut Command, budget: Budget) -> Result<ExitStatus> {
-    let _guard = acquire(budget.group).await;
-    cmd.stdin(Stdio::null()).kill_on_drop(true);
-    let mut child = cmd.spawn().context("启动外部命令失败")?;
-    let secs = budget.timeout.as_secs();
-    match tokio::time::timeout(budget.timeout, child.wait()).await {
-        Ok(res) => res.context("等待命令退出失败"),
         Err(_) => Err(kill_and_bail(child, secs).await),
     }
 }
@@ -335,6 +436,65 @@ mod tests {
             .await
             .expect("cat 必须成功");
         assert_eq!(out.stdout, b"lyys-stdin");
+    }
+
+    /// 流式：行按顺序回调，完整输出仍可从 Output 取回
+    #[tokio::test]
+    async fn streaming_reports_lines_in_order() {
+        let (prog, args): (&str, Vec<&str>) = if cfg!(windows) {
+            ("cmd", vec!["/c", "echo lyys-a&echo lyys-b"])
+        } else {
+            ("sh", vec!["-c", "echo lyys-a; echo lyys-b"])
+        };
+        let mut cmd = Command::new(prog);
+        cmd.args(args);
+        let mut lines: Vec<String> = Vec::new();
+        let out = {
+            let mut sink = |l: &str| lines.push(l.to_string());
+            run_streaming(&mut cmd, Budget::query(10), &mut sink)
+                .await
+                .expect("命令必须成功")
+        };
+        assert!(out.success());
+        assert_eq!(lines, vec!["lyys-a".to_string(), "lyys-b".to_string()]);
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.contains("lyys-a") && text.contains("lyys-b"),
+            "合并输出应可从 Output 取回：{text:?}"
+        );
+    }
+
+    /// 流式：超时与同步路径同口径 —— 杀进程并返回错误，不无限挂起
+    #[tokio::test]
+    async fn streaming_timeout_kills_process() {
+        let mut cmd = sleep_cmd();
+        let started = std::time::Instant::now();
+        let r = run_streaming(&mut cmd, Budget::query(1), &mut |_: &str| {}).await;
+        assert!(r.is_err(), "超时必须返回错误");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(6),
+            "超时后应尽快返回，实际耗时 {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// 流式：输出超限时截断，且截断前已有行被回调（不是攒到最后才给）
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn streaming_truncates_oversized_output() {
+        let mut cmd = Command::new("yes");
+        cmd.arg("x");
+        let mut lines = 0usize;
+        let mut sink = |_: &str| lines += 1;
+        let out = run_streaming(
+            &mut cmd,
+            Budget::query(10).max_output_limited(4096),
+            &mut sink,
+        )
+        .await
+        .expect("yes 应被截断后成功返回");
+        assert!(out.truncated, "无限输出必须触发截断");
+        assert!(lines > 0, "截断前应有行被回调");
     }
 
     fn sleep_cmd() -> Command {
