@@ -147,6 +147,11 @@ impl Db {
             "0009_ai_assistant.sql",
             include_str!("../migrations/0009_ai_assistant.sql"),
         ),
+        (
+            10,
+            "0010_auth_state.sql",
+            include_str!("../migrations/0010_auth_state.sql"),
+        ),
     ];
 
     /// 按版本号升序执行未应用的迁移。
@@ -235,6 +240,70 @@ impl Db {
         let conn = self.pool.get().context("获取数据库连接失败")?;
         let n = conn.execute("DELETE FROM settings WHERE key = ?1", [key])?;
         Ok(n as u64)
+    }
+
+    // ---------- P2-3 认证状态（登录退避 + token 吊销）----------
+    //
+    // 两类状态都带过期时间，读时按 now 过滤，因此过期条目在被清理任务删除前
+    // 也不会产生「已过期却仍然生效」的错误语义（清理只是回收空间）。
+
+    /// 读取未过期的认证状态条目；不存在或已过期均返回 None
+    pub fn auth_state_get(&self, key: &str, now: i64) -> Result<Option<String>> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let value = conn
+            .query_row(
+                "SELECT value FROM auth_state WHERE key = ?1 AND expire_at > ?2",
+                (key, now),
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(value)
+    }
+
+    /// 写入/覆盖认证状态条目（`expire_at` 为过期时间戳）
+    pub fn auth_state_set(&self, key: &str, value: &str, expire_at: i64) -> Result<()> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        conn.execute(
+            "INSERT INTO auth_state (key, value, expire_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, expire_at = excluded.expire_at",
+            (key, value, expire_at),
+        )?;
+        Ok(())
+    }
+
+    /// 删除单条认证状态（登录成功后清除该来源的退避记录）
+    pub fn auth_state_remove(&self, key: &str) -> Result<u64> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let n = conn.execute("DELETE FROM auth_state WHERE key = ?1", [key])?;
+        Ok(n as u64)
+    }
+
+    /// 清空某一前缀下的全部条目（密钥轮换时清吊销名单用）
+    pub fn auth_state_remove_prefix(&self, prefix: &str) -> Result<u64> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let n = conn.execute(
+            "DELETE FROM auth_state WHERE key LIKE ?1",
+            [format!("{prefix}%")],
+        )?;
+        Ok(n as u64)
+    }
+
+    /// 清理过期条目，并把退避记录裁剪到 `throttle_cap` 条上限内（逐出最旧）。
+    ///
+    /// 上限的意义与内存版 MAX_ENTRIES 相同：海量伪造来源会持续写入新键，
+    /// 单靠过期清理在一个小时内不设防。这里按 expire_at 升序保留最新的
+    /// `throttle_cap` 条，其余删除。
+    pub fn auth_state_prune(&self, now: i64, throttle_cap: i64) -> Result<u64> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        let expired = conn.execute("DELETE FROM auth_state WHERE expire_at <= ?1", [now])?;
+        let over = conn.execute(
+            "DELETE FROM auth_state WHERE key LIKE 'throttle:%' AND key NOT IN (
+                 SELECT key FROM auth_state WHERE key LIKE 'throttle:%'
+                 ORDER BY expire_at DESC LIMIT ?1
+             )",
+            [throttle_cap],
+        )?;
+        Ok((expired + over) as u64)
     }
 
     /// 统计用户数量
@@ -926,6 +995,38 @@ impl Db {
         blocking(move || db.alert_event_prune(before)).await
     }
 
+    // ---------- P2-3 认证状态（异步包装，供请求路径与清理循环调用）----------
+
+    pub async fn auth_state_get_async(&self, key: &str, now: i64) -> Result<Option<String>> {
+        let db = self.clone();
+        let key = key.to_string();
+        blocking(move || db.auth_state_get(&key, now)).await
+    }
+
+    pub async fn auth_state_set_async(&self, key: &str, value: &str, expire_at: i64) -> Result<()> {
+        let db = self.clone();
+        let key = key.to_string();
+        let value = value.to_string();
+        blocking(move || db.auth_state_set(&key, &value, expire_at)).await
+    }
+
+    pub async fn auth_state_remove_async(&self, key: &str) -> Result<u64> {
+        let db = self.clone();
+        let key = key.to_string();
+        blocking(move || db.auth_state_remove(&key)).await
+    }
+
+    pub async fn auth_state_remove_prefix_async(&self, prefix: &str) -> Result<u64> {
+        let db = self.clone();
+        let prefix = prefix.to_string();
+        blocking(move || db.auth_state_remove_prefix(&prefix)).await
+    }
+
+    pub async fn auth_state_prune_async(&self, now: i64, throttle_cap: i64) -> Result<u64> {
+        let db = self.clone();
+        blocking(move || db.auth_state_prune(now, throttle_cap)).await
+    }
+
     pub async fn insert_metric_async(&self, p: &crate::monitor::Snapshot) -> Result<()> {
         let db = self.clone();
         let p = p.clone();
@@ -1014,13 +1115,19 @@ mod tests {
             > 0
     }
 
-    /// 全新库：迁移建出全部表，版本号为最新（9）；再次打开幂等（不重复执行）
+    /// 迁移链的最新版本号。断言引用它而不是写字面量，
+    /// 否则每加一个迁移都要回头改一批测试。
+    fn latest_version() -> i64 {
+        Db::MIGRATIONS.last().unwrap().0
+    }
+
+    /// 全新库：迁移建出全部表，版本号为最新；再次打开幂等（不重复执行）
     #[test]
     fn fresh_db_gets_baseline() {
         let path = temp_db_path("fresh");
         {
             let db = Db::open(&path).unwrap();
-            assert_eq!(db.schema_version().unwrap(), 9);
+            assert_eq!(db.schema_version().unwrap(), latest_version());
             assert!(table_exists(&db, "settings"));
             assert!(table_exists(&db, "users"));
             assert!(table_exists(&db, "metrics"));
@@ -1029,11 +1136,12 @@ mod tests {
             assert!(table_exists(&db, "sessions"));
             assert!(table_exists(&db, "alert_events"));
             assert!(table_exists(&db, "ai_messages"));
+            assert!(table_exists(&db, "auth_state"), "P2-3 认证状态表");
             assert!(!table_exists(&db, "ai_rooms"), "旧会话表应被 0009 删除");
             assert!(!table_exists(&db, "ai_members"), "旧成员表应被 0009 删除");
         }
         let db2 = Db::open(&path).unwrap();
-        assert_eq!(db2.schema_version().unwrap(), 9);
+        assert_eq!(db2.schema_version().unwrap(), latest_version());
         let _ = std::fs::remove_file(path);
     }
 
@@ -1057,7 +1165,7 @@ mod tests {
         }
         {
             let db = Db::open(&path).unwrap();
-            assert_eq!(db.schema_version().unwrap(), 9);
+            assert_eq!(db.schema_version().unwrap(), latest_version());
             assert_eq!(db.user_count().unwrap(), 1);
             assert!(db.find_user("admin").unwrap().is_some());
             // 旧库升级后 admin 自动获得默认角色 admin、不强制改密（避免锁死现有部署）
@@ -1101,7 +1209,7 @@ mod tests {
             .unwrap();
         }
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 9);
+        assert_eq!(db.schema_version().unwrap(), latest_version());
         assert!(!table_exists(&db, "ai_rooms"), "旧会话表应被删除");
         assert!(!table_exists(&db, "ai_members"), "旧成员表应被删除");
         assert!(!table_exists(&db, "ai_room_users"), "受邀表应被删除");
@@ -1134,7 +1242,11 @@ mod tests {
             .expect_err("半途失败应中止");
             drop(tx);
             assert!(!table_exists(&db, "t_half"), "回滚后不应残留半途建的表");
-            assert_eq!(db.schema_version().unwrap(), 9, "失败的迁移不得推进版本");
+            assert_eq!(
+                db.schema_version().unwrap(),
+                latest_version(),
+                "失败的迁移不得推进版本"
+            );
         }
         let _ = std::fs::remove_file(path);
     }

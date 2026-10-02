@@ -154,7 +154,7 @@ impl FromRequestParts<AppState> for AuthUser {
         let claims = auth::verify_token(&state.jwt_secret, token)
             .map_err(|_| ApiError::unauthorized("登录已过期，请重新登录"))?;
         // P1-1：已登出（吊销）的 token 一律拒绝
-        if state.revocations.is_revoked(&claims.jti) {
+        if state.revocations.is_revoked(&claims.jti).await {
             return Err(ApiError::unauthorized("登录已失效，请重新登录"));
         }
         // 2.4：被「踢出」的会话（jti 已从会话表删除且非本人当前登录）同样拒绝。
@@ -223,10 +223,38 @@ impl<const MIN: u8> FromRequestParts<AppState> for RequireRole<MIN> {
     }
 }
 
+/// 是否信任反向代理传入的 `X-Forwarded-For`（P2-3，用 `PANEL_TRUST_PROXY=1` 开启）。
+///
+/// **默认必须关闭**。该头部由客户端自行携带，只有在面板确实位于可信反代之后、
+/// 且反代对每个请求都覆盖（不是追加）它时才有意义。无条件信任等于让来源 IP
+/// 变成攻击者可控的字段，反而削弱登录退避与审计。取值只在首次调用时读一次。
+fn trust_proxy() -> bool {
+    static TRUST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRUST.get_or_init(|| {
+        matches!(
+            std::env::var("PANEL_TRUST_PROXY").as_deref(),
+            Ok("1") | Ok("true") | Ok("yes")
+        )
+    })
+}
+
 /// 从请求扩展中取出来源 IP；取不到（如未启用连接信息）时退回环回地址。
 ///
 /// 单独抽成函数，供 [`AuthUser`] 与 [`ClientIp`] 共用，保证两处口径一致。
+/// 开启 `PANEL_TRUST_PROXY` 时改取 `X-Forwarded-For` 的最左值（原始客户端）；
+/// 该值解析失败则退回连接地址，不会因为一个畸形头把来源判成未知。
 fn client_ip(parts: &Parts) -> IpAddr {
+    if trust_proxy() {
+        if let Some(ip) = parts
+            .headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(',').next())
+            .and_then(|s| s.trim().parse::<IpAddr>().ok())
+        {
+            return ip;
+        }
+    }
     parts
         .extensions
         .get::<ConnectInfo<SocketAddr>>()
@@ -335,7 +363,7 @@ async fn login(
             });
         };
 
-    let wait = state.throttle.retry_after(ip, &req.username);
+    let wait = state.throttle.retry_after(ip, &req.username).await;
     if !wait.is_zero() {
         let secs = wait.as_secs().max(1);
         return Err(ApiError::too_many_requests(format!(
@@ -345,7 +373,7 @@ async fn login(
 
     let user = state.db.find_user_full_async(&req.username).await?;
     let Some(row) = user else {
-        let delay = state.throttle.record_failure(ip, &req.username);
+        let delay = state.throttle.record_failure(ip, &req.username).await;
         tracing::warn!(
             "登录失败（用户不存在）：user={} ip={} 退避={}s",
             req.username,
@@ -368,7 +396,7 @@ async fn login(
                 ApiError::internal()
             })?;
     if !verified {
-        let delay = state.throttle.record_failure(ip, &req.username);
+        let delay = state.throttle.record_failure(ip, &req.username).await;
         tracing::warn!(
             "登录失败（密码错误）：user={} ip={} 退避={}s",
             req.username,
@@ -379,7 +407,7 @@ async fn login(
         return Err(ApiError::unauthorized("用户名或密码错误"));
     }
 
-    state.throttle.record_success(ip, &req.username);
+    state.throttle.record_success(ip, &req.username).await;
     // P0-1：首次登录成功后删除初始密码文件（一次性文件方案）
     auth::cleanup_initial_password(&state.data_dir);
 
@@ -413,7 +441,7 @@ async fn logout(
     State(state): State<AppState>,
     user: AuthUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    state.revocations.revoke(&user.jti, user.exp as i64);
+    state.revocations.revoke(&user.jti, user.exp as i64).await;
     state.db.session_remove_async(&user.jti).await?;
     tracing::info!("登出（token 已吊销）：user_id={}", user.id);
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -1746,7 +1774,7 @@ struct LogStreamQuery {
 pub(crate) async fn ws_auth(state: &AppState, token: &str) -> Result<(), ApiError> {
     let claims = auth::verify_token(&state.jwt_secret, token)
         .map_err(|_| ApiError::unauthorized("登录已过期，请重新登录"))?;
-    if state.revocations.is_revoked(&claims.jti) {
+    if state.revocations.is_revoked(&claims.jti).await {
         return Err(ApiError::unauthorized("登录已失效，请重新登录"));
     }
     if !state.db.session_exists_async(&claims.jti).await? {
@@ -2022,7 +2050,7 @@ async fn audit_actor(state: &AppState, headers: &axum::http::HeaderMap) -> Optio
         .and_then(|v| v.to_str().ok())?
         .strip_prefix("Bearer ")?;
     let claims = auth::verify_token(&state.jwt_secret, token).ok()?;
-    if state.revocations.is_revoked(&claims.jti) {
+    if state.revocations.is_revoked(&claims.jti).await {
         return None;
     }
     let user = state.db.user_by_id_async(claims.sub).await.ok()??;

@@ -6,11 +6,9 @@ use argon2::{
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::Path;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::db::Db;
 
@@ -218,66 +216,55 @@ pub fn cleanup_initial_password(data_dir: &Path) {
     }
 }
 
-/// Token 吊销名单（P1-1：服务端登出）。
+/// Token 吊销名单（P1-1 服务端登出；P2-3 起持久化）。
 ///
-/// key = token 的 jti，value = 该 token 的 exp（Unix 秒）。条目到期后清理，
-/// 因此名单只覆盖「仍有效的吊销」，内存占用有界（单管理员面板，量级极小）。
+/// key = `revoked:<jti>`，expire_at = 该 token 的 exp（Unix 秒）。落 SQLite
+/// 之后，服务重启不会让已登出的 token 复活——这是内存版做不到的。过期条目
+/// 由采样循环的清理动作回收，读路径同时按 now 过滤，因此清理滞后不影响语义。
 ///
 /// 联动约定（改密/密钥轮换）：本名单只对当前密钥签发的 token 有意义 ——
 /// 密钥一旦轮换，旧 token 在签名校验一步就会被拒；引入改密功能时应同步
 /// 轮换密钥并清空本名单（`clear()`），让所有存量会话立即失效。
 pub struct TokenRevocations {
-    entries: Mutex<HashMap<String, i64>>,
+    db: Db,
 }
 
-/// 名单上限，防止异常路径把内存撑爆（对齐 LoginThrottle 的做法）
-const MAX_REVOKED: usize = 4096;
+/// 吊销记录在 auth_state 中的键前缀
+const REVOKED_PREFIX: &str = "revoked:";
 
 impl TokenRevocations {
-    pub fn new() -> Self {
-        Self {
-            entries: Mutex::new(HashMap::new()),
+    pub fn new(db: Db) -> Self {
+        Self { db }
+    }
+
+    /// 吊销一枚 token（以 jti 为键，有效期至 exp）。
+    ///
+    /// 写库失败只记日志：登出接口同时还会删除会话登记，该 token 在会话表中
+    /// 已不存在，鉴权链依然会拒绝它，因此不因存储故障把登出整体判失败。
+    pub async fn revoke(&self, jti: &str, exp: i64) {
+        let key = format!("{REVOKED_PREFIX}{jti}");
+        if let Err(e) = self.db.auth_state_set_async(&key, "", exp).await {
+            tracing::warn!("写入 token 吊销记录失败：{e}");
         }
     }
 
-    /// 吊销一枚 token（以 jti 为键，有效期至 exp）
-    pub fn revoke(&self, jti: &str, exp: i64) {
-        let Ok(mut map) = self.entries.lock() else {
-            return;
-        };
-        let now = time::OffsetDateTime::now_utc().unix_timestamp();
-        // 顺手清理已过期的旧条目，避免长期运行缓慢增长
-        map.retain(|_, e| *e > now);
-        if map.len() >= MAX_REVOKED {
-            // 名单已满（retain 后仍满，说明全是未到期条目）：逐出最早过期的
-            // 一条腾位。此前是整体 clear——那会把全部真实吊销记录一并冲掉，
-            // 让已登出的 token 复活，是吊销语义的漏洞。
-            if let Some(oldest) = map.iter().min_by_key(|(_, e)| *e).map(|(k, _)| k.clone()) {
-                map.remove(&oldest);
-            }
-        }
-        map.insert(jti.to_string(), exp);
-    }
-
-    /// 该 jti 是否处于吊销状态（未到期）
-    pub fn is_revoked(&self, jti: &str) -> bool {
-        let Ok(map) = self.entries.lock() else {
-            // 锁中毒：宁可放行（下一步还有签名/exp 校验兜底），不锁死用户
-            return false;
-        };
-        let now = time::OffsetDateTime::now_utc().unix_timestamp();
-        matches!(map.get(jti), Some(e) if *e > now)
+    /// 该 jti 是否处于吊销状态（未到期）。
+    /// 读库失败时放行（下一步还有签名与 exp 校验兜底），不锁死用户。
+    pub async fn is_revoked(&self, jti: &str) -> bool {
+        let key = format!("{REVOKED_PREFIX}{jti}");
+        let now = now_secs();
+        matches!(self.db.auth_state_get_async(&key, now).await, Ok(Some(_)))
     }
 
     /// 清空名单（密钥轮换/改密联动时使用）
-    pub fn clear(&self) {
-        if let Ok(mut map) = self.entries.lock() {
-            map.clear();
+    pub async fn clear(&self) {
+        if let Err(e) = self.db.auth_state_remove_prefix_async(REVOKED_PREFIX).await {
+            tracing::warn!("清空 token 吊销名单失败：{e}");
         }
     }
 }
 
-/// 登录失败退避器。
+/// 登录失败退避器（P2-3 起持久化）。
 ///
 /// 面板默认监听 `0.0.0.0` 且走明文 HTTP，若不限制失败次数，局域网内任何人都能
 /// 对管理员密码做无限次尝试。这里采取**指数退避**而非账号锁定：每次失败后，
@@ -286,100 +273,117 @@ impl TokenRevocations {
 /// 选择退避而不是锁定，是为了避免「自己记错几次密码把自己关在门外」——
 /// 合法用户只会觉得响应变慢，而爆破方的成本随尝试次数指数上升。
 ///
-/// 状态保存在内存中，进程重启即清空。这与面板的单机定位相符：
-/// 重启需要登录服务器（此时已具备更强的系统级权限），因此重置退避不构成绕过。
+/// 状态原先只存内存，进程重启即清空，等于给爆破方一个「等重启即可重置」的
+/// 空档；P2-3 改存 `auth_state` 表。时间统一用 Unix 秒（持久化要求，不能用
+/// 单调时钟）。
 pub struct LoginThrottle {
-    /// key = 来源 IP + 用户名，value = 失败状态
-    entries: Mutex<HashMap<String, Failure>>,
+    db: Db,
 }
 
-/// 单个来源的失败状态
-#[derive(Clone, Copy)]
+/// 单个来源的失败状态（持久化形态，时间为 Unix 秒）
+#[derive(Serialize, Deserialize)]
 struct Failure {
     /// 连续失败次数
     count: u32,
     /// 记为「连续」的最后一次失败时间，超过窗口即重新计数
-    last: Instant,
+    last: i64,
     /// 下一次允许尝试的时刻
-    next_allowed: Instant,
+    next: i64,
 }
 
-/// 失败计数窗口：距上次失败超过这个时长，视为重新开始计数
-const FAILURE_WINDOW: Duration = Duration::from_secs(300);
+/// 退避记录在 auth_state 中的键前缀
+const THROTTLE_PREFIX: &str = "throttle:";
+/// 失败计数窗口：距上次失败超过这个时长，视为重新开始计数（秒）
+const FAILURE_WINDOW: i64 = 300;
 /// 首次失败后的退避时长
 const BASE_DELAY: Duration = Duration::from_secs(1);
 /// 退避时长上限
 const MAX_DELAY: Duration = Duration::from_secs(30);
-/// 记录表上限，防止海量伪造来源把内存撑爆
-const MAX_ENTRIES: usize = 4096;
+/// 退避记录条数上限，清理动作按此为界裁剪，防海量伪造来源把表撑大
+pub const MAX_THROTTLE_ENTRIES: i64 = 4096;
+
+/// 当前 Unix 秒
+fn now_secs() -> i64 {
+    time::OffsetDateTime::now_utc().unix_timestamp()
+}
 
 impl LoginThrottle {
-    pub fn new() -> Self {
-        Self {
-            entries: Mutex::new(HashMap::new()),
-        }
+    pub fn new(db: Db) -> Self {
+        Self { db }
     }
 
     /// 构造限流键：来源 IP 与用户名组合。
     /// 带上用户名是为了避免同一 NAT 后的合法用户被他人牵连。
     fn key(ip: IpAddr, username: &str) -> String {
-        format!("{ip}|{username}")
+        format!("{THROTTLE_PREFIX}{ip}|{username}")
+    }
+
+    /// 读取该来源的失败状态；读库失败或条目已过期返回 None（视同无记录，放行）
+    fn load(&self, key: &str, now: i64) -> Option<Failure> {
+        let raw = match self.db.auth_state_get(key, now) {
+            Ok(v) => v?,
+            Err(e) => {
+                tracing::warn!("读取登录退避记录失败：{e}");
+                return None;
+            }
+        };
+        serde_json::from_str(&raw).ok()
     }
 
     /// 当前需要等待多久才能再次尝试；返回 `Duration::ZERO` 表示可以立即尝试。
-    pub fn retry_after(&self, ip: IpAddr, username: &str) -> Duration {
-        let Ok(map) = self.entries.lock() else {
-            // 锁中毒（某次 panic 遗留）：放行，不因为限流器自身故障把用户锁死
+    pub async fn retry_after(&self, ip: IpAddr, username: &str) -> Duration {
+        let now = now_secs();
+        let Some(f) = self.load(&Self::key(ip, username), now) else {
             return Duration::ZERO;
         };
-        let Some(f) = map.get(&Self::key(ip, username)) else {
-            return Duration::ZERO;
-        };
-        f.next_allowed.saturating_duration_since(Instant::now())
+        Duration::from_secs((f.next - now).max(0) as u64)
     }
 
     /// 记录一次失败，返回该来源下次需要等待的时长。
-    pub fn record_failure(&self, ip: IpAddr, username: &str) -> Duration {
-        let now = Instant::now();
-        let Ok(mut map) = self.entries.lock() else {
-            return Duration::ZERO;
-        };
-
-        // 简单容量控制：超上限时清掉所有已过期的记录；仍然超限就整体清空。
-        if map.len() >= MAX_ENTRIES {
-            map.retain(|_, f| now.duration_since(f.last) < FAILURE_WINDOW);
-            if map.len() >= MAX_ENTRIES {
-                map.clear();
-            }
-        }
-
-        let entry = map.entry(Self::key(ip, username)).or_insert(Failure {
+    ///
+    /// 读-改-写之间存在极窄的并发窗口（同一来源同时发起多次失败请求时可能
+    /// 少记一次）。退避是尽力而为的旁路，且并发窗口只会让攻击方的等待时间
+    /// 偏短而非偏长，不为此引入事务。
+    pub async fn record_failure(&self, ip: IpAddr, username: &str) -> Duration {
+        let now = now_secs();
+        let key = Self::key(ip, username);
+        let mut f = self.load(&key, now).unwrap_or(Failure {
             count: 0,
             last: now,
-            next_allowed: now,
+            next: now,
         });
 
         // 距上次失败已超出窗口，视为新一轮
-        if now.duration_since(entry.last) >= FAILURE_WINDOW {
-            entry.count = 0;
+        if now - f.last >= FAILURE_WINDOW {
+            f.count = 0;
         }
-        entry.count = entry.count.saturating_add(1);
-        entry.last = now;
+        f.count = f.count.saturating_add(1);
+        f.last = now;
 
         // 1s、2s、4s…… 封顶 MAX_DELAY
         let delay = BASE_DELAY
-            .saturating_mul(1u32 << (entry.count - 1).min(16))
+            .saturating_mul(1u32 << (f.count - 1).min(16))
             .min(MAX_DELAY);
-        entry.next_allowed = now + delay;
+        f.next = now + delay.as_secs() as i64;
+
+        // 过期时间 = 下次可尝试时刻 + 窗口：窗口内无新失败即可被回收
+        let expire_at = f.next + FAILURE_WINDOW;
+        let raw = serde_json::to_string(&f).unwrap_or_default();
+        if let Err(e) = self.db.auth_state_set_async(&key, &raw, expire_at).await {
+            tracing::warn!("写入登录退避记录失败：{e}");
+        }
         delay
     }
 
     /// 登录成功后清除该来源的失败记录。
-    pub fn record_success(&self, ip: IpAddr, username: &str) {
-        let Ok(mut map) = self.entries.lock() else {
-            return;
-        };
-        map.remove(&Self::key(ip, username));
+    pub async fn record_success(&self, ip: IpAddr, username: &str) {
+        if let Err(e) = self
+            .db
+            .auth_state_remove_async(&Self::key(ip, username))
+            .await
+        {
+            tracing::warn!("清除登录退避记录失败：{e}");
+        }
     }
 }
 
@@ -427,6 +431,13 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// 在临时目录建一个可用的 SQLite 库（退避与吊销记录均落库），返回库与目录
+    fn temp_db(tag: &str) -> (Db, std::path::PathBuf) {
+        let dir = temp_dir(tag);
+        let db = Db::open(dir.join("panel.db").to_str().unwrap()).unwrap();
+        (db, dir)
     }
 
     /// 签发→校验往返：sub 保留、jti 为 32 位十六进制且两枚 token 互不相同
@@ -492,49 +503,88 @@ mod tests {
         assert!(verify_token(&secret, &p.join(".")).is_err());
     }
 
-    /// 吊销名单：命中拒绝、到期失效、clear 清空；与 verify_token 联动
-    #[test]
-    fn token_revocation_blocks_valid_token() {
+    /// 吊销名单：命中拒绝、到期失效、跨重启存活、clear 清空；与 verify_token 联动
+    #[tokio::test]
+    async fn token_revocation_blocks_valid_token() {
         let secret = test_secret();
         let (token, _, _) = issue_token(&secret, 7).unwrap();
         let claims = verify_token(&secret, &token).unwrap();
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
 
-        let list = TokenRevocations::new();
-        assert!(!list.is_revoked(&claims.jti));
+        let (db, dir) = temp_db("revoke");
+        let list = TokenRevocations::new(db);
+        assert!(!list.is_revoked(&claims.jti).await);
 
         // 吊销未到期条目 → 命中
-        list.revoke(&claims.jti, claims.exp as i64);
-        assert!(list.is_revoked(&claims.jti));
+        list.revoke(&claims.jti, claims.exp as i64).await;
+        assert!(list.is_revoked(&claims.jti).await);
         // 其他 jti 不受牵连
-        assert!(!list.is_revoked(&"y".repeat(32)));
+        assert!(!list.is_revoked(&"y".repeat(32)).await);
 
-        // exp 已过期的吊销条目视同不存在（名单只覆盖仍有效的吊销）
-        list.revoke("stale-jti", now - 1);
-        assert!(!list.is_revoked("stale-jti"));
+        // exp 已过期的吊销条目视同不存在（读路径按 now 过滤，不依赖清理任务）
+        list.revoke("stale-jti", now - 1).await;
+        assert!(!list.is_revoked("stale-jti").await);
+
+        // P2-3 核心断言：重新打开同一个库（等价于进程重启）后吊销仍然生效
+        let reopened =
+            TokenRevocations::new(Db::open(dir.join("panel.db").to_str().unwrap()).unwrap());
+        assert!(
+            reopened.is_revoked(&claims.jti).await,
+            "吊销记录必须跨重启存活，否则登出的 token 会复活"
+        );
 
         // clear（密钥轮换/改密联动）后放行
-        list.clear();
-        assert!(!list.is_revoked(&claims.jti));
+        list.clear().await;
+        assert!(!list.is_revoked(&claims.jti).await);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 名单打满后新吊销逐出「最早过期」的一条，而不是整体清空：
-    /// 已登出的其余 token 必须保持吊销状态（旧实现 clear() 会让它们复活）。
-    #[test]
-    fn revocation_capacity_evicts_oldest_not_all() {
-        let list = TokenRevocations::new();
-        let now = time::OffsetDateTime::now_utc().unix_timestamp();
-        // 灌满 MAX_REVOKED 条，exp 递增（第 0 条最早过期）
-        for i in 0..MAX_REVOKED {
-            list.revoke(&format!("jti-{i:05}"), now + 100 + i as i64);
+    /// 清理动作把退避记录裁到上限内并逐出最旧的一条，而不是整体清空：
+    /// 若清理会抹掉全部记录，清理本身就成了绕过退避的手段。
+    #[tokio::test]
+    async fn auth_state_prune_evicts_oldest_not_all() {
+        let (db, dir) = temp_db("prune");
+        let now = now_secs();
+        // 灌入 cap + 3 条退避记录，expire_at 递增（下标最小的最早可回收）
+        for i in 0..MAX_THROTTLE_ENTRIES + 3 {
+            db.auth_state_set(
+                &format!("throttle:10.0.0.1|user{i:05}"),
+                "{}",
+                now + 100 + i,
+            )
+            .unwrap();
         }
-        assert!(list.is_revoked("jti-00000"));
-        // 再吊销一条：只应逐出 jti-00000（最早过期），其余全部保留
-        list.revoke("jti-new", now + 9999);
-        assert!(!list.is_revoked("jti-00000"), "最早过期的条目被逐出");
-        assert!(list.is_revoked("jti-new"), "新吊销生效");
-        assert!(list.is_revoked("jti-00001"), "其余吊销记录不得丢失");
-        assert!(list.is_revoked("jti-04095"), "最后灌入的条目仍在名单");
+        // 另埋一条已过期的条目，应被同一轮清理删除
+        db.auth_state_set("revoked:expired", "", now - 1).unwrap();
+
+        let removed = db.auth_state_prune(now, MAX_THROTTLE_ENTRIES).unwrap();
+        assert_eq!(removed, 4, "3 条超限 + 1 条过期");
+
+        assert!(db
+            .auth_state_get("throttle:10.0.0.1|user00000", now)
+            .unwrap()
+            .is_none());
+        assert!(db
+            .auth_state_get("throttle:10.0.0.1|user00002", now)
+            .unwrap()
+            .is_none());
+        assert!(
+            db.auth_state_get(
+                &format!("throttle:10.0.0.1|user{:05}", MAX_THROTTLE_ENTRIES + 2),
+                now
+            )
+            .unwrap()
+            .is_some(),
+            "最新的一条必须保留"
+        );
+
+        // 未到期的吊销记录不受退避上限裁剪影响
+        db.auth_state_set("revoked:live", "", now + 9999).unwrap();
+        db.auth_state_prune(now, MAX_THROTTLE_ENTRIES).unwrap();
+        assert!(db.auth_state_get("revoked:live", now).unwrap().is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// argon2 哈希→校验往返：正确密码通过、错误密码与坏哈希串均拒绝
@@ -599,32 +649,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 登录限流：失败后指数退避、按 IP+用户名隔离、成功后清零
-    #[test]
-    fn login_throttle_backoff_isolation_and_reset() {
+    /// 登录限流：失败后指数退避、按 IP+用户名隔离、成功后清零。
+    /// P2-3 起记录落库，因此这里同时验证重建实例（等价重启）后退避仍在。
+    #[tokio::test]
+    async fn login_throttle_backoff_isolation_and_reset() {
         let ip: IpAddr = "10.1.2.3".parse().unwrap();
         let other_ip: IpAddr = "10.9.9.9".parse().unwrap();
-        let t = LoginThrottle::new();
+        let (db, dir) = temp_db("throttle");
+        let t = LoginThrottle::new(db);
 
         // 无失败记录：立即可试
-        assert_eq!(t.retry_after(ip, "admin"), Duration::ZERO);
+        assert_eq!(t.retry_after(ip, "admin").await, Duration::ZERO);
 
         // 连续失败：退避 1s、2s、4s…… 封顶 30s
-        assert_eq!(t.record_failure(ip, "admin"), Duration::from_secs(1));
-        assert!(t.retry_after(ip, "admin") > Duration::ZERO);
-        assert_eq!(t.record_failure(ip, "admin"), Duration::from_secs(2));
-        assert_eq!(t.record_failure(ip, "admin"), Duration::from_secs(4));
+        assert_eq!(t.record_failure(ip, "admin").await, Duration::from_secs(1));
+        assert!(t.retry_after(ip, "admin").await > Duration::ZERO);
+        assert_eq!(t.record_failure(ip, "admin").await, Duration::from_secs(2));
+        assert_eq!(t.record_failure(ip, "admin").await, Duration::from_secs(4));
         for _ in 0..8 {
-            t.record_failure(ip, "admin");
+            t.record_failure(ip, "admin").await;
         }
-        assert_eq!(t.record_failure(ip, "admin"), MAX_DELAY, "退避必须封顶");
+        assert_eq!(
+            t.record_failure(ip, "admin").await,
+            MAX_DELAY,
+            "退避必须封顶"
+        );
 
         // 隔离：不同用户名 / 不同 IP 不受牵连
-        assert_eq!(t.retry_after(ip, "root"), Duration::ZERO);
-        assert_eq!(t.retry_after(other_ip, "admin"), Duration::ZERO);
+        assert_eq!(t.retry_after(ip, "root").await, Duration::ZERO);
+        assert_eq!(t.retry_after(other_ip, "admin").await, Duration::ZERO);
+
+        // P2-3：重建实例（等价重启）后退避状态仍在，不再有「等重启重置」的空档
+        let restarted =
+            LoginThrottle::new(Db::open(dir.join("panel.db").to_str().unwrap()).unwrap());
+        assert!(
+            restarted.retry_after(ip, "admin").await > Duration::ZERO,
+            "退避记录必须跨重启存活"
+        );
 
         // 登录成功清零该来源
-        t.record_success(ip, "admin");
-        assert_eq!(t.retry_after(ip, "admin"), Duration::ZERO);
+        t.record_success(ip, "admin").await;
+        assert_eq!(t.retry_after(ip, "admin").await, Duration::ZERO);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

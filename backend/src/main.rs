@@ -115,12 +115,16 @@ async fn main() -> anyhow::Result<()> {
     // 首次启动时引导管理员账号（P0-1：随机密码写 0600 文件，不落日志）
     auth::ensure_admin(&db, &data_dir)?;
 
+    // P2-3：退避计数与吊销名单改存数据库（重启不再清零），各自持一份连接池句柄
+    let throttle = Arc::new(auth::LoginThrottle::new(db.clone()));
+    let revocations = Arc::new(auth::TokenRevocations::new(db.clone()));
+
     let state = AppState {
         db: Arc::new(db),
         monitor,
         jwt_secret,
-        throttle: Arc::new(auth::LoginThrottle::new()),
-        revocations: Arc::new(auth::TokenRevocations::new()),
+        throttle,
+        revocations,
         data_dir: Arc::new(data_dir),
         db_path: Arc::new(db_path),
     };
