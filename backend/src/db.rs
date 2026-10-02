@@ -47,6 +47,8 @@ pub struct AuditRow {
     pub path: String,
     pub status: u16,
     pub ip: String,
+    /// 操作参数摘要（P1-3）。白名单字段拼接，历史条目为 None
+    pub detail: Option<String>,
 }
 
 /// 在线会话行（jti 不外泄完整值，API 层裁剪后再返回）
@@ -151,6 +153,11 @@ impl Db {
             10,
             "0010_auth_state.sql",
             include_str!("../migrations/0010_auth_state.sql"),
+        ),
+        (
+            11,
+            "0011_audit_detail.sql",
+            include_str!("../migrations/0011_audit_detail.sql"),
         ),
     ];
 
@@ -455,12 +462,22 @@ impl Db {
         path: &str,
         status: u16,
         ip: &str,
+        detail: Option<&str>,
     ) -> Result<()> {
         let conn = self.pool.get().context("获取数据库连接失败")?;
         conn.execute(
-            "INSERT INTO audit_log (ts, user_id, username, method, path, status, ip)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            (ts, user_id, username, method, path, status as i64, ip),
+            "INSERT INTO audit_log (ts, user_id, username, method, path, status, ip, detail)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            (
+                ts,
+                user_id,
+                username,
+                method,
+                path,
+                status as i64,
+                ip,
+                detail,
+            ),
         )?;
         Ok(())
     }
@@ -469,7 +486,7 @@ impl Db {
     pub fn audit_list(&self, limit: i64, offset: i64) -> Result<Vec<AuditRow>> {
         let conn = self.pool.get().context("获取数据库连接失败")?;
         let mut stmt = conn.prepare(
-            "SELECT ts, user_id, username, method, path, status, ip
+            "SELECT ts, user_id, username, method, path, status, ip, detail
              FROM audit_log ORDER BY ts DESC, id DESC LIMIT ?1 OFFSET ?2",
         )?;
         let rows = stmt
@@ -482,6 +499,7 @@ impl Db {
                     path: row.get(4)?,
                     status: row.get::<_, i64>(5)? as u16,
                     ip: row.get(6)?,
+                    detail: row.get(7)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -890,15 +908,17 @@ impl Db {
         path: &str,
         status: u16,
         ip: &str,
+        detail: Option<&str>,
     ) -> Result<()> {
         let db = self.clone();
-        let (u, m, p, i) = (
+        let (u, m, p, i, d) = (
             username.to_string(),
             method.to_string(),
             path.to_string(),
             ip.to_string(),
+            detail.map(str::to_string),
         );
-        blocking(move || db.audit(ts, user_id, &u, &m, &p, status, &i)).await
+        blocking(move || db.audit(ts, user_id, &u, &m, &p, status, &i, d.as_deref())).await
     }
 
     pub async fn audit_list_async(&self, limit: i64, offset: i64) -> Result<Vec<AuditRow>> {
@@ -1198,7 +1218,11 @@ mod tests {
                      sender_id INTEGER, sender_name TEXT, content TEXT, ts INTEGER,
                      reasoning TEXT);
                  INSERT INTO ai_messages (room_id, sender_type, sender_id, sender_name, content, ts, reasoning)
-                     VALUES (1,'user',1,'u','旧消息',0,'');",
+                     VALUES (1,'user',1,'u','旧消息',0,'');
+                 -- v8 库本来就该有 audit_log（0004 建出）。这里补一张最小同名的表：
+                 -- 否则后续任何引用该表的迁移都会在这个「最小复现」库上直接炸掉，
+                 -- 报出的却是与本次迁移无关的错误。
+                 CREATE TABLE audit_log (id INTEGER PRIMARY KEY, ts INTEGER);",
             )
             .unwrap();
             // 标记已应用 1~8，让 Db::open 只跑 0009
@@ -1387,7 +1411,7 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    /// 2.3：审计写入与分页读取（时间倒序），prune 按时间清理
+    /// 2.3：审计写入与分页读取（时间倒序），prune 按时间清理；顺带覆盖 P1-3 的 detail 列
     #[test]
     fn audit_write_and_list() {
         let path = temp_db_path("audit");
@@ -1401,15 +1425,22 @@ mod tests {
                 "/api/files/delete",
                 200,
                 "1.2.3.4",
+                Some("path=/etc/nginx/nginx.conf"),
             )
             .unwrap();
-            db.audit(200, None, "-", "POST", "/api/login", 401, "9.9.9.9")
+            db.audit(200, None, "-", "POST", "/api/login", 401, "9.9.9.9", None)
                 .unwrap();
             let rows = db.audit_list(10, 0).unwrap();
             assert_eq!(rows.len(), 2);
             assert_eq!(rows[0].ts, 200, "按时间倒序");
             assert_eq!(rows[0].user_id, None);
+            assert_eq!(rows[0].detail, None, "未取样的请求 detail 保持为空");
             assert_eq!(rows[1].username, "admin");
+            assert_eq!(
+                rows[1].detail.as_deref(),
+                Some("path=/etc/nginx/nginx.conf"),
+                "取样到的摘要必须原样读回"
+            );
             // 分页
             let page = db.audit_list(1, 1).unwrap();
             assert_eq!(page.len(), 1);

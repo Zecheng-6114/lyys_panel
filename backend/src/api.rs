@@ -355,6 +355,7 @@ async fn login(
                         "/api/login",
                         status,
                         &ip.to_string(),
+                        None,
                     )
                     .await
                 {
@@ -2093,6 +2094,111 @@ async fn audit_actor(state: &AppState, headers: &axum::http::HeaderMap) -> Optio
     Some((claims.sub, user.0))
 }
 
+/// 审计摘要取样的体积上限：超过即不取样（见 [`take_audit_detail`]）
+const AUDIT_BODY_LIMIT: usize = 8 * 1024;
+
+/// 审计摘要的字段白名单。
+///
+/// 只认这些键、其余一律不入库，这样即便请求体里混进密码或 token，
+/// 也不存在进入审计表的路径 —— 白名单本身就是第一道防线。
+const AUDIT_DETAIL_FIELDS: [&str; 8] = [
+    "action",
+    "path",
+    "name",
+    "names",
+    "package",
+    "unit",
+    "container",
+    "target",
+];
+
+/// 单个字段值的长度上限
+const AUDIT_VALUE_LIMIT: usize = 200;
+
+/// 第二道防线：白名单键里若含这些字样也丢弃
+const AUDIT_SENSITIVE: [&str; 4] = ["password", "token", "secret", "new_password"];
+
+/// 从 JSON 请求体中提取审计摘要；任何一步不合条件都返回 None（审计退化为旧行为）。
+fn summarize_body(bytes: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let obj = value.as_object()?;
+    let mut parts = Vec::new();
+    for key in AUDIT_DETAIL_FIELDS {
+        if AUDIT_SENSITIVE.iter().any(|s| key.contains(s)) {
+            continue;
+        }
+        let Some(v) = obj.get(key) else { continue };
+        let text = match v {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            // 数组取前几项：装/卸包是 {"names": ["a","b"]}
+            serde_json::Value::Array(items) => {
+                let joined: Vec<String> = items
+                    .iter()
+                    .take(8)
+                    .map(|i| match i {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    })
+                    .collect();
+                if joined.is_empty() {
+                    continue;
+                }
+                joined.join(",")
+            }
+            // 嵌套对象不展开：递归下去等于让调用方决定审计表里存什么
+            _ => continue,
+        };
+        let shown: String = text.chars().take(AUDIT_VALUE_LIMIT).collect();
+        parts.push(format!("{key}={shown}"));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(", "))
+    }
+}
+
+/// 按闸门条件取样请求体，并把 body 原样交还下游。
+///
+/// 这一步把中间件从「只读观察者」变成「消费并重建 body」的角色，所以闸门设得保守：
+/// 必须是 JSON、必须带 Content-Length、且长度不超过 [`AUDIT_BODY_LIMIT`]。
+/// 分块传输（无 Content-Length）与大 body 一律跳过，不把大文件上传的体积拉进内存。
+///
+/// 读取失败时交还一个空体：这不改变最终结果 —— 能走到这里的请求其 Content-Length
+/// 已声明在阈值内，真正读失败只可能是流中断或声明与实际不符，两种情况下游本来也
+/// 拿不到可用的 body。
+async fn take_audit_detail(req: Request) -> (Request, Option<String>) {
+    let is_json = req
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("application/json"));
+    let declared = req
+        .headers()
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok());
+    let Some(declared) = declared else {
+        return (req, None);
+    };
+    if !is_json || declared > AUDIT_BODY_LIMIT {
+        return (req, None);
+    }
+
+    let (parts, body) = req.into_parts();
+    match axum::body::to_bytes(body, AUDIT_BODY_LIMIT).await {
+        Ok(bytes) => {
+            let detail = summarize_body(&bytes);
+            // 原样重建：下游 extractor 必须还能正常反序列化
+            let rebuilt = Request::from_parts(parts, axum::body::Body::from(bytes));
+            (rebuilt, detail)
+        }
+        Err(_) => (Request::from_parts(parts, axum::body::Body::empty()), None),
+    }
+}
+
 /// 审计中间件：记录 /api 下所有非 GET 请求（方法、路径、状态码、来源 IP、操作者）。
 /// 路径不含查询串，避免敏感参数（如密码走 body 不落库）进入审计。
 /// 登录接口由 handler 自行记录（body 里有用户名，中间件拿不到），此处跳过。
@@ -2115,6 +2221,8 @@ async fn audit_mw(State(state): State<AppState>, req: Request, next: Next) -> Re
         .unwrap_or_default();
     let headers = req.headers().clone();
     let actor = audit_actor(&state, &headers).await;
+    // P1-3：取样参数摘要。取样后 body 已原样重建，下游 handler 不受影响
+    let (req, detail) = take_audit_detail(req).await;
     let resp = next.run(req).await;
     let ts = time::OffsetDateTime::now_utc().unix_timestamp();
     let (user_id, username) = match actor {
@@ -2131,6 +2239,7 @@ async fn audit_mw(State(state): State<AppState>, req: Request, next: Next) -> Re
             &path,
             resp.status().as_u16(),
             &ip,
+            detail.as_deref(),
         )
         .await
     {
@@ -2267,8 +2376,8 @@ pub fn router(state: AppState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::{
-        mask_key, validate_ai_config, validate_dashboard_config, validate_theme, AI_BASE_MAX_LEN,
-        AI_KEY_MAX_LEN, AI_MODEL_MAX_LEN,
+        mask_key, summarize_body, validate_ai_config, validate_dashboard_config, validate_theme,
+        AI_BASE_MAX_LEN, AI_KEY_MAX_LEN, AI_MODEL_MAX_LEN,
     };
     use serde_json::json;
 
@@ -2468,5 +2577,35 @@ mod tests {
         assert_eq!(mask_key(""), "••••");
         let m = mask_key("sk-1234567890abcdef");
         assert!(!m.contains("sk-"), "脱敏结果不得包含明文前缀：{m}");
+    }
+
+    /// P1-3：审计摘要只取白名单字段；敏感字段进不来；值截断到 200 字符
+    #[test]
+    fn audit_detail_summary_is_whitelisted() {
+        // 白名单命中：action 与 names（数组取前几项）
+        let body = br#"{"action":"install","names":["docker","git"],"extra":"ignored"}"#;
+        let d = summarize_body(body).unwrap();
+        assert!(d.contains("action=install"), "{d}");
+        assert!(d.contains("names=docker,git"), "{d}");
+        assert!(!d.contains("extra"), "白名单外的字段不得入库：{d}");
+
+        // 敏感字段一律剔除（白名单只认键名，这里是叠加的第二道防线）
+        let leaked = br#"{"name":"ok","password":"hunter2","token":"abc","secret":"s"}"#;
+        assert_eq!(
+            summarize_body(leaked).unwrap(),
+            "name=ok",
+            "敏感字段必须被剔除"
+        );
+
+        // 超长值截断到 200 字符
+        let long = format!(r#"{{"path":"{}"}}"#, "a".repeat(500));
+        let d = summarize_body(long.as_bytes()).unwrap();
+        assert_eq!(d.len(), "path=".len() + 200, "值必须截断");
+
+        // 非 JSON、非对象、无白名单字段、空数组 → 不产生摘要
+        assert!(summarize_body(b"not json").is_none());
+        assert!(summarize_body(b"[1,2,3]").is_none());
+        assert!(summarize_body(br#"{"other":1}"#).is_none());
+        assert!(summarize_body(br#"{"names":[]}"#).is_none(), "空数组不记");
     }
 }
