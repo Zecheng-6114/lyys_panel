@@ -1973,7 +1973,10 @@ async fn alerts_rules_get(
     Ok(Json(rules))
 }
 
-/// 全量保存规则集（前端提交完整列表）。规则变更最迟一小时后被采样循环感知。
+/// 全量保存规则集（前端提交完整列表）。
+///
+/// P2-2：保存成功后立刻向采样循环发一次递增信号，规则即时生效；采样循环内
+/// 仍有 720 tick 的兜底重载，信号丢失不会让规则永久不生效。
 async fn alerts_rules_set(
     State(state): State<AppState>,
     _: RequireRole<2>,
@@ -1991,6 +1994,8 @@ async fn alerts_rules_set(
         .await
         .map_err(|_| ApiError::internal())?
         .map_err(ApiError::file_err)?;
+    // P2-2：唤醒采样循环重载规则（receiver 被丢弃时此处无副作用）
+    state.alert_reload.send_modify(|v| *v = v.wrapping_add(1));
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

@@ -183,12 +183,29 @@ pub fn spawn_sampler(state: AppState) {
         let db = state.db.clone();
         let monitor = state.monitor.clone();
         let data_dir = state.data_dir.clone();
-        // 3.3 告警：规则每小时从 settings 重载一次，评估在每次采样进行
+        // 3.3 告警：规则在设置页保存后即时重载（P2-2），评估在每次采样进行
         let mut rules = crate::alerts::load_rules(&db);
         let mut engine = crate::alerts::AlertEngine::new(&rules);
+        // P2-2：监听重载信号。sender 意外消失时关掉该分支，退化为纯定时采样，
+        // 否则 changed() 会立即返回 Err 造成忙循环。
+        let mut alert_reload = state.alert_reload.subscribe();
+        let mut reload_live = true;
         let mut ticks: u32 = 0;
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                changed = alert_reload.changed(), if reload_live => {
+                    if changed.is_err() {
+                        reload_live = false;
+                    } else {
+                        rules = crate::alerts::load_rules(&db);
+                        engine.resync(&rules);
+                        tracing::info!("告警规则已即时重载（设置页变更）");
+                    }
+                    // 信号只负责重载规则，本次不采样，直接回到等待
+                    continue;
+                }
+            }
             let snap = {
                 let mut m = monitor.lock().await;
                 m.snapshot()
@@ -254,7 +271,8 @@ pub fn spawn_sampler(state: AppState) {
             ticks += 1;
             if ticks >= 720 {
                 ticks = 0;
-                // 重载规则（设置页改动即时生效上限为 1 小时延迟）
+                // 兜底重载规则：正常路径已由 P2-2 的信号即时触发，这条只为
+                // 「信号丢失」留后路，不可删除
                 rules = crate::alerts::load_rules(&db);
                 engine.resync(&rules);
                 let now = time::OffsetDateTime::now_utc().unix_timestamp();
@@ -276,6 +294,13 @@ pub fn spawn_sampler(state: AppState) {
                     .await
                 {
                     tracing::warn!("清理过期审计日志失败：{e}");
+                }
+                // P2-3：清理过期认证状态，并把退避记录裁剪到上限内
+                if let Err(e) = db
+                    .auth_state_prune_async(now, crate::auth::MAX_THROTTLE_ENTRIES)
+                    .await
+                {
+                    tracing::warn!("清理认证状态失败：{e}");
                 }
                 // 3.3：告警事件同样保留 90 天
                 if let Err(e) = db

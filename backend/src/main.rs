@@ -45,6 +45,9 @@ pub struct AppState {
     pub throttle: Arc<auth::LoginThrottle>,
     /// Token 吊销名单（P1-1：登出后服务端拒绝旧 token）
     pub revocations: Arc<auth::TokenRevocations>,
+    /// 告警规则重载信号（P2-2）：设置页保存规则后发送递增信号，
+    /// 采样循环用 `select!` 监听它并立即重载，取代此前最长 1 小时的延迟。
+    pub alert_reload: Arc<tokio::sync::watch::Sender<u64>>,
     /// 数据目录：JWT 密钥文件、初始密码等敏感文件的存放根目录
     /// （P0-2 起承载安全职责）
     pub data_dir: Arc<PathBuf>,
@@ -118,6 +121,8 @@ async fn main() -> anyhow::Result<()> {
     // P2-3：退避计数与吊销名单改存数据库（重启不再清零），各自持一份连接池句柄
     let throttle = Arc::new(auth::LoginThrottle::new(db.clone()));
     let revocations = Arc::new(auth::TokenRevocations::new(db.clone()));
+    // P2-2：告警规则重载信号通道（初始值 0，采样循环只关心「有变化」）
+    let (alert_reload, _) = tokio::sync::watch::channel(0u64);
 
     let state = AppState {
         db: Arc::new(db),
@@ -125,6 +130,7 @@ async fn main() -> anyhow::Result<()> {
         jwt_secret,
         throttle,
         revocations,
+        alert_reload: Arc::new(alert_reload),
         data_dir: Arc::new(data_dir),
         db_path: Arc::new(db_path),
     };
