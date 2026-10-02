@@ -1,11 +1,10 @@
 //! 实例视图：把「被托管的东西」从系统里单独提出来。
 //!
-//! 两个来源：
-//!   - 容器：Docker 管理的负载，天然隔离，有独立的文件树与日志
-//!   - 主机应用：可执行文件不在系统目录、也不在容器里的进程，按可执行路径聚合
+//! 两个来源都对应显式的管理边界——容器由 Docker 管理，服务由管理员写进 systemd
+//! 单元；进程扫描不参与判定，避免漏掉「跑在系统目录下的解释器型应用」（如 java
+//! 起的服务端），也避免把恰好在 /opt 下的进程凭空认成应用。
 //!
-//! 划分口径与进程页的系统/应用一致——进程页留给系统维护，应用侧集中到这里，
-//! 每块都能直达它自己的文件、日志与进程。
+//! 每块都能直达它自己的日志与进程。
 
 use std::collections::BTreeMap;
 
@@ -20,23 +19,23 @@ use crate::AppState;
 #[serde(rename_all = "snake_case")]
 pub enum InstanceKind {
     Container,
-    Host,
+    Service,
 }
 
 /// 实例（对外 API 返回结构）
 #[derive(Serialize)]
 pub struct Instance {
-    /// 全局唯一，形如 `container:1a2b3c4d5e6f` / `app:/opt/foo/bin/foo`。
-    /// 前端把它原样回传给进程页、文件页、日志页做范围限定。
+    /// 全局唯一，形如 `container:1a2b3c4d5e6f` / `service:minecraft.service`。
+    /// 前端把它原样回传给进程页、日志页做范围限定。
     pub id: String,
     pub kind: InstanceKind,
     pub name: String,
-    /// 容器为镜像名；主机应用为可执行文件路径
+    /// 容器为镜像名；服务为单元描述
     pub detail: String,
     pub state: String,
-    /// 容器为端口映射；主机应用为空
+    /// 容器为端口映射；服务为空
     pub ports: String,
-    /// 容器为所属 compose 项目；主机应用为空
+    /// 容器为所属 compose 项目；服务为空
     pub project: String,
     pub cpu: String,
     pub mem: String,
@@ -46,34 +45,81 @@ pub struct Instance {
 
 /// 容器实例的 id 前缀
 pub const CONTAINER_PREFIX: &str = "container:";
-/// 主机应用实例的 id 前缀
-pub const APP_PREFIX: &str = "app:";
+/// systemd 服务实例的 id 前缀
+pub const SERVICE_PREFIX: &str = "service:";
+
+/// 管理员定义 unit 的落盘目录。软件包自带的单元在 /usr/lib/systemd/system 下，
+/// 属于「服务」页的范畴，不是被托管的负载。
+const ADMIN_UNIT_DIRS: [&str; 2] = ["/etc/systemd/system/", "/run/systemd/system/"];
 
 /// 构造容器实例 id
 pub fn container_id(short: &str) -> String {
     format!("{CONTAINER_PREFIX}{short}")
 }
 
-/// 构造主机应用实例 id
-pub fn app_id(exe: &str) -> String {
-    format!("{APP_PREFIX}{exe}")
+/// 构造服务实例 id
+pub fn service_id(unit: &str) -> String {
+    format!("{SERVICE_PREFIX}{unit}")
 }
 
-/// 列出全部实例：容器在前，主机应用在后；同类内按名称排序保证顺序稳定。
+/// unit 在管理员目录下的候选路径。模板单元（`foo@bar.service`）还要看模板文件
+/// `foo@.service`，因为实例是从模板生成的，磁盘上只有模板。
+fn admin_unit_paths(unit: &str) -> Vec<String> {
+    let mut names = vec![unit.to_string()];
+    if let (Some(at), Some(dot)) = (unit.find('@'), unit.rfind('.')) {
+        if at < dot {
+            names.push(format!("{}@{}", &unit[..at], &unit[dot..]));
+        }
+    }
+    ADMIN_UNIT_DIRS
+        .iter()
+        .flat_map(|dir| names.iter().map(move |n| format!("{dir}{n}")))
+        .collect()
+}
+
+/// unit 是否由管理员定义（unit 文件落在上面两个目录）
+fn is_admin_unit(unit: &str) -> bool {
+    admin_unit_paths(unit)
+        .iter()
+        .any(|p| std::path::Path::new(p).is_file())
+}
+
+/// 列出全部实例：容器在前，服务在后；同类内按名称排序保证顺序稳定。
 pub async fn list(state: &AppState) -> Result<Vec<Instance>> {
     let mut out = Vec::new();
 
-    // Docker 未安装或未启动时静默跳过——这类机器仍应有实例页，只是只有主机应用。
-    // 这里不能把错误往外抛：一个未装 Docker 的服务器不该连应用列表都打不开。
+    // Docker 未安装或未启动时静默跳过——这类机器仍应有实例页，只是只有服务。
+    // 这里不能把错误往外抛：一个未装 Docker 的服务器不该连实例列表都打不开。
     if let Ok(containers) = crate::docker::containers().await {
         out.extend(containers.into_iter().map(from_container));
     }
 
-    let procs = {
-        let mut m = state.monitor.lock().await;
-        m.processes()
+    // 只认管理员定义的单元；软件包自带的那些留在「服务」页，不重复进实例
+    let units: Vec<crate::opservice::ServiceInfo> = match crate::opservice::list().await {
+        Ok(all) => all.into_iter().filter(|u| is_admin_unit(&u.name)).collect(),
+        Err(e) => {
+            tracing::warn!("列出 systemd 服务失败，实例页仅显示容器：{e}");
+            Vec::new()
+        }
     };
-    out.extend(aggregate_host_apps(&procs));
+
+    if !units.is_empty() {
+        let procs = {
+            let mut m = state.monitor.lock().await;
+            m.processes()
+        };
+        // 每个进程只读一次 cgroup，再按单元归拢，避免按单元逐个重扫进程表
+        let mut by_unit: BTreeMap<String, Vec<&ProcessInfo>> = BTreeMap::new();
+        for p in &procs {
+            if let Some(unit) = crate::rprocess::cgroup_unit(p.pid) {
+                by_unit.entry(unit).or_default().push(p);
+            }
+        }
+        out.extend(units.iter().map(|u| {
+            let owned = by_unit.get(&u.name).map(Vec::as_slice).unwrap_or(&[]);
+            from_service(u, owned)
+        }));
+    }
 
     out.sort_by(|a, b| {
         let a_container = a.kind == InstanceKind::Container;
@@ -100,45 +146,36 @@ fn from_container(c: crate::docker::ContainerInfo) -> Instance {
     }
 }
 
-/// 把非系统进程按可执行路径聚合成应用实例。
+/// 服务单元 → 实例。
 ///
-/// 一个应用常有多个进程（master + workers），按路径合并才对得上「一个应用」这个概念；
-/// 按 pid 铺开只会把实例列表变成第二个进程列表。
-fn aggregate_host_apps(procs: &[ProcessInfo]) -> Vec<Instance> {
-    let mut grouped: BTreeMap<String, Vec<&ProcessInfo>> = BTreeMap::new();
-    for p in procs {
-        if crate::rprocess::classify(p) != crate::rprocess::Scope::App {
-            continue;
-        }
-        // 容器进程归容器的进程视图；读不到 exe 的进程没有可用于聚合的身份，都不入列
-        if p.exe.is_empty() || crate::rprocess::in_container(p.pid) {
-            continue;
-        }
-        grouped.entry(p.exe.clone()).or_default().push(p);
+/// 已停止的单元没有归属进程，仍保留在列表里（对应容器的 exited 状态），
+/// 此时不编造 CPU / 内存占用。
+fn from_service(svc: &crate::opservice::ServiceInfo, procs: &[&ProcessInfo]) -> Instance {
+    let mut pids: Vec<u32> = procs.iter().map(|p| p.pid).collect();
+    pids.sort_unstable();
+    let (cpu, mem) = if procs.is_empty() {
+        (String::new(), String::new())
+    } else {
+        let cpu: f64 = procs.iter().map(|p| p.cpu).sum();
+        let mem: i64 = procs.iter().map(|p| p.mem).sum();
+        (format!("{cpu:.1}%"), fmt_bytes(mem))
+    };
+    Instance {
+        id: service_id(&svc.name),
+        kind: InstanceKind::Service,
+        name: svc
+            .name
+            .strip_suffix(".service")
+            .unwrap_or(&svc.name)
+            .to_string(),
+        detail: svc.description.clone(),
+        state: if svc.active == "active" { "running" } else { "exited" }.into(),
+        ports: String::new(),
+        project: String::new(),
+        cpu,
+        mem,
+        pids,
     }
-
-    grouped
-        .into_iter()
-        .map(|(exe, list)| {
-            let cpu: f64 = list.iter().map(|p| p.cpu).sum();
-            let mem: i64 = list.iter().map(|p| p.mem).sum();
-            let name = exe.rsplit('/').next().unwrap_or(&exe).to_string();
-            let mut pids: Vec<u32> = list.iter().map(|p| p.pid).collect();
-            pids.sort_unstable();
-            Instance {
-                id: app_id(&exe),
-                kind: InstanceKind::Host,
-                name,
-                detail: exe,
-                state: "running".into(),
-                ports: String::new(),
-                project: String::new(),
-                cpu: format!("{cpu:.1}%"),
-                mem: fmt_bytes(mem),
-                pids,
-            }
-        })
-        .collect()
 }
 
 /// 字节数转可读文本，与容器侧 `docker stats` 的风格保持一致
@@ -161,43 +198,66 @@ fn fmt_bytes(n: i64) -> String {
 mod tests {
     use super::*;
 
-    fn proc_at(exe: &str, pid: u32, cpu: f64, mem: i64) -> ProcessInfo {
+    fn proc_at(pid: u32, cpu: f64, mem: i64) -> ProcessInfo {
         ProcessInfo {
             pid,
-            name: exe.rsplit('/').next().unwrap_or(exe).into(),
+            name: "java".into(),
             cpu,
             mem,
-            user: "app".into(),
+            user: "mc".into(),
             status: "Run".into(),
-            exe: exe.into(),
+            exe: "/usr/bin/java".into(),
+        }
+    }
+
+    fn svc(name: &str, active: &str) -> crate::opservice::ServiceInfo {
+        crate::opservice::ServiceInfo {
+            name: name.into(),
+            load: "loaded".into(),
+            active: active.into(),
+            sub: "running".into(),
+            description: "Minecraft 服务端".into(),
         }
     }
 
     #[test]
-    fn same_exe_collapses_into_one_instance() {
-        // 不存在的 pid：cgroup 读不到，判定只走路径分支
-        let procs = vec![
-            proc_at("/opt/foo/bin/foo", 999_001, 1.5, 1024),
-            proc_at("/opt/foo/bin/foo", 999_002, 2.5, 2048),
-            proc_at("/usr/bin/sshd", 999_003, 9.0, 4096),
-        ];
-        let list = aggregate_host_apps(&procs);
+    fn service_instance_sums_its_processes() {
+        let a = proc_at(999_001, 1.5, 1024);
+        let b = proc_at(999_002, 2.5, 2048);
+        let inst = from_service(&svc("minecraft.service", "active"), &[&a, &b]);
 
-        assert_eq!(list.len(), 1, "系统进程不进实例列表，同名可执行文件合并为一条");
-        let app = &list[0];
-        assert_eq!(app.name, "foo");
-        assert_eq!(app.detail, "/opt/foo/bin/foo");
-        assert_eq!(app.pids, vec![999_001, 999_002]);
-        assert_eq!(app.cpu, "4.0%");
-        assert_eq!(app.mem, "3.0K");
-        assert_eq!(app.id, "app:/opt/foo/bin/foo");
+        assert_eq!(inst.id, "service:minecraft.service");
+        assert_eq!(inst.kind, InstanceKind::Service);
+        assert_eq!(inst.name, "minecraft");
+        assert_eq!(inst.state, "running");
+        assert_eq!(inst.pids, vec![999_001, 999_002]);
+        assert_eq!(inst.cpu, "4.0%");
+        assert_eq!(inst.mem, "3.0K");
     }
 
     #[test]
-    fn processes_without_exe_are_skipped() {
-        // 读不到 exe 的进程没有可用于聚合的身份，不能凭空造出一个实例
-        let procs = vec![proc_at("", 999_004, 1.0, 10)];
-        assert!(aggregate_host_apps(&procs).is_empty());
+    fn stopped_service_stays_in_the_list_without_processes() {
+        let inst = from_service(&svc("minecraft.service", "inactive"), &[]);
+        assert_eq!(inst.state, "exited");
+        assert!(inst.pids.is_empty());
+        assert_eq!(inst.cpu, "", "没有归属进程时不编造占用");
+        assert_eq!(inst.mem, "");
+    }
+
+    #[test]
+    fn admin_unit_paths_cover_template_units() {
+        let paths = admin_unit_paths("foo@bar.service");
+        assert!(paths.contains(&"/etc/systemd/system/foo@bar.service".to_string()));
+        assert!(paths.contains(&"/etc/systemd/system/foo@.service".to_string()));
+        assert!(paths.contains(&"/run/systemd/system/foo@.service".to_string()));
+    }
+
+    #[test]
+    fn admin_unit_paths_never_point_into_package_dirs() {
+        // 发行版自带的单元在 /usr/lib/systemd/system 下，不该被认成实例
+        let paths = admin_unit_paths("sshd.service");
+        assert!(paths.contains(&"/etc/systemd/system/sshd.service".to_string()));
+        assert!(!paths.iter().any(|p| p.starts_with("/usr/lib/")));
     }
 
     #[test]

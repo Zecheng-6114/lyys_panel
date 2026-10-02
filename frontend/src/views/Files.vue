@@ -140,8 +140,7 @@ const router = useRouter();
 
 /**
  * 从实例卡片跳进来时带的实例 id。
- * 形如 `container:<短ID>` 时走容器文件系统；主机应用则由实例页直接给出 `path=`，
- * 落到它的可执行文件所在目录，走的还是宿主机文件接口。
+ * 形如 `container:<短ID>` 时走容器文件系统；服务没有独立文件树，不会带实例 id 进来。
  */
 const instance = ref(String(route.query.instance ?? ""));
 const isContainer = computed(() => instance.value.startsWith("container:"));
@@ -405,7 +404,7 @@ watch(
 );
 
 onMounted(() => {
-  // 主机应用由实例页给出具体目录；容器与直接进入都从根开始
+  // 带 path= 时落到指定目录（如从其它页面跳转）；容器与直接进入都从根开始
   load(String(route.query.path ?? "/"));
 });
 </script>

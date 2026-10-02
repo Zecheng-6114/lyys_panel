@@ -2,17 +2,23 @@
   <div class="logs">
     <div class="toolbar">
       <!-- 从实例卡片跳进来时只有一种日志来源，不再给切换项 -->
-      <el-radio-group v-if="!isContainer" v-model="mode">
+      <el-radio-group v-if="!scoped" v-model="mode">
         <el-radio-button value="journal">系统日志</el-radio-button>
         <el-radio-button value="file">文件日志</el-radio-button>
         <el-radio-button v-if="auth.isAdmin()" value="audit">操作审计</el-radio-button>
       </el-radio-group>
       <el-tag v-else closable type="info" size="small" @close="clearInstance">
-        容器日志 · {{ containerShort }}
+        {{ isContainer ? `容器日志 · ${containerShort}` : `服务日志 · ${serviceUnit}` }}
       </el-tag>
 
       <template v-if="mode === 'journal'">
-        <el-input v-model="unit" placeholder="单元名（如 sshd，留空为全部）" clearable style="width: 240px" />
+        <el-input
+          v-model="unit"
+          placeholder="单元名（如 sshd，留空为全部）"
+          :disabled="isService"
+          clearable
+          style="width: 240px"
+        />
         <el-input-number v-model="lines" :min="50" :max="2000" :step="100" />
         <el-button @click="load">加载</el-button>
       </template>
@@ -68,17 +74,23 @@ const route = useRoute();
 const router = useRouter();
 const auth = useAuthStore();
 
-/** 从实例卡片跳进来时带的实例 id（形如 container:<短ID>） */
+/** 从实例卡片跳进来时带的实例 id（形如 container:<短ID> / service:<单元名>） */
 const instance = ref(String(route.query.instance ?? ""));
 const isContainer = computed(() => instance.value.startsWith("container:"));
+const isService = computed(() => instance.value.startsWith("service:"));
+/** 实例限定下只有一种日志来源，不给切换项 */
+const scoped = computed(() => isContainer.value || isService.value);
 const containerShort = computed(() =>
   isContainer.value ? instance.value.slice("container:".length) : "",
+);
+const serviceUnit = computed(() =>
+  isService.value ? instance.value.slice("service:".length) : "",
 );
 
 const mode = ref<"journal" | "file" | "audit" | "container">(
   isContainer.value ? "container" : "journal",
 );
-const unit = ref("");
+const unit = ref(serviceUnit.value);
 const file = ref("");
 const files = ref<string[]>([]);
 const lines = ref(200);
@@ -97,6 +109,7 @@ function fmt(ts: number) {
 function clearInstance() {
   instance.value = "";
   mode.value = "journal";
+  unit.value = "";
   router.replace({ path: "/logs" });
   text.value = "";
 }
@@ -173,15 +186,16 @@ watch(
   (v) => {
     instance.value = String(v ?? "");
     mode.value = isContainer.value ? "container" : "journal";
+    unit.value = serviceUnit.value;
     text.value = "";
-    if (isContainer.value) load();
+    if (scoped.value) load();
   },
 );
 
 onMounted(async () => {
   await loadFiles();
-  // 容器实例进来就该直接看到日志，而不是一个空框
-  if (isContainer.value) await load();
+  // 从实例进来就该直接看到日志，而不是一个空框
+  if (scoped.value) await load();
 });
 </script>
 

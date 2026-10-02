@@ -836,9 +836,7 @@ async fn system_history(
 
 #[derive(Deserialize)]
 struct ProcessesQuery {
-    /// system（默认）/ app / all
-    scope: Option<String>,
-    /// 实例 id（container:<短ID> / app:<路径>）；给了就只看该实例的进程
+    /// 实例 id（container:<短ID> / service:<单元名>）；给了就只看该实例的进程
     instance: Option<String>,
 }
 
@@ -847,13 +845,10 @@ async fn processes_list(
     _user: AuthUser,
     Query(q): Query<ProcessesQuery>,
 ) -> Result<Json<Vec<monitor::ProcessInfo>>, ApiError> {
-    let scope = rprocess::Scope::parse(q.scope.as_deref());
-    Ok(Json(
-        rprocess::list(&state, scope, q.instance.as_deref()).await?,
-    ))
+    Ok(Json(rprocess::list(&state, q.instance.as_deref()).await?))
 }
 
-/// 实例列表：容器 + 主机应用，作为各自文件/日志/进程的入口
+/// 实例列表：容器 + systemd 服务，作为各自日志/进程的入口
 async fn instances_list(
     State(state): State<AppState>,
     _user: AuthUser,
@@ -869,8 +864,8 @@ struct InstanceFileQuery {
     path: String,
 }
 
-/// 从实例 id 取容器短 ID。主机应用没有容器文件系统，
-/// 明确报错而不是静默退化成宿主机路径——那会让人以为在看容器里的东西。
+/// 从实例 id 取容器短 ID。服务等非容器实例没有独立文件系统，
+/// 明确报错而不是静默退化成宿主机路径——那会让人以为在看实例里的东西。
 fn container_of(id: &str) -> Result<&str, ApiError> {
     id.strip_prefix(crate::instances::CONTAINER_PREFIX)
         .ok_or_else(|| ApiError::bad("该实例不是容器，没有独立的文件系统"))

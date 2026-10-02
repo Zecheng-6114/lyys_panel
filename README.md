@@ -22,8 +22,9 @@ LYYS Panel 面向单台 Linux 服务器的日常运维，把系统监控、进�
 | 模块 | 说明 |
 |---|---|
 | 仪表盘 | CPU / 内存 / 磁盘 / 网络 / 负载 / 进程数实时卡片，历史趋势折线图（可选时间窗） |
-| 进程 | 进程列表查看与结束 |
+| 进程 | 进程列表查看与结束（全量） |
 | 服务 | systemd 服务查看、启动 / 停止 / 重启 |
+| 实例 | 容器与 systemd 服务的统一入口：状态与资源占用，直达日志（容器日志 / journal 单元）与进程，服务可启停 |
 | 运维 | 磁盘 SMART 健康、unit 文件查看、系统快捷入口 |
 | 日志 | journal 日志查询、日志文件列表与实时 tail |
 | 文件 | 目录浏览、在线编辑、上传下载、新建 / 重命名 / 删除 |
@@ -325,6 +326,9 @@ lyys_panel/
 **功能与工程**
 
 - 外部命令调用无超时（Docker 请求除外，见其实现）；apt 同步操作无并发锁
+- 实例页只收两类显式边界：Docker 容器，以及 unit 文件位于 `/etc/systemd/system/`
+  或 `/run/systemd/system/` 的 systemd 服务。软件包自带的单元（`/usr/lib/systemd/system/`）
+  留在「服务」页；手工 `nohup` 起、没有 unit 的进程不在实例页，需托管请先写 unit
 - Docker 的 Compose 项目在「独立 `docker-compose` 命令」这一路径下，会以容器 label 反推项目，
   容器被全部删除的项目不可见
 - `frontend/package.json` 声明了 `lint` / `format` 脚本，但仓库尚未提交对应的 ESLint / Prettier 配置，直接执行会失败

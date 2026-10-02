@@ -1,13 +1,6 @@
 <template>
   <div class="proc">
     <div class="toolbar">
-      <!-- 有实例限定时范围开关失效：从实例卡片点进来的意图就是"看这个实例的进程"，
-           再叠一层系统/应用筛选只会让人困惑 -->
-      <el-radio-group v-model="scope" :disabled="!!instance" @change="load">
-        <el-radio-button value="system">系统进程</el-radio-button>
-        <el-radio-button value="app">应用进程</el-radio-button>
-        <el-radio-button value="all">全部</el-radio-button>
-      </el-radio-group>
       <el-input
         v-model="keyword"
         placeholder="搜索进程名 / PID / 路径"
@@ -77,12 +70,7 @@ const router = useRouter();
 const rows = ref<Proc[]>([]);
 const keyword = ref("");
 const auto = ref(false);
-/**
- * 默认只看系统进程。进程页的用途是服务器维护，被托管的负载在实例页单独呈现；
- * 需要全量时切一下即可，不必换页面。
- */
-const scope = ref("system");
-/** 从实例卡片跳进来时带的实例 id；给了就以它为准 */
+/** 从实例卡片跳进来时带的实例 id；给了就只看该实例的进程 */
 const instance = ref(String(route.query.instance ?? ""));
 let timer: number | undefined;
 
@@ -91,7 +79,7 @@ const instanceLabel = computed(() => {
   if (id.startsWith("container:")) {
     return `已限定：容器 ${id.slice("container:".length, "container:".length + 12)}`;
   }
-  if (id.startsWith("app:")) return `已限定：${id.slice("app:".length)}`;
+  if (id.startsWith("service:")) return `已限定：服务 ${id.slice("service:".length)}`;
   return `已限定：${id}`;
 });
 
@@ -119,16 +107,12 @@ function fmtBytes(n: number) {
 
 async function load() {
   const params: Record<string, string> = {};
-  if (instance.value) {
-    params.instance = instance.value;
-  } else {
-    params.scope = scope.value;
-  }
+  if (instance.value) params.instance = instance.value;
   const { data } = await http.get("/processes", { params });
   rows.value = data;
 }
 
-/** 清掉实例限定，回到整机的系统进程视图 */
+/** 清掉实例限定，回到整机的进程列表 */
 function clearInstance() {
   instance.value = "";
   router.replace({ path: "/processes" });

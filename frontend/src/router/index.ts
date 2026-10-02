@@ -61,7 +61,7 @@ const routes: RouteRecordRaw[] = [
         component: () => import("../views/Network.vue"),
       },
       {
-        // 实例视图：容器与主机应用的统一入口，块内直达文件 / 日志 / 进程
+        // 实例视图：容器与 systemd 服务的统一入口，块内直达日志 / 进程
         path: "instances",
         name: "instances",
         component: () => import("../views/Instances.vue"),

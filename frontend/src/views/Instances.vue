@@ -1,6 +1,6 @@
 <template>
   <div class="inst">
-    <!-- Docker 未就绪时给引导，但不遮住主机应用列表：没装 Docker 的机器也要能看实例 -->
+    <!-- Docker 未就绪时给引导，但不遮住服务实例列表：没装 Docker 的机器也要能看实例 -->
     <div v-if="status && !status.running" class="panel">
       <div class="panel-title">
         {{ status.installed ? "Docker 未运行" : status.daemon ? "Docker 命令行工具缺失" : "未检测到 Docker" }}
@@ -16,7 +16,7 @@
         <template v-else>
           这台机器上还没有 Docker。点下面的按钮会执行
           <code>{{ installCmd }}</code>
-          并启动服务，通常耗时一到三分钟。下面的主机应用列表不受影响。
+          并启动服务，通常耗时一到三分钟。下面的实例列表不受影响。
         </template>
       </p>
       <el-button v-if="status.installed" type="primary" :loading="starting" @click="startDaemon">
@@ -35,13 +35,13 @@
         <div class="toolbar">
           <el-input
             v-model="keyword"
-            placeholder="搜索实例名 / 镜像 / 路径"
+            placeholder="搜索实例名 / 镜像 / 描述"
             clearable
             style="width: 260px"
           />
           <el-button @click="loadInstances">刷新</el-button>
           <span class="hint-inline">
-            共 {{ instances.length }} 个（容器 {{ containerCount }} · 应用 {{ appCount }}）
+            共 {{ instances.length }} 个（容器 {{ containerCount }} · 服务 {{ serviceCount }}）
           </span>
         </div>
 
@@ -55,7 +55,7 @@
               <span :class="['dot', i.state === 'running' ? 'dot-on' : 'dot-off']" />
               <span class="inst-name" :title="i.name">{{ i.name }}</span>
               <el-tag size="small" :type="i.kind === 'container' ? 'primary' : 'info'" effect="plain">
-                {{ i.kind === "container" ? "容器" : "应用" }}
+                {{ i.kind === "container" ? "容器" : "服务" }}
               </el-tag>
             </div>
 
@@ -65,18 +65,16 @@
               <span v-if="i.ports" :title="i.ports" class="meta-ports">{{ i.ports }}</span>
               <span>CPU {{ i.cpu }}</span>
               <span>内存 {{ i.mem }}</span>
-              <span v-if="i.kind === 'host'">{{ i.pids.length }} 个进程</span>
+              <span v-if="i.kind === 'service'">{{ i.pids.length }} 个进程</span>
             </div>
 
             <div class="inst-actions">
-              <el-button link size="small" @click="openFiles(i)">文件管理</el-button>
+              <el-button v-if="i.kind === 'container'" link size="small" @click="openFiles(i)">
+                文件管理
+              </el-button>
               <el-button link size="small" @click="openLogs(i)">日志</el-button>
               <el-button link size="small" @click="openProcesses(i)">进程</el-button>
-              <el-dropdown
-                v-if="i.kind === 'container'"
-                trigger="click"
-                @command="(c: string) => containerAct(i, c)"
-              >
+              <el-dropdown trigger="click" @command="(c: string) => instAct(i, c)">
                 <el-button link size="small">
                   更多<el-icon><ArrowDown /></el-icon>
                 </el-button>
@@ -85,7 +83,9 @@
                     <el-dropdown-item command="start">启动</el-dropdown-item>
                     <el-dropdown-item command="stop">停止</el-dropdown-item>
                     <el-dropdown-item command="restart">重启</el-dropdown-item>
-                    <el-dropdown-item command="remove" divided>删除</el-dropdown-item>
+                    <el-dropdown-item v-if="i.kind === 'container'" command="remove" divided>
+                      删除
+                    </el-dropdown-item>
                   </el-dropdown-menu>
                 </template>
               </el-dropdown>
@@ -160,12 +160,12 @@ interface DockerStatus {
   compose: string;
   error: string;
 }
-/** 实例：容器或主机应用，两者共用同一张卡片 */
+/** 实例：容器或 systemd 服务，两者共用同一张卡片 */
 interface Instance {
   id: string;
-  kind: "container" | "host";
+  kind: "container" | "service";
   name: string;
-  /** 容器为镜像名；主机应用为可执行文件路径 */
+  /** 容器为镜像名；服务为单元描述 */
   detail: string;
   state: string;
   ports: string;
@@ -221,7 +221,7 @@ const pulling = ref(false);
 const containerCount = computed(
   () => instances.value.filter((i) => i.kind === "container").length,
 );
-const appCount = computed(() => instances.value.length - containerCount.value);
+const serviceCount = computed(() => instances.value.length - containerCount.value);
 
 const filtered = computed(() => {
   const k = keyword.value.trim().toLowerCase();
@@ -292,31 +292,42 @@ async function startDaemon() {
 }
 
 /**
- * 三处入口都带上实例范围，目标页据此把自己限定在这个实例里 ——
+ * 两处入口都带上实例范围，目标页据此把自己限定在这个实例里 ——
  * 从卡片点进去看到的必须是这个实例的东西，而不是整机视图。
+ * 容器才有独立的文件树；服务只提供日志与进程入口。
  */
 function openFiles(i: Instance) {
-  if (i.kind === "container") {
-    router.push({ path: "/files", query: { instance: i.id } });
-    return;
-  }
-  // 主机应用没有隔离的文件树，定位到可执行文件所在目录即可
-  const dir = i.detail.slice(0, i.detail.lastIndexOf("/")) || "/";
-  router.push({ path: "/files", query: { path: dir } });
+  router.push({ path: "/files", query: { instance: i.id } });
 }
 
 function openLogs(i: Instance) {
-  // 容器有独立的日志流；主机应用的日志落在 journal 单元或自身目录里，没有统一入口，
-  // 直接打开日志页由用户按单元名或文件定位 —— 不做一个点进去是空框的入口
-  if (i.kind === "container") {
-    router.push({ path: "/logs", query: { instance: i.id } });
-  } else {
-    router.push({ path: "/logs" });
-  }
+  // 容器有独立日志流，服务走 journal 单元；两种都由日志页按实例 id 自行分流
+  router.push({ path: "/logs", query: { instance: i.id } });
 }
 
 function openProcesses(i: Instance) {
   router.push({ path: "/processes", query: { instance: i.id } });
+}
+
+/** 卡片「更多」的入口：容器走 docker 接口，服务复用「服务」页的 systemctl 接口 */
+function instAct(i: Instance, action: string) {
+  return i.kind === "container" ? containerAct(i, action) : serviceAct(i, action);
+}
+
+/** 服务 unit 名从实例 id 里取 */
+async function serviceAct(i: Instance, action: string) {
+  const unit = i.id.slice("service:".length);
+  try {
+    const { data } = await http.post("/services", { name: unit, action });
+    if (!data.ok) {
+      ElMessage.error(data.stderr || `${action} ${unit} 失败`);
+      return;
+    }
+    ElMessage.success("操作成功");
+    await loadInstances();
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error ?? "操作失败");
+  }
 }
 
 async function containerAct(i: Instance, action: string) {
@@ -399,7 +410,7 @@ watch(tab, (v) => {
 onMounted(async () => {
   pkgMeta.value = await pkgMetaSafe();
   await loadStatus();
-  // 实例列表始终拉取：Docker 没起来时它至少还有主机应用
+  // 实例列表始终拉取：Docker 没起来时它至少还有 systemd 服务
   await loadInstances();
   if (dockerReady.value) await Promise.all([loadImages(), loadCompose()]);
 });
