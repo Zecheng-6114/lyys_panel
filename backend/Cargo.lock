@@ -1024,6 +1024,7 @@ dependencies = [
  "rand 0.8.8",
  "rcgen",
  "reqwest",
+ "ring",
  "rusqlite",
  "rust-embed",
  "serde",

@@ -43,6 +43,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 tokio-stream = "0.1"
 # AI 助手：reqwest 流式响应按块读取（bytes_stream）
 futures-util = "0.3"
+# P1-2 自更新：下载产物的 sha256 校验。直接用 ring —— 它已作为 rustls 的加密
+# 后端在依赖树里（reqwest/rustls 拉进来），显式声明不引入任何新代码体积。
+ring = "0.17"
 
 
 [profile.release]

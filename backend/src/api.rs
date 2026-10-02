@@ -1952,13 +1952,17 @@ async fn update_check(_: RequireRole<2>) -> Result<Json<crate::update::UpdateSta
 
 async fn update_install(_: RequireRole<2>) -> Result<Json<serde_json::Value>, ApiError> {
     let client = reqwest::Client::new();
-    let (bytes, tag) = crate::update::download_github(&client)
+    let download = crate::update::download_github(&client)
         .await
         .map_err(ApiError::file_err)?;
-    tokio::task::spawn_blocking(move || crate::update::install_binary(&bytes))
-        .await
-        .map_err(|_| ApiError::internal())?
-        .map_err(ApiError::file_err)?;
+    // P1-2：sha256 由 download_github 一并取回；取不到校验和文件时在上一步就已失败
+    let tag = download.tag.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::update::install_binary(&download.bytes, Some(&download.sha256))
+    })
+    .await
+    .map_err(|_| ApiError::internal())?
+    .map_err(ApiError::file_err)?;
     Ok(Json(serde_json::json!({
         "ok": true,
         "version": tag,
@@ -1975,7 +1979,9 @@ async fn update_upload(
         return Err(ApiError::bad("上传内容为空"));
     }
     let bytes = body.to_vec();
-    tokio::task::spawn_blocking(move || crate::update::install_binary(&bytes))
+    // 手动通道没有上游校验和可比对，只能做体积 + magic 两道闸；
+    // 该接口本身已要求 admin 身份，风险面与 GitHub 拉取通道不同。
+    tokio::task::spawn_blocking(move || crate::update::install_binary(&bytes, None))
         .await
         .map_err(|_| ApiError::internal())?
         .map_err(ApiError::file_err)?;
