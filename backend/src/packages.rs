@@ -1,5 +1,6 @@
 use anyhow::Context;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::process::Stdio;
 use tokio::process::Command;
 
@@ -11,7 +12,61 @@ pub struct PackageInfo {
     pub name: String,
     pub version: String,
     pub arch: String,
+    /// 所在仓库（`core`/`extra`…）。仅搜索有值：已安装与可升级列表拿不到该信息
+    pub repo: String,
+    /// 已安装版本；未安装为 None。仅搜索有值，用于「这条是否已经装了」的判断
+    pub installed: Option<String>,
     pub description: String,
+}
+
+impl PackageInfo {
+    /// 仅填充名称与版本的构造（已安装 / 可升级列表共用）
+    fn brief(name: &str, version: String) -> Self {
+        Self {
+            name: name.to_string(),
+            version,
+            arch: String::new(),
+            repo: String::new(),
+            installed: None,
+            description: String::new(),
+        }
+    }
+}
+
+/// 已安装包 → 版本 的映射，供搜索结果标注安装状态。
+/// 这里刻意不把错误冒泡给调用方：标注失败只影响一列展示，不该让整个搜索失败。
+async fn installed_map() -> HashMap<String, String> {
+    match installed_map_inner().await {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("读取已安装包清单失败，搜索结果将不标注安装状态：{e:#}");
+            HashMap::new()
+        }
+    }
+}
+
+async fn installed_map_inner() -> anyhow::Result<HashMap<String, String>> {
+    let (program, args): (&str, &[&str]) = match crate::distro::family() {
+        Family::Debian => ("dpkg-query", &["-W", "-f=${Package}\t${Version}\n"]),
+        Family::Arch => ("pacman", &["-Q"]),
+    };
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    let out = crate::cmd::run(&mut cmd, crate::cmd::Budget::query(20))
+        .await
+        .with_context(|| format!("调用 {program} 失败"))?;
+    if !out.status.success() {
+        anyhow::bail!("{program} 退出码 {:?}", out.status.code());
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut map = HashMap::new();
+    for line in text.lines() {
+        let mut it = line.split_whitespace();
+        if let (Some(n), Some(v)) = (it.next(), it.next()) {
+            map.insert(n.to_string(), v.to_string());
+        }
+    }
+    Ok(map)
 }
 
 /// 校验包名合法性（Debian 与 Arch 包名字符集的并集，防参数注入）
@@ -68,7 +123,9 @@ async fn list_installed_deb(
         check_name(f)?;
         cmd.arg(format!("{f}*"));
     }
-    let out = cmd.output().await.context("调用 dpkg-query 失败")?;
+    let out = crate::cmd::run(&mut cmd, crate::cmd::Budget::query(15))
+        .await
+        .context("调用 dpkg-query 失败")?;
     if !out.status.success() {
         // P1-3：命令 stderr 只进日志，响应体不回显（防内部细节泄露）
         tracing::warn!(
@@ -92,6 +149,8 @@ async fn list_installed_deb(
             name: name.to_string(),
             version: version.to_string(),
             arch: arch.to_string(),
+            repo: String::new(),
+            installed: None,
             description: brief,
         });
         if list.len() >= limit {
@@ -106,9 +165,9 @@ async fn list_installed_arch(
     limit: usize,
 ) -> anyhow::Result<Vec<PackageInfo>> {
     // pacman -Q 输出全部本地已安装包：Name Version（与 dpkg-query 语义一致，含依赖包）
-    let out = Command::new("pacman")
-        .args(["-Q"])
-        .output()
+    let mut cmd = Command::new("pacman");
+    cmd.args(["-Q"]);
+    let out = crate::cmd::run(&mut cmd, crate::cmd::Budget::query(15))
         .await
         .context("调用 pacman 失败")?;
     if !out.status.success() {
@@ -132,12 +191,7 @@ async fn list_installed_arch(
                 continue;
             }
         }
-        list.push(PackageInfo {
-            name: name.to_string(),
-            version: version.to_string(),
-            arch: String::new(),
-            description: String::new(),
-        });
+        list.push(PackageInfo::brief(name, version.to_string()));
         if list.len() >= limit {
             break;
         }
@@ -155,12 +209,12 @@ pub async fn upgradable() -> anyhow::Result<Vec<PackageInfo>> {
 
 /// apt-get -s upgrade 模拟
 async fn upgradable_deb() -> anyhow::Result<Vec<PackageInfo>> {
-    let out = Command::new("apt-get")
-        .args(["-s", "upgrade"])
+    let mut cmd = Command::new("apt-get");
+    cmd.args(["-s", "upgrade"])
         // 固定 C locale，保证 "Inst" 行格式可解析（不受中文环境影响）
         .env("DEBIAN_FRONTEND", "noninteractive")
-        .env("LC_ALL", "C")
-        .output()
+        .env("LC_ALL", "C");
+    let out = crate::cmd::run(&mut cmd, crate::cmd::Budget::query(60))
         .await
         .context("调用 apt-get 失败")?;
     if !out.status.success() {
@@ -187,22 +241,16 @@ async fn upgradable_deb() -> anyhow::Result<Vec<PackageInfo>> {
             .and_then(|(_, r)| r.split_whitespace().next())
             .unwrap_or("")
             .to_string();
-        list.push(PackageInfo {
-            name,
-            version: format!("{cur} -> {new}"),
-            arch: String::new(),
-            description: String::new(),
-        });
+        list.push(PackageInfo::brief(&name, format!("{cur} -> {new}")));
     }
     Ok(list)
 }
 
 /// pacman -Qu：Name 旧版本 -> 新版本
 async fn upgradable_arch() -> anyhow::Result<Vec<PackageInfo>> {
-    let out = Command::new("pacman")
-        .args(["-Qu"])
-        .env("LC_ALL", "C")
-        .output()
+    let mut cmd = Command::new("pacman");
+    cmd.args(["-Qu"]).env("LC_ALL", "C");
+    let out = crate::cmd::run(&mut cmd, crate::cmd::Budget::query(15))
         .await
         .context("调用 pacman 失败")?;
     // pacman -Qu 在"无可升级包"时退出码为 1，属正常，需区分
@@ -225,40 +273,46 @@ async fn upgradable_arch() -> anyhow::Result<Vec<PackageInfo>> {
         let (Some(name), Some(cur)) = (it.next(), it.next()) else {
             continue;
         };
-        list.push(PackageInfo {
-            name: name.to_string(),
-            version: format!("{cur} -> {new}"),
-            arch: String::new(),
-            description: String::new(),
-        });
+        list.push(PackageInfo::brief(name, format!("{cur} -> {new}")));
     }
     Ok(list)
 }
 
-/// 搜索软件包（仅名称）
+/// 搜索软件包（名称与描述）
 pub async fn search(pattern: &str, limit: usize) -> anyhow::Result<Vec<PackageInfo>> {
+    // 先取已安装清单，给结果标注「是否已安装 / 已装版本」——
+    // 这是搜索框最能省事的一列：省得装完才发现早装过了
+    let installed = installed_map().await;
     match crate::distro::family() {
-        Family::Debian => search_deb(pattern, limit).await,
-        Family::Arch => search_arch(pattern, limit).await,
+        Family::Debian => search_deb(pattern, limit, &installed).await,
+        Family::Arch => search_arch(pattern, limit, &installed).await,
     }
 }
 
-async fn search_deb(pattern: &str, limit: usize) -> anyhow::Result<Vec<PackageInfo>> {
+async fn search_deb(
+    pattern: &str,
+    limit: usize,
+    installed: &HashMap<String, String>,
+) -> anyhow::Result<Vec<PackageInfo>> {
     // 与安装/卸载同源的字符白名单（check_pattern），消除口径不一致
     check_pattern(pattern)?;
-    let out = Command::new("apt-cache")
-        .args(["search", "--names-only", pattern])
-        .output()
+    let mut cmd = Command::new("apt-cache");
+    cmd.args(["search", "--names-only", pattern]);
+    let out = crate::cmd::run(&mut cmd, crate::cmd::Budget::query(15))
         .await
         .context("调用 apt-cache 失败")?;
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     let mut list = Vec::new();
     for line in text.lines() {
         if let Some((name, desc)) = line.split_once(" - ") {
+            let name = name.trim().to_string();
+            // apt-cache search 不给仓库与版本，装没装只能靠已安装清单反查
             list.push(PackageInfo {
-                name: name.trim().to_string(),
+                installed: installed.get(&name).cloned(),
+                name,
                 version: String::new(),
                 arch: String::new(),
+                repo: String::new(),
                 description: desc.trim().to_string(),
             });
         }
@@ -269,41 +323,78 @@ async fn search_deb(pattern: &str, limit: usize) -> anyhow::Result<Vec<PackageIn
     Ok(list)
 }
 
-async fn search_arch(pattern: &str, limit: usize) -> anyhow::Result<Vec<PackageInfo>> {
+async fn search_arch(
+    pattern: &str,
+    limit: usize,
+    installed: &HashMap<String, String>,
+) -> anyhow::Result<Vec<PackageInfo>> {
     // 同 search_deb：对齐 check_pattern 白名单口径
     check_pattern(pattern)?;
-    // pacman -Ss 同时搜本地库与同步库，行格式：repo/name 版本 | 简要描述
-    let out = Command::new("pacman")
-        .args(["-Ss", pattern])
-        .env("LC_ALL", "C")
-        .output()
+    // pacman -Ss 搜同步库，输出是「两行一条」：
+    //     extra/docker 1:28.3.1-1
+    //         Pack, ship and run any application as a lightweight container
+    // 头部行给「仓库/包名 版本」，紧随的缩进行才是描述。
+    // 旧实现按「版本 | 描述」同行的格式解析，一条都匹配不上，搜索恒为空——
+    // 这是 Arch 下在线搜索不可用的真正原因。
+    let mut cmd = Command::new("pacman");
+    cmd.args(["-Ss", pattern]).env("LC_ALL", "C");
+    let out = crate::cmd::run(&mut cmd, crate::cmd::Budget::query(15))
         .await
         .context("调用 pacman 失败")?;
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    let mut list = Vec::new();
+    Ok(parse_search_arch(&text, limit, installed))
+}
+
+/// 解析 `pacman -Ss` 输出。抽成纯函数以便用真实输出做回归断言
+/// （曾经的实现按「版本 | 描述」同行解析，导致搜索恒为空）。
+fn parse_search_arch(
+    text: &str,
+    limit: usize,
+    installed: &HashMap<String, String>,
+) -> Vec<PackageInfo> {
+    let mut list: Vec<PackageInfo> = Vec::new();
     for line in text.lines() {
-        let Some((head, desc)) = line.split_once(" | ") else {
+        if line.trim().is_empty() {
             continue;
-        };
-        let Some((name, version)) = head.split_once(char::is_whitespace) else {
+        }
+        // 缩进行 = 上一条的描述（补齐后继续，不新增条目）
+        if line.starts_with(' ') || line.starts_with('\t') {
+            if let Some(last) = list.last_mut() {
+                last.description = line.trim().to_string();
+            }
             continue;
-        };
-        // 只保留仓库/包名部分（去掉 repo/ 前缀），描述截断到首行
-        let name = name.rsplit('/').next().unwrap_or(name).to_string();
-        list.push(PackageInfo {
-            name,
-            version: version.trim().to_string(),
-            arch: String::new(),
-            description: desc.trim().to_string(),
-        });
+        }
         if list.len() >= limit {
             break;
         }
+        // 头部行：repo/name version [(分组)]；版本取第一个 token，忽略后置标记
+        let Some((head, rest)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        // 拆出仓库：仓库是判断「该不该从官方源装」的关键信息，不能丢掉
+        let (repo, name) = match head.split_once('/') {
+            Some((r, n)) => (r.to_string(), n.to_string()),
+            None => (String::new(), head.to_string()),
+        };
+        let version = rest.split_whitespace().next().unwrap_or("").to_string();
+        list.push(PackageInfo {
+            installed: installed.get(&name).cloned(),
+            name,
+            version,
+            arch: String::new(),
+            repo,
+            description: String::new(),
+        });
     }
-    Ok(list)
+    list
 }
 
-/// 刷新软件索引
+/// 刷新软件索引（Debian 系专有）
+///
+/// Arch 系没有对应操作：Arch 官方的立场是**不要**单独执行 `pacman -Sy`——
+/// 数据库新了而系统没升，就是所谓的「部分升级」，会让依赖关系对不上、
+/// 属于不受支持的状态。Arch 下同步数据库与升级系统是同一件事，统一走
+/// `system_upgrade()`（`pacman -Syu`），因此这里直接拒绝，避免接口层留坑。
 pub async fn update_index() -> anyhow::Result<String> {
     match crate::distro::family() {
         Family::Debian => {
@@ -311,11 +402,27 @@ pub async fn update_index() -> anyhow::Result<String> {
             cmd.arg("update").env("DEBIAN_FRONTEND", "noninteractive");
             run_pkg_cmd(&mut cmd, "刷新索引").await
         }
+        Family::Arch => anyhow::bail!(
+            "Arch 系不支持单独刷新索引（会造成部分升级）：请使用「滚动更新」一次完成同步与升级"
+        ),
+    }
+}
+
+/// 全量更新系统：Debian 系 `apt-get full-upgrade`，Arch 系 `pacman -Syu`。
+/// 这是 Arch 系唯一的「刷新 + 升级」入口（滚动更新）。
+pub async fn system_upgrade() -> anyhow::Result<String> {
+    match crate::distro::family() {
+        Family::Debian => {
+            let mut cmd = Command::new("apt-get");
+            cmd.args(["full-upgrade", "-y"])
+                .env("DEBIAN_FRONTEND", "noninteractive");
+            run_pkg_cmd(&mut cmd, "全量升级").await
+        }
         Family::Arch => {
-            // pacman -Sy 单独同步数据库；-y 与 -u/-S 同用有风险，这里只做同步
+            // -Syu：同步数据库 + 升级全部已安装包，一步到位，不存在中间态
             let mut cmd = Command::new("pacman");
-            cmd.args(["-Sy", "--noconfirm"]);
-            run_pkg_cmd(&mut cmd, "刷新索引").await
+            cmd.args(["-Syu", "--noconfirm"]);
+            run_pkg_cmd(&mut cmd, "滚动更新").await
         }
     }
 }
@@ -347,7 +454,10 @@ pub async fn install(names: &[String]) -> anyhow::Result<String> {
     run_pkg_cmd(&mut cmd, "安装").await
 }
 
-/// 升级指定软件包
+/// 升级指定软件包（Debian 系专有）
+///
+/// Arch 系不提供：只升一部分包而其余留在旧版本，正是 Arch 明令不支持的
+/// 「部分升级」。Arch 下升级只有一种正确形态——连同数据库一起全量滚动更新。
 pub async fn upgrade(names: &[String]) -> anyhow::Result<String> {
     if names.is_empty() || names.len() > 50 {
         anyhow::bail!("一次升级 1~50 个包");
@@ -362,12 +472,9 @@ pub async fn upgrade(names: &[String]) -> anyhow::Result<String> {
                 .env("DEBIAN_FRONTEND", "noninteractive");
             cmd
         }
-        Family::Arch => {
-            // pacman -S 对已安装且已是最新的包会跳过（--needed），语义即"升级到最新"
-            let mut cmd = Command::new("pacman");
-            cmd.args(["-S", "--noconfirm", "--needed"]);
-            cmd
-        }
+        Family::Arch => anyhow::bail!(
+            "Arch 系不支持只升级部分软件包（会造成部分升级）：请使用「滚动更新」全量升级"
+        ),
     };
     for n in names {
         cmd.arg(n);
@@ -405,6 +512,7 @@ pub async fn remove(names: &[String]) -> anyhow::Result<String> {
 /// 运行包管理命令，将 stdout/stderr 合并到同一临时文件按时间顺序捕获。
 /// 注意：apt 非 TTY 输出不含进度百分比与 "Done" 后缀，属正常现象；
 /// 若用 .output() 分开捕获，stdout 与 stderr 拼接会打乱时间顺序。
+/// P1-1 起：锁（Package 组全局串行）与超时（1800s）由 cmd::run_status 统一提供。
 pub async fn run_pkg_cmd(cmd: &mut Command, what: &str) -> anyhow::Result<String> {
     let mut tmp = std::env::temp_dir();
     let tag: u32 = rand::random();
@@ -418,7 +526,9 @@ pub async fn run_pkg_cmd(cmd: &mut Command, what: &str) -> anyhow::Result<String
     ))
     .stderr(Stdio::from(file))
     .stdin(Stdio::null());
-    let status = cmd.status().await.context("调用包管理器失败")?;
+    let status = crate::cmd::run_status(cmd, crate::cmd::Budget::package(1800))
+        .await
+        .context("调用包管理器失败")?;
     let output = tokio::fs::read_to_string(&cloned).await.unwrap_or_default();
     let _ = tokio::fs::remove_file(&cloned).await;
     if !status.success() {
@@ -567,5 +677,39 @@ mod tests {
         // 结果无论有无匹配都应是 Ok）
         assert!(search("nginx full", 5).await.is_ok());
         assert!(search("lib*", 5).await.is_ok());
+    }
+
+    /// pacman -Ss 是「头部行 + 缩进描述行」两行一条，这里用真实抓取的输出做回归。
+    /// 旧实现按「版本 | 描述」同行格式解析，一条都取不到，导致 Arch 搜索恒为空。
+    #[test]
+    fn parse_search_arch_handles_two_line_format() {
+        let text = "\
+extra/bashbrew 0.1.13-1
+    Canonical build tool for Docker official images
+extra/cockpit-docker 16-3
+    Cockpit UI for docker containers
+";
+        let mut installed = std::collections::HashMap::new();
+        installed.insert("cockpit-docker".to_string(), "16-3".to_string());
+        let list = parse_search_arch(text, 50, &installed);
+        assert_eq!(list.len(), 2, "两行一条应解析出 2 条");
+        assert_eq!(list[0].repo, "extra");
+        assert_eq!(list[0].name, "bashbrew");
+        assert_eq!(list[0].version, "0.1.13-1");
+        assert_eq!(
+            list[0].description,
+            "Canonical build tool for Docker official images"
+        );
+        assert!(list[0].installed.is_none(), "未安装的包不应带已安装版本");
+        assert_eq!(list[1].name, "cockpit-docker");
+        assert_eq!(list[1].installed.as_deref(), Some("16-3"));
+
+        // 命中上限即停，且提前 break 不能把已收条目的描述丢掉
+        let limited = parse_search_arch(text, 1, &installed);
+        assert_eq!(limited.len(), 1);
+        assert_eq!(
+            limited[0].description,
+            "Canonical build tool for Docker official images"
+        );
     }
 }

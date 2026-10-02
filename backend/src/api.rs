@@ -1175,11 +1175,36 @@ async fn packages_action(
         "update" => crate::packages::update_index().await,
         "install" => crate::packages::install(&req.names).await,
         "upgrade" => crate::packages::upgrade(&req.names).await,
+        "sysupgrade" => crate::packages::system_upgrade().await,
         "remove" => crate::packages::remove(&req.names).await,
         _ => Err(anyhow::anyhow!("未知操作")),
     }
     .map_err(ApiError::file_err)?;
     Ok(Json(serde_json::json!({ "ok": true, "output": output })))
+}
+
+/// 包管理能力描述。前端不猜发行版：Arch 系没有「可升级」这个概念，
+/// 只有滚动更新（同步数据库 + 全量升级一步完成），标签与按钮都据此决定。
+#[derive(Serialize)]
+struct PkgMeta {
+    /// "arch" / "debian"
+    family: &'static str,
+    /// /etc/os-release 的 PRETTY_NAME，用于界面提示
+    pretty: &'static str,
+    /// 包管理器命令名："pacman" / "apt"
+    manager: &'static str,
+    /// true = 滚动更新发行版（Arch 系）
+    rolling: bool,
+}
+
+async fn packages_meta(_user: AuthUser) -> Json<PkgMeta> {
+    let rolling = matches!(crate::distro::family(), crate::distro::Family::Arch);
+    Json(PkgMeta {
+        family: if rolling { "arch" } else { "debian" },
+        pretty: crate::distro::pretty(),
+        manager: if rolling { "pacman" } else { "apt" },
+        rolling,
+    })
 }
 
 // ---------- 计划任务 ----------
@@ -2151,6 +2176,7 @@ pub fn router(state: AppState) -> Router {
             post(files_upload).layer(DefaultBodyLimit::max(100 * 1024 * 1024)),
         )
         .route("/packages", get(packages_list))
+        .route("/packages/meta", get(packages_meta))
         .route("/packages/upgradable", get(packages_upgradable))
         .route("/packages/search", get(packages_search))
         .route("/packages/action", post(packages_action))

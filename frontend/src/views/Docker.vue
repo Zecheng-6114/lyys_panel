@@ -7,13 +7,12 @@
       </div>
       <p class="hint">
         <template v-if="status.daemon">
-          已检测到 Docker 守护进程正在运行，但缺 <code>docker-cli</code> 包
-          （Debian 把它列为 <code>docker.io</code> 的推荐包，容易被漏装）。
+          已检测到 Docker 守护进程正在运行，但缺命令行工具（{{ cliPackageHint }}）。
           点安装即可装上缺的部分，已装好的不会被重装。
         </template>
         <template v-else>
           这台机器上还没有 Docker。点下面的按钮会执行
-          <code>apt-get install docker.io docker-cli docker-compose</code>
+          <code>{{ installCmd }}</code>
           并启动服务，通常耗时一到三分钟。
         </template>
       </p>
@@ -134,6 +133,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import http from "../api/http";
+import { pkgMetaSafe, type PkgMeta } from "../api/meta";
 
 interface DockerStatus {
   installed: boolean;
@@ -171,6 +171,18 @@ interface Project {
 }
 
 const status = ref<DockerStatus | null>(null);
+/** 发行版能力：安装提示里的命令名与包名随发行版不同 */
+const pkgMeta = ref<PkgMeta>({ family: "", pretty: "", manager: "", rolling: false });
+const installCmd = computed(() =>
+  pkgMeta.value.manager === "pacman"
+    ? "pacman -S docker docker-compose"
+    : "apt-get install docker.io docker-cli docker-compose"
+);
+const cliPackageHint = computed(() =>
+  pkgMeta.value.manager === "pacman"
+    ? "Arch 的守护进程与命令行工具都在 docker 包里"
+    : "Debian 把它列为 docker.io 的推荐包，容易被漏装"
+);
 const tab = ref("containers");
 
 const containers = ref<Container[]>([]);
@@ -344,6 +356,7 @@ watch(tab, (v) => {
 });
 
 onMounted(async () => {
+  pkgMeta.value = await pkgMetaSafe();
   await loadStatus();
   if (status.value?.running) await loadAll();
 });

@@ -3,36 +3,33 @@
     <div class="toolbar">
       <el-radio-group v-model="mode">
         <el-radio-button value="installed">已安装</el-radio-button>
-        <el-radio-button value="upgradable">可升级</el-radio-button>
+        <!-- Arch 系是滚动更新发行版，没有「可升级」这个中间态 -->
+        <el-radio-button value="upgradable">{{ rolling ? "滚动更新" : "可升级" }}</el-radio-button>
         <el-radio-button value="search">在线搜索</el-radio-button>
       </el-radio-group>
       <el-input
         v-if="mode !== 'upgradable'"
         v-model="keyword"
-        placeholder="包名关键字"
+        :placeholder="mode === 'search' ? '包名或描述关键字' : '包名关键字'"
         clearable
         style="width: 220px"
         @keyup.enter="load"
       />
-      <el-button @click="load">查询</el-button>
+      <el-button :loading="loading" @click="load">查询</el-button>
+      <label v-if="mode === 'search'" class="opt">
+        <el-checkbox v-model="hideInstalled" size="small">只看未安装</el-checkbox>
+      </label>
       <div class="spacer"></div>
-      <el-button :loading="acting" @click="doUpdate">刷新索引</el-button>
-      <!-- 操作按钮按标签页显示：安装针对在线搜索结果，升级针对可升级包，卸载针对已安装包 -->
+      <!-- 刷新索引仅 Debian 系提供：Arch 下单独同步数据库会造成部分升级 -->
+      <el-button v-if="!rolling" :loading="acting" @click="doUpdate">刷新索引</el-button>
       <el-button
         v-if="mode === 'search'"
+        type="primary"
         :loading="acting"
         :disabled="selected.length === 0"
         @click="doInstall"
       >
         安装所选
-      </el-button>
-      <el-button
-        v-if="mode === 'upgradable'"
-        :loading="acting"
-        :disabled="selected.length === 0"
-        @click="doUpgrade"
-      >
-        升级所选
       </el-button>
       <el-button
         v-if="mode === 'installed'"
@@ -42,42 +39,107 @@
       >
         卸载所选
       </el-button>
+      <!-- Arch：一步滚动更新。列表为空也允许执行——它自带同步，
+           索引没同步过时列表本就是空的，不能因此把唯一的出口锁死 -->
+      <el-button
+        v-if="mode === 'upgradable' && rolling"
+        type="primary"
+        :loading="acting"
+        @click="doSysUpgrade"
+      >
+        滚动更新
+      </el-button>
+      <el-button
+        v-if="mode === 'upgradable' && !rolling"
+        :loading="acting"
+        :disabled="selected.length === 0"
+        @click="doUpgrade"
+      >
+        升级所选
+      </el-button>
+    </div>
+
+    <div class="statusline">
+      <span class="hint">{{ modeHint }}</span>
+      <span class="spacer"></span>
+      <span v-if="rows.length" class="count">
+        共 {{ displayRows.length }} 个{{ truncated ? "（已截断，请用关键字收窄）" : "" }}
+      </span>
     </div>
 
     <el-table
       v-loading="loading"
-      :data="rows"
+      :data="displayRows"
       size="small"
       row-key="name"
       class="ptable"
       height="var(--panel-table-height)"
+      :empty-text="emptyText"
       @selection-change="(v: Pkg[]) => (selected = v)"
     >
-      <el-table-column type="selection" width="36" />
+      <el-table-column v-if="selectable" type="selection" width="36" />
       <el-table-column label="包名" prop="name" min-width="200" />
-      <el-table-column label="版本" width="220" class-name="col-p2" label-class-name="col-p2">
-        <template #default="{ row }"><span class="mono">{{ row.version }}</span></template>
+      <el-table-column label="版本" width="250" class-name="col-p2" label-class-name="col-p2">
+        <template #default="{ row }">
+          <template v-if="row.version.includes(' -> ')">
+            <span class="mono ver-old">{{ row.version.split(" -> ")[0] }}</span>
+            <span class="arrow">→</span>
+            <span class="mono ver-new">{{ row.version.split(" -> ")[1] }}</span>
+          </template>
+          <span v-else class="mono">{{ row.version || "—" }}</span>
+        </template>
       </el-table-column>
-      <el-table-column label="架构" prop="arch" width="100" class-name="col-p3" label-class-name="col-p3" />
+      <el-table-column
+        v-if="hasRepo"
+        label="仓库"
+        prop="repo"
+        width="120"
+        class-name="col-p3"
+        label-class-name="col-p3"
+      />
+      <el-table-column v-if="mode === 'search'" label="状态" width="190">
+        <template #default="{ row }">
+          <template v-if="row.installed">
+            <span class="mono ver-old">{{ row.installed }}</span>
+            <span class="tag-done">已安装</span>
+          </template>
+          <span v-else class="tag-todo">未安装</span>
+        </template>
+      </el-table-column>
+      <el-table-column
+        v-if="hasArch"
+        label="架构"
+        prop="arch"
+        width="100"
+        class-name="col-p3"
+        label-class-name="col-p3"
+      />
       <el-table-column label="描述" prop="description" min-width="300" show-overflow-tooltip />
     </el-table>
 
-    <el-dialog v-model="showOutput" title="apt 输出" width="720px" top="6vh">
+    <el-dialog v-model="showOutput" :title="outputTitle" width="720px" top="6vh">
       <pre class="output">{{ output }}</pre>
     </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import http from "../api/http";
+import { pkgMetaSafe, type PkgMeta } from "../api/meta";
 
 interface Pkg {
   name: string;
   version: string;
   arch: string;
+  repo: string;
+  installed: string | null;
   description: string;
 }
+
+/** 搜索/列表的条数上限：与后端 clamp 范围（5000）留出余量 */
+const SEARCH_LIMIT = 300;
+const LIST_LIMIT = 2000;
 
 const mode = ref<"installed" | "upgradable" | "search">("installed");
 const keyword = ref("");
@@ -87,56 +149,147 @@ const loading = ref(false);
 const acting = ref(false);
 const showOutput = ref(false);
 const output = ref("");
+const hideInstalled = ref(false);
+const meta = ref<PkgMeta>({ family: "", pretty: "", manager: "", rolling: false });
+
+const rolling = computed(() => meta.value.rolling);
+/** 滚动更新页不提供逐包勾选：Arch 不支持部分升级 */
+const selectable = computed(() => !(mode.value === "upgradable" && rolling.value));
+const hasRepo = computed(() => rows.value.some((r) => !!r.repo));
+const hasArch = computed(() => rows.value.some((r) => !!r.arch));
+const displayRows = computed(() =>
+  mode.value === "search" && hideInstalled.value
+    ? rows.value.filter((r) => !r.installed)
+    : rows.value
+);
+/** 命中上限即视为被截断（后端按 limit 截断，不额外回传是否截断的标志） */
+const truncated = computed(() =>
+  mode.value === "search"
+    ? rows.value.length >= SEARCH_LIMIT
+    : mode.value === "installed" && rows.value.length >= LIST_LIMIT
+);
+
+const outputTitle = computed(() =>
+  meta.value.manager ? `${meta.value.manager} 输出` : "包管理器输出"
+);
+
+const modeHint = computed(() => {
+  if (mode.value === "installed") {
+    return "本机已安装的全部软件包";
+  }
+  if (mode.value === "upgradable") {
+    return rolling.value
+      ? `滚动更新 = 同步数据库 + 全量升级${meta.value.pretty ? `（${meta.value.pretty}）` : ""}，Arch 系不支持只升部分包`
+      : "只升级勾选的包，其余保持不变";
+  }
+  return rolling.value
+    ? `在本地软件源索引中搜索${meta.value.manager ? `（${meta.value.manager}）` : ""}，索引随「滚动更新」一并刷新`
+    : `在已同步的软件源中搜索${meta.value.manager ? `（${meta.value.manager}）` : ""}`;
+});
+
+const emptyText = computed(() => {
+  if (loading.value) {
+    return "";
+  }
+  if (mode.value === "upgradable") {
+    return rolling.value
+      ? "没有待更新的软件包（列表取自本地索引；若长期未同步过索引，列表为空属正常，直接点「滚动更新」即可）"
+      : "没有可升级的软件包";
+  }
+  if (mode.value === "search") {
+    return keyword.value.trim() ? "没有匹配的软件包" : "输入关键字后点查询";
+  }
+  return "没有查询到软件包";
+});
 
 async function load() {
+  if (mode.value === "search" && !keyword.value.trim()) {
+    rows.value = [];
+    ElMessage.warning("请输入搜索关键字");
+    return;
+  }
   loading.value = true;
   try {
     if (mode.value === "installed") {
       const { data } = await http.get("/packages", {
-        params: { filter: keyword.value || undefined },
+        params: { filter: keyword.value.trim() || undefined, limit: LIST_LIMIT },
       });
       rows.value = data;
     } else if (mode.value === "upgradable") {
       const { data } = await http.get("/packages/upgradable");
       rows.value = data;
     } else {
-      if (!keyword.value.trim()) {
-        ElMessage.warning("请输入搜索关键字");
-        return;
-      }
       const { data } = await http.get("/packages/search", {
-        params: { filter: keyword.value.trim() },
+        params: { filter: keyword.value.trim(), limit: SEARCH_LIMIT },
       });
       rows.value = data;
     }
   } catch (e: any) {
+    rows.value = [];
     ElMessage.error(e.response?.data?.error ?? "查询软件包失败");
   } finally {
     loading.value = false;
   }
 }
 
+// 切换标签页一律重新拉取：以前只有「可升级」会自动加载，
+// 切回「已安装」看到的是上一次清空后的空表（表现为 No Data）
 watch(mode, () => {
   selected.value = [];
-  if (mode.value === "upgradable") load();
-  else rows.value = [];
+  hideInstalled.value = false;
+  rows.value = [];
+  if (mode.value === "search" && !keyword.value.trim()) {
+    return;
+  }
+  load();
 });
 
-async function doUpdate() {
+/** 动作名 → 中文提示，失败提示里不出现英文动作标识 */
+const ACTION_LABEL: Record<string, string> = {
+  update: "刷新索引",
+  install: "安装",
+  upgrade: "升级",
+  sysupgrade: "滚动更新",
+  remove: "卸载",
+};
+
+async function doAction(action: string, names: string[], timeout: number) {
   acting.value = true;
   try {
-    const { data } = await http.post(
-      "/packages/action",
-      { action: "update", names: [] },
-      { timeout: 120000 }
-    );
+    const { data } = await http.post("/packages/action", { action, names }, { timeout });
     output.value = data.output;
     showOutput.value = true;
-    ElMessage.success("索引已刷新");
+    return true;
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error ?? "刷新索引失败");
+    ElMessage.error(e.response?.data?.error ?? `${ACTION_LABEL[action] ?? action}失败`);
+    return false;
   } finally {
     acting.value = false;
+  }
+}
+
+async function doUpdate() {
+  if (await doAction("update", [], 600000)) {
+    ElMessage.success("索引已刷新");
+    load();
+  }
+}
+
+/** Arch 全量滚动更新：同步数据库 + 升级所有包，一步到位 */
+async function doSysUpgrade() {
+  try {
+    await ElMessageBox.confirm(
+      `将同步软件源并升级全部已安装软件包${meta.value.pretty ? `（${meta.value.pretty}）` : ""}。` +
+        "Arch 系不支持只升一部分包，这是唯一受支持的全量升级方式，耗时可能较长。",
+      "滚动更新确认",
+      { type: "warning", confirmButtonText: "开始更新", cancelButtonText: "取消" }
+    );
+  } catch {
+    return;
+  }
+  if (await doAction("sysupgrade", [], 1800000)) {
+    ElMessage.success("滚动更新完成");
+    load();
   }
 }
 
@@ -150,21 +303,9 @@ async function doInstall() {
   } catch {
     return;
   }
-  acting.value = true;
-  try {
-    const { data } = await http.post(
-      "/packages/action",
-      { action: "install", names },
-      { timeout: 600000 }
-    );
-    output.value = data.output;
-    showOutput.value = true;
+  if (await doAction("install", names, 600000)) {
     ElMessage.success("安装完成");
     load();
-  } catch (e: any) {
-    ElMessage.error(e.response?.data?.error ?? "安装失败");
-  } finally {
-    acting.value = false;
   }
 }
 
@@ -178,21 +319,9 @@ async function doUpgrade() {
   } catch {
     return;
   }
-  acting.value = true;
-  try {
-    const { data } = await http.post(
-      "/packages/action",
-      { action: "upgrade", names },
-      { timeout: 600000 }
-    );
-    output.value = data.output;
-    showOutput.value = true;
+  if (await doAction("upgrade", names, 600000)) {
     ElMessage.success("升级完成");
     load();
-  } catch (e: any) {
-    ElMessage.error(e.response?.data?.error ?? "升级失败");
-  } finally {
-    acting.value = false;
   }
 }
 
@@ -207,28 +336,78 @@ async function doRemove() {
   } catch {
     return;
   }
-  acting.value = true;
-  try {
-    const { data } = await http.post(
-      "/packages/action",
-      { action: "remove", names },
-      { timeout: 600000 }
-    );
-    output.value = data.output;
-    showOutput.value = true;
+  if (await doAction("remove", names, 600000)) {
     ElMessage.success("卸载完成");
     load();
-  } catch (e: any) {
-    ElMessage.error(e.response?.data?.error ?? "卸载失败");
-  } finally {
-    acting.value = false;
   }
 }
 
-onMounted(load);
+onMounted(async () => {
+  // 先取发行版能力再渲染数据：Arch 的标签与按钮与 Debian 不同
+  meta.value = await pkgMetaSafe();
+  await load();
+});
 </script>
 
 <style scoped>
+.packages {
+  /* 比全局多出一行状态条的高度 */
+  --panel-table-height: calc(100vh - 196px);
+}
+
+.statusline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -4px 0 8px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.opt {
+  margin-left: 4px;
+}
+
+.count {
+  font-family: var(--panel-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.arrow {
+  margin: 0 6px;
+  color: var(--el-text-color-secondary);
+}
+
+/* 旧版本淡出、新版本加重：升级前后的对比一眼可辨 */
+.ver-old {
+  color: var(--el-text-color-secondary);
+}
+
+.ver-new {
+  color: var(--el-text-color-primary);
+  font-weight: 600;
+}
+
+.tag-done,
+.tag-todo {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 0 6px;
+  border-radius: var(--radius);
+  font-size: 11px;
+  line-height: 18px;
+  vertical-align: middle;
+}
+
+.tag-done {
+  color: var(--el-text-color-secondary);
+  box-shadow: inset 0 0 0 1px var(--el-text-color-secondary);
+}
+
+.tag-todo {
+  color: var(--el-text-color-placeholder);
+}
+
 .output {
   background: var(--el-bg-color);
   border-radius: var(--radius);
