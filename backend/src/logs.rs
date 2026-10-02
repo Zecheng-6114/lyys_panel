@@ -20,7 +20,10 @@ pub async fn journal(unit: Option<&str>, lines: u32) -> Result<String> {
         cmd.arg("-u");
         cmd.arg(u);
     }
-    let out = cmd.output().await.context("调用 journalctl 失败")?;
+    // P1-1：只读查询，预算 15s，输出上限 2 MiB
+    let out = crate::cmd::run(&mut cmd, crate::cmd::Budget::query(15))
+        .await
+        .context("调用 journalctl 失败")?;
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     // journalctl 输出是倒序的，反转行序恢复为时间正序
     let ordered: Vec<&str> = text.lines().rev().collect();
@@ -36,10 +39,10 @@ pub async fn tail_file(path: &str, lines: u32) -> Result<String> {
     if !p.starts_with("/var/log") || path.contains("..") {
         anyhow::bail!("仅允许读取 /var/log 下的日志文件");
     }
-    let out = Command::new("tail")
-        .args(["-n", &lines.to_string()])
-        .arg(&p)
-        .output()
+    // P1-1：只读查询，预算 15s，输出上限 2 MiB
+    let mut cmd = Command::new("tail");
+    cmd.args(["-n", &lines.to_string()]).arg(&p);
+    let out = crate::cmd::run(&mut cmd, crate::cmd::Budget::query(15))
         .await
         .context("调用 tail 失败")?;
     if !out.status.success() {

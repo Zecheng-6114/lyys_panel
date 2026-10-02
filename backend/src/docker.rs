@@ -9,7 +9,7 @@
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use tokio::process::Command;
-use tokio::time::{timeout, Duration};
+use tokio::time::Duration;
 
 /// Docker 环境状态。前端据此决定显示控制面板还是安装入口。
 #[derive(Serialize)]
@@ -94,12 +94,18 @@ const LIST_TIMEOUT: u64 = 20;
 const LONG_TIMEOUT: u64 = 900;
 
 /// 执行命令并返回 stdout。失败时 stderr 只写入日志，不进错误消息（P1-3）。
+/// P1-1：docker / docker-compose 业务命令走 Docker 组串行，其余探测无互斥。
 async fn run(program: &str, args: &[&str], secs: u64, what: &str) -> Result<String> {
-    let fut = Command::new(program).args(args).output();
-    let res = timeout(Duration::from_secs(secs), fut)
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    let budget = if matches!(program, "docker" | "docker-compose") {
+        crate::cmd::Budget::docker(secs)
+    } else {
+        crate::cmd::Budget::query(secs)
+    };
+    let out = crate::cmd::run(&mut cmd, budget)
         .await
-        .map_err(|_| anyhow::anyhow!("{what}超时（{} 秒）", secs))?;
-    let out = res.context(format!("调用 {program} 失败，请确认已安装并启动 Docker"))?;
+        .with_context(|| format!("调用 {program} 失败，请确认已安装并启动 Docker"))?;
     if !out.status.success() {
         // P1-3：命令 stderr 只进日志，响应体不回显（防内部细节泄露）
         tracing::warn!(
@@ -118,11 +124,11 @@ async fn docker(args: &[&str], secs: u64) -> Result<String> {
 
 /// systemd 单元是否处于 active 状态
 async fn unit_active(unit: &str) -> bool {
-    Command::new("systemctl")
-        .args(["is-active", unit])
-        .output()
+    let mut cmd = Command::new("systemctl");
+    cmd.args(["is-active", unit]);
+    crate::cmd::run(&mut cmd, crate::cmd::Budget::query(10))
         .await
-        .map(|o| o.status.success())
+        .map(|o| o.success())
         .unwrap_or(false)
 }
 
@@ -131,7 +137,9 @@ pub async fn status() -> Result<DockerStatus> {
     let daemon = unit_active("docker").await;
 
     // 1) docker 命令在不在
-    let version = match Command::new("docker").arg("--version").output().await {
+    let mut cmd = Command::new("docker");
+    cmd.arg("--version");
+    let version = match crate::cmd::run(&mut cmd, crate::cmd::Budget::query(10)).await {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         _ => {
             // Debian 把 docker-cli 列为 docker.io 的「推荐」而非「依赖」，
@@ -156,14 +164,10 @@ pub async fn status() -> Result<DockerStatus> {
 
     // 2) daemon 能不能连上。docker info 需要真正与 daemon 通信，
     //    比 ps 更早失败，是判断「装了但没启动」的可靠依据。
-    let info = timeout(
-        Duration::from_secs(LIST_TIMEOUT),
-        Command::new("docker")
-            .args(["info", "--format", "{{.ServerVersion}}"])
-            .output(),
-    )
-    .await;
-    let running = matches!(&info, Ok(Ok(o)) if o.status.success());
+    let mut cmd = Command::new("docker");
+    cmd.args(["info", "--format", "{{.ServerVersion}}"]);
+    let info = crate::cmd::run(&mut cmd, crate::cmd::Budget::docker(LIST_TIMEOUT)).await;
+    let running = matches!(&info, Ok(o) if o.status.success());
     let error = if running {
         String::new()
     } else {
@@ -193,20 +197,20 @@ pub async fn status() -> Result<DockerStatus> {
 /// 所以通常要走回退的独立 `docker-compose` 命令 —— 注意它在 Debian 里同样是
 /// v2 内核（只是不以插件形式存在），`ls` 之类的子命令一样能用。
 async fn compose_prefix() -> Result<Vec<String>> {
-    if Command::new("docker")
-        .args(["compose", "version", "--short"])
-        .output()
+    let mut c1 = Command::new("docker");
+    c1.args(["compose", "version", "--short"]);
+    if crate::cmd::run(&mut c1, crate::cmd::Budget::query(10))
         .await
-        .map(|o| o.status.success())
+        .map(|o| o.success())
         .unwrap_or(false)
     {
         return Ok(vec!["docker".to_string(), "compose".to_string()]);
     }
-    if Command::new("docker-compose")
-        .arg("--version")
-        .output()
+    let mut c2 = Command::new("docker-compose");
+    c2.arg("--version");
+    if crate::cmd::run(&mut c2, crate::cmd::Budget::query(10))
         .await
-        .map(|o| o.status.success())
+        .map(|o| o.success())
         .unwrap_or(false)
     {
         return Ok(vec!["docker-compose".to_string()]);
@@ -542,9 +546,9 @@ pub async fn compose_action(name: &str, act: Action) -> Result<String> {
     if !dir.is_empty() {
         cmd.current_dir(&dir);
     }
-    let out = timeout(Duration::from_secs(LONG_TIMEOUT), cmd.output())
+    // P1-1：compose 业务命令走 Docker 组串行，预算 LONG_TIMEOUT
+    let out = crate::cmd::run(&mut cmd, crate::cmd::Budget::docker(LONG_TIMEOUT))
         .await
-        .map_err(|_| anyhow::anyhow!("compose 操作超时（{} 秒）", LONG_TIMEOUT))?
         .context("调用 compose 失败")?;
     if !out.status.success() {
         // P1-3：命令 stderr 只进日志，响应体不回显
@@ -647,9 +651,10 @@ pub async fn install() -> Result<String> {
     log.push('\n');
 
     // 启动守护进程：docker.io 装完默认已 enable，这里保证它现在就在跑
-    let out = Command::new("systemctl")
-        .args(["enable", "--now", "docker"])
-        .output()
+    // P1-1：安装路径的 systemctl 写操作给 60s（后台启动 daemon 可能慢于常规写操作）
+    let mut cmd = Command::new("systemctl");
+    cmd.args(["enable", "--now", "docker"]);
+    let out = crate::cmd::run(&mut cmd, crate::cmd::Budget::systemd(60))
         .await
         .context("调用 systemctl 失败")?;
     log.push_str("\n=== 启动 docker 服务 ===\n");
@@ -664,11 +669,11 @@ pub async fn install() -> Result<String> {
     }
 
     // 装完自检：CLI 与 daemon 都在才算成功，否则明确告诉用户缺什么
-    if !Command::new("docker")
-        .arg("--version")
-        .output()
+    let mut probe = Command::new("docker");
+    probe.arg("--version");
+    if !crate::cmd::run(&mut probe, crate::cmd::Budget::query(10))
         .await
-        .map(|o| o.status.success())
+        .map(|o| o.success())
         .unwrap_or(false)
     {
         bail!("安装结束后仍未找到 docker 命令，请检查上方安装输出");

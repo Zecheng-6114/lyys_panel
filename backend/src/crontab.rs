@@ -61,9 +61,10 @@ impl CronEntry {
 
 /// 读取当前 root crontab 原始文本
 async fn read_raw() -> anyhow::Result<String> {
-    let out = Command::new("crontab")
-        .arg("-l")
-        .output()
+    // P1-1：只读查询，预算 10s
+    let mut cmd = Command::new("crontab");
+    cmd.arg("-l");
+    let out = crate::cmd::run(&mut cmd, crate::cmd::Budget::query(10))
         .await
         .context("调用 crontab 失败")?;
     // 没有 crontab 时返回非 0，视为空
@@ -75,27 +76,12 @@ async fn read_raw() -> anyhow::Result<String> {
 
 /// 写回 root crontab
 async fn write_raw(text: &str) -> anyhow::Result<()> {
-    let mut child = Command::new("crontab")
-        .arg("-")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .context("启动 crontab 失败")?;
-    use tokio::io::AsyncWriteExt;
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(text.as_bytes())
+    // P1-1：写回走 stdin 通道 + 10s 预算，由 cmd::run_with_stdin 统一收尾
+    let mut cmd = Command::new("crontab");
+    cmd.arg("-");
+    let out = crate::cmd::run_with_stdin(&mut cmd, text.as_bytes(), crate::cmd::Budget::query(10))
         .await
         .context("写入 crontab 失败")?;
-    child.stdin.as_mut().unwrap().flush().await.ok();
-    drop(child.stdin.take());
-    let out = child
-        .wait_with_output()
-        .await
-        .context("等待 crontab 失败")?;
     if !out.status.success() {
         // P1-3：命令 stderr 只进日志，响应体不回显（防内部细节泄露）
         tracing::warn!(

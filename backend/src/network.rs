@@ -4,9 +4,10 @@ use tokio::process::Command;
 
 /// 执行命令并解析 JSON 输出
 async fn json_cmd(program: &str, args: &[&str]) -> anyhow::Result<Value> {
-    let out = Command::new(program)
-        .args(args)
-        .output()
+    // P1-1：只读探测，预算 10s，输出上限 2 MiB
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    let out = crate::cmd::run(&mut cmd, crate::cmd::Budget::query(10))
         .await
         .with_context(|| format!("调用 {program} 失败"))?;
     if !out.status.success() {
@@ -34,9 +35,10 @@ pub async fn routes() -> anyhow::Result<Value> {
 
 /// TCP 连接（解析 ss 文本输出；此版本 ss 不支持 -j）
 pub async fn connections() -> anyhow::Result<Vec<Value>> {
-    let out = Command::new("ss")
-        .args(["-t", "-a", "-n", "-p"])
-        .output()
+    // P1-1：只读探测，预算 10s
+    let mut cmd = Command::new("ss");
+    cmd.args(["-t", "-a", "-n", "-p"]);
+    let out = crate::cmd::run(&mut cmd, crate::cmd::Budget::query(10))
         .await
         .context("调用 ss 失败")?;
     if !out.status.success() {

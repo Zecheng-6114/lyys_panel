@@ -4,6 +4,7 @@ mod alerts;
 mod api;
 mod auth;
 mod backup;
+mod cmd; // P1-1 统一命令执行器：超时 + 分组互斥 + 输出上限，全后端唯一的外部进程出口
 mod crontab;
 mod db;
 mod distro;

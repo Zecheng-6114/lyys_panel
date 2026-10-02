@@ -9,7 +9,7 @@
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use tokio::process::Command;
-use tokio::time::{timeout, Duration};
+use tokio::time::Duration;
 
 /// 单条命令超时（秒）
 const CMD_TIMEOUT: u64 = 20;
@@ -34,12 +34,11 @@ fn check_unit_name(name: &str) -> Result<()> {
 /// 读取服务 unit 文件内容（含 drop-in 覆盖片段，systemctl cat 只读不写）。
 pub async fn unit_file(name: &str) -> Result<String> {
     check_unit_name(name)?;
-    let fut = Command::new("systemctl")
-        .args(["cat", "--no-pager", name])
-        .output();
-    let out = timeout(Duration::from_secs(CMD_TIMEOUT), fut)
+    // P1-1：只读查询，预算 20s
+    let mut cmd = Command::new("systemctl");
+    cmd.args(["cat", "--no-pager", name]);
+    let out = crate::cmd::run(&mut cmd, crate::cmd::Budget::query(CMD_TIMEOUT))
         .await
-        .map_err(|_| anyhow::anyhow!("读取 unit 文件超时（{} 秒）", CMD_TIMEOUT))?
         .context("调用 systemctl 失败，请确认系统使用 systemd")?;
     if !out.status.success() {
         // P1-3：stderr（可能含绝对路径等细节）只进日志
@@ -84,8 +83,10 @@ pub struct SmartReport {
 /// 任何一块盘探测失败都不影响其它盘，仅该盘字段回 UNKNOWN。
 pub async fn smart_report() -> SmartReport {
     // 1) smartctl 是否可用
-    let probe = Command::new("smartctl").arg("--version").output().await;
-    let smartctl_ok = matches!(&probe, Ok(o) if o.status.success());
+    let mut probe = Command::new("smartctl");
+    probe.arg("--version");
+    let probe = crate::cmd::run(&mut probe, crate::cmd::Budget::query(10)).await;
+    let smartctl_ok = matches!(&probe, Ok(o) if o.success());
     if !smartctl_ok {
         tracing::info!("smartctl 不可用，SMART 健康功能按未安装降级");
         return SmartReport {
@@ -96,14 +97,10 @@ pub async fn smart_report() -> SmartReport {
     }
 
     // 2) 枚举物理磁盘（lsblk 只取 type=disk，忽略分区/loop）
-    let lsblk = timeout(
-        Duration::from_secs(CMD_TIMEOUT),
-        Command::new("lsblk")
-            .args(["-d", "-n", "-o", "NAME,TYPE"])
-            .output(),
-    )
-    .await;
-    let Ok(Ok(out)) = lsblk else {
+    let mut lsblk_cmd = Command::new("lsblk");
+    lsblk_cmd.args(["-d", "-n", "-o", "NAME,TYPE"]);
+    let lsblk = crate::cmd::run(&mut lsblk_cmd, crate::cmd::Budget::query(CMD_TIMEOUT)).await;
+    let Ok(out) = lsblk else {
         tracing::warn!("lsblk 不可用，无法枚举磁盘");
         return SmartReport {
             available: false,
@@ -151,10 +148,9 @@ async fn probe_disk(dev: &str) -> DiskSmart {
         temperature: None,
         powered_on_hours: None,
     };
-    let fut = Command::new("smartctl")
-        .args(["--json", "-H", "-A", &format!("/dev/{dev}")])
-        .output();
-    let Ok(Ok(out)) = timeout(Duration::from_secs(CMD_TIMEOUT), fut).await else {
+    let mut cmd = Command::new("smartctl");
+    cmd.args(["--json", "-H", "-A", &format!("/dev/{dev}")]);
+    let Ok(out) = crate::cmd::run(&mut cmd, crate::cmd::Budget::query(CMD_TIMEOUT)).await else {
         tracing::warn!("smartctl 探测 /dev/{dev} 超时或启动失败");
         return unknown(dev);
     };

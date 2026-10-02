@@ -72,17 +72,19 @@ const PANEL_UNIT: &str = "lyys-panel";
 /// 执行电源级操作。面板重启走 `systemctl restart lyys-panel`；整机
 /// 重启/关机走 `systemctl reboot|poweroff`（root 运行，无需 polkit 认证）。
 pub async fn power(act: PowerAction) -> Result<serde_json::Value> {
-    let out = match act.systemctl_arg() {
-        Some(verb) => Command::new("systemctl").arg(verb).output().await,
+    // P1-1：电源类写操作走 Systemd 组串行，预算 20s
+    let mut cmd = Command::new("systemctl");
+    match act.systemctl_arg() {
+        Some(verb) => {
+            cmd.arg(verb);
+        }
         None => {
-            Command::new("systemctl")
-                .arg("restart")
-                .arg(PANEL_UNIT)
-                .output()
-                .await
+            cmd.arg("restart").arg(PANEL_UNIT);
         }
     }
-    .context("执行 systemctl 失败")?;
+    let out = crate::cmd::run(&mut cmd, crate::cmd::Budget::systemd(20))
+        .await
+        .context("执行 systemctl 失败")?;
     Ok(json!({
         "ok": out.status.success(),
         "action": act.as_str(),
@@ -92,16 +94,17 @@ pub async fn power(act: PowerAction) -> Result<serde_json::Value> {
 
 /// 列出所有已加载的 systemd 单元（type=service）
 pub async fn list() -> Result<Vec<ServiceInfo>> {
-    let out = Command::new("systemctl")
-        .args([
-            "list-units",
-            "--type=service",
-            "--all",
-            "--no-legend",
-            "--plain",
-            "--output=json",
-        ])
-        .output()
+    // P1-1：只读列表查询，预算 15s
+    let mut cmd = Command::new("systemctl");
+    cmd.args([
+        "list-units",
+        "--type=service",
+        "--all",
+        "--no-legend",
+        "--plain",
+        "--output=json",
+    ]);
+    let out = crate::cmd::run(&mut cmd, crate::cmd::Budget::query(15))
         .await
         .context("调用 systemctl 失败，请确认系统使用 systemd")?;
     if !out.status.success() {
@@ -143,15 +146,15 @@ pub async fn list() -> Result<Vec<ServiceInfo>> {
 
 /// 文本模式回退解析（兼容不支持 json 输出的 systemctl）
 async fn list_from_text() -> Result<Vec<ServiceInfo>> {
-    let out = Command::new("systemctl")
-        .args([
-            "list-units",
-            "--type=service",
-            "--all",
-            "--no-legend",
-            "--plain",
-        ])
-        .output()
+    let mut cmd = Command::new("systemctl");
+    cmd.args([
+        "list-units",
+        "--type=service",
+        "--all",
+        "--no-legend",
+        "--plain",
+    ]);
+    let out = crate::cmd::run(&mut cmd, crate::cmd::Budget::query(15))
         .await
         .context("调用 systemctl 失败")?;
     let text = String::from_utf8_lossy(&out.stdout);
@@ -186,10 +189,10 @@ pub async fn action(name: &str, act: Action) -> Result<serde_json::Value> {
     {
         anyhow::bail!("非法服务名");
     }
-    let out = Command::new("systemctl")
-        .arg(act.as_str())
-        .arg(name)
-        .output()
+    // P1-1：服务写操作走 Systemd 组串行，预算 20s
+    let mut cmd = Command::new("systemctl");
+    cmd.arg(act.as_str()).arg(name);
+    let out = crate::cmd::run(&mut cmd, crate::cmd::Budget::systemd(20))
         .await
         .context("执行 systemctl 失败")?;
     Ok(json!({
