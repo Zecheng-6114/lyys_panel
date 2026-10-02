@@ -7,40 +7,91 @@
         自定义卡片
       </button>
     </div>
-    <div class="cards">
-      <!-- 4.2 卡片按用户配置的顺序与显隐渲染；未定制时全部按默认顺序 -->
-      <div v-for="card in visibleCards" :key="card.id" class="card">
-        <div class="card-label">{{ card.label }}</div>
-        <div class="card-value">{{ card.value }}</div>
-        <div class="bar"><i :style="{ width: card.bar + '%' }" /></div>
+    <div ref="gridEl" class="cards">
+      <!-- 4.2 卡片按用户配置的顺序与尺寸渲染（先到先得，自动排列）。
+           按住卡片拖动换位；右下角拖拽改尺寸；松手即存服务端。 -->
+      <div
+        v-for="(card, i) in visibleCards"
+        :key="card.id"
+        class="card"
+        :class="{
+          'card--lg': cellH(card) > 1,
+          'card--dragging': drag.id === card.id,
+          'card--drop': dropIndex === i && drag.id !== null && drag.id !== card.id,
+        }"
+        :data-index="i"
+        :style="{
+          gridColumn: `span ${cellW(card)}`,
+          gridRow: `span ${cellH(card)}`,
+          // 入场交错：靠内联 delay 而非 CSS 变量，省掉一层自定义属性
+          animationDelay: `${i * 35}ms`,
+          // 拖拽中卡片跟着指针走（不改布局，只做视觉位移）
+          transform:
+            drag.id === card.id ? `translate(${drag.dx}px, ${drag.dy}px)` : undefined,
+        }"
+        @pointerdown="onCardPointerDown($event, i)"
+      >
+        <!-- 趋势图卡：头部放标题与时间窗，图表撑满剩余高度 -->
+        <template v-if="card.isChart">
+          <div class="chart-head">
+            <span class="card-label">{{ card.label }}（{{ rangeLabel }}）</span>
+            <div class="range-group">
+              <button
+                v-for="r in RANGES"
+                :key="r.key"
+                class="mini-btn mini-btn--sm"
+                :class="{ 'mini-btn--on': rangeKey === r.key }"
+                type="button"
+                @click="setRange(r.key)"
+              >
+                {{ r.label }}
+              </button>
+            </div>
+          </div>
+          <div id="dash-chart" class="chart" />
+        </template>
+        <template v-else>
+          <div class="card-label">{{ card.label }}</div>
+          <div class="card-value">{{ card.value }}</div>
+          <!-- 进度条只表达「距离上限还有多少」：有上限的指标才画槽，
+               速率/计数/静态信息不画（详见 .bar--none 的说明） -->
+          <div class="bar" :class="{ 'bar--none': card.bar === null }">
+            <i v-if="card.bar !== null" :style="{ width: card.bar + '%' }" />
+          </div>
+        </template>
+        <!-- 右下角缩放柄。触摸设备上它也是唯一安全的拖拽起点：
+             整卡拖会跟页面滚动抢手势，只有手柄设了 touch-action:none。 -->
+        <div
+          class="card-resize"
+          role="button"
+          tabindex="-1"
+          :aria-label="`拖动调整「${card.label}」的大小`"
+          @pointerdown="onResizeStart($event, i)"
+        />
       </div>
     </div>
 
-    <div class="chart-card">
-      <div class="chart-head">
-        <div class="chart-title">系统负载趋势（{{ rangeLabel }}）</div>
-        <div class="range-group">
-          <button
-            v-for="r in RANGES"
-            :key="r.key"
-            class="mini-btn mini-btn--sm"
-            :class="{ 'mini-btn--on': rangeKey === r.key }"
-            type="button"
-            @click="setRange(r.key)"
-          >
-            {{ r.label }}
-          </button>
-        </div>
-      </div>
-      <div ref="chartEl" class="chart" />
-    </div>
-
-    <!-- 4.2 卡片显隐/排序配置 -->
-    <el-dialog v-model="customOpen" title="自定义仪表盘卡片" width="360px">
+    <!-- 4.2 卡片显隐/排序/尺寸配置 -->
+    <el-dialog v-model="customOpen" title="自定义仪表盘卡片" width="420px">
       <div class="custom-list">
-        <div v-for="(c, i) in draftCards" :key="c" class="custom-row">
-          <el-checkbox v-model="draftOn[c]" :label="CARD_LABELS[c]" />
+        <div v-for="(c, i) in draftCards" :key="c.id" class="custom-row">
+          <el-checkbox v-model="draftOn[c.id]" :label="CARD_LABELS[c.id]" />
           <div class="custom-btns">
+            <!-- 尺寸：小 / 宽 / 大 / 整宽 / 通栏。只对勾选中的卡片有意义，未勾选时置灰 -->
+            <el-select
+              :model-value="sizeKey(c)"
+              size="small"
+              class="size-select"
+              :disabled="!draftOn[c.id]"
+              @update:model-value="(v: string) => setSize(i, v)"
+            >
+              <el-option
+                v-for="s in CARD_SIZES"
+                :key="s.key"
+                :label="s.label"
+                :value="s.key"
+              />
+            </el-select>
             <button
               class="mini-btn mini-btn--sm"
               type="button"
@@ -62,7 +113,9 @@
           </div>
         </div>
       </div>
-      <div class="custom-hint">取消勾选即隐藏卡片；↑↓ 调整展示顺序</div>
+      <div class="custom-hint">
+        取消勾选即隐藏；↑↓ 调整顺序；右侧选择卡片大小 —— 也可以直接在仪表盘上拖
+      </div>
       <template #footer>
         <button class="mini-btn" type="button" @click="resetCustom">恢复默认</button>
         <button class="mini-btn" type="button" :disabled="customSaving" @click="saveCustom">
@@ -74,7 +127,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onBeforeUnmount, reactive, ref } from "vue";
+import { computed, nextTick, onMounted, onBeforeUnmount, reactive, ref, watch } from "vue";
 // 按需引入 echarts：全量引入会让本页 chunk 多出约 700KB
 import * as echarts from "echarts/core";
 import { LineChart } from "echarts/charts";
@@ -87,6 +140,13 @@ import {
   useDashboardStore,
   DASH_CARDS,
   CARD_LABELS,
+  CARD_SIZES,
+  ROW_H,
+  GAP,
+  MAX_CARD_W,
+  MAX_CARD_H,
+  defaultSize,
+  type CardConfig,
   type DashCard,
 } from "../stores/dashboard";
 
@@ -114,6 +174,14 @@ interface Snapshot {
   swap_used: number;
   swap_total: number;
   procs: number;
+  disk_read_per_sec: number;
+  disk_write_per_sec: number;
+  disk_partitions: number;
+  disk_worst_mount: string;
+  disk_worst_pct: number;
+  arch: string;
+  distro: string;
+  kernel: string;
 }
 interface MetricPoint {
   ts: number;
@@ -142,6 +210,14 @@ const snap = reactive<Snapshot>({
   swap_used: 0,
   swap_total: 0,
   procs: 0,
+  disk_read_per_sec: 0,
+  disk_write_per_sec: 0,
+  disk_partitions: 0,
+  disk_worst_mount: "",
+  disk_worst_pct: 0,
+  arch: "",
+  distro: "",
+  kernel: "",
 });
 const history = ref<MetricPoint[]>([]);
 const chartEl = ref<HTMLElement>();
@@ -194,14 +270,22 @@ interface CardView {
   id: DashCard;
   label: string;
   value: string;
-  bar: number;
+  /// 进度条占比 0–100；`null` = 该指标没有上限，不画进度条
+  bar: number | null;
+  /// 栅格跨度，来自用户配置
+  w: number;
+  h: number;
+  /// 趋势图卡片：渲染 ECharts 容器而不是数值
+  isChart?: boolean;
 }
 
-/// 展示顺序 = 配置顺序（null 时用默认顺序）；内容始终取实时快照
+/// 展示顺序与尺寸都来自配置；未定制时按默认顺序与各自的默认尺寸。
+/// 内容始终取实时快照。
 const visibleCards = computed<CardView[]>(() => {
-  const order = dash.cards ?? [...DASH_CARDS];
-  return order.map((id) => {
-    const base = { id, label: CARD_LABELS[id] };
+  const cfg: CardConfig[] =
+    dash.cards ?? DASH_CARDS.map((id) => ({ id, ...defaultSize(id) }));
+  return cfg.map(({ id, w, h }) => {
+    const base = { id, label: CARD_LABELS[id], w, h };
     switch (id) {
       case "cpu":
         return { ...base, value: `${snap.cpu.toFixed(1)}%`, bar: snap.cpu };
@@ -221,7 +305,8 @@ const visibleCards = computed<CardView[]>(() => {
         return {
           ...base,
           value: `↓${fmtBytes(snap.net_in_per_sec)}/s ↑${fmtBytes(snap.net_out_per_sec)}/s`,
-          bar: 0,
+          // 速率没有上限，进度条无从表达
+          bar: null,
         };
       case "load":
         return {
@@ -230,7 +315,7 @@ const visibleCards = computed<CardView[]>(() => {
           bar: pct(snap.load1, snap.cpu_cores),
         };
       case "uptime":
-        return { ...base, value: fmtUptime(snap.uptime), bar: 0 };
+        return { ...base, value: fmtUptime(snap.uptime), bar: null };
       case "swap":
         return {
           ...base,
@@ -238,10 +323,40 @@ const visibleCards = computed<CardView[]>(() => {
             snap.swap_total > 0
               ? `${fmtBytes(snap.swap_used)} / ${fmtBytes(snap.swap_total)}`
               : "未启用",
-          bar: snap.swap_total > 0 ? pct(snap.swap_used, snap.swap_total) : 0,
+          // 未启用交换区时没有「占比」可言，不该画一条空槽
+          bar: snap.swap_total > 0 ? pct(snap.swap_used, snap.swap_total) : null,
         };
       case "procs":
-        return { ...base, value: String(snap.procs), bar: 0 };
+        return { ...base, value: String(snap.procs), bar: null };
+      case "diskio":
+        return {
+          ...base,
+          value: `读 ${fmtBytes(snap.disk_read_per_sec)}/s 写 ${fmtBytes(snap.disk_write_per_sec)}/s`,
+          // 同网络：速率无上限
+          bar: null,
+        };
+      case "partitions":
+        return {
+          ...base,
+          // 进度条走最紧张分区的占用率，而不是聚合值
+          value: snap.disk_partitions
+            ? `${snap.disk_partitions} 个 · ${snap.disk_worst_mount} ${Math.round(snap.disk_worst_pct)}%`
+            : "无分区",
+          bar: snap.disk_worst_pct,
+        };
+      case "cores":
+        return { ...base, value: `${snap.cpu_cores} 核 · ${snap.arch}`, bar: null };
+      case "sysinfo":
+        return {
+          ...base,
+          // 内核串形如 `6.6.66-microsoft-standard-WSL2`，卡片放不下，
+          // 只取破折号前的主版本号 —— 看内核主要就看这三个数字
+          value: `${snap.distro || "未知"} · ${snap.kernel.split("-")[0] || "—"}`,
+          bar: null,
+        };
+      case "chart":
+        // 图表卡没有数值与进度条，模板会走另一个分支渲染 ECharts 容器
+        return { ...base, value: "", bar: null, isChart: true };
     }
   });
 });
@@ -250,17 +365,37 @@ const visibleCards = computed<CardView[]>(() => {
 
 const customOpen = ref(false);
 const customSaving = ref(false);
-/// 弹窗编辑态：勾选状态 + 顺序（含未勾选项，便于重新勾上时知道插回哪）
-const draftCards = ref<DashCard[]>([]);
+/// 弹窗编辑态：全部卡片（含隐藏的）+ 勾选状态。
+/// 列表含未勾选项，便于重新勾上时知道插回哪个位置、用什么尺寸。
+const draftCards = ref<CardConfig[]>([]);
 const draftOn = reactive<Record<string, boolean>>({});
 
 function openCustom() {
-  const order = dash.cards ?? [...DASH_CARDS];
-  // 编辑态按"全部卡片"列出：勾选的在前（按配置顺序），未勾选的追加在后
-  const rest = DASH_CARDS.filter((c) => !order.includes(c));
-  draftCards.value = [...order, ...rest];
-  for (const c of DASH_CARDS) draftOn[c] = order.includes(c);
+  const cfg: CardConfig[] =
+    dash.cards ?? DASH_CARDS.map((id) => ({ id, ...defaultSize(id) }));
+  const configured = new Set(cfg.map((c) => c.id));
+  // 编辑态按"全部卡片"列出：已配置的在前（保持其顺序与尺寸，故要浅拷贝），
+  // 未配置的追加在后并用各自默认尺寸
+  const rest: CardConfig[] = DASH_CARDS.filter((id) => !configured.has(id)).map(
+    (id) => ({ id, ...defaultSize(id) }),
+  );
+  draftCards.value = [...cfg.map((c) => ({ ...c })), ...rest];
+  for (const id of DASH_CARDS) draftOn[id] = configured.has(id);
   customOpen.value = true;
+}
+
+/// 当前尺寸对应的档位 key；不在档位里的组合按「小」回显
+function sizeKey(c: CardConfig): string {
+  const hit = CARD_SIZES.find((s) => s.w === c.w && s.h === c.h);
+  return hit ? hit.key : CARD_SIZES[0].key;
+}
+
+function setSize(i: number, key: string) {
+  const size = CARD_SIZES.find((s) => s.key === key);
+  if (!size) return;
+  // 就地改属性即可：draftCards 是 ref 包着的数组，元素本身是响应式的
+  draftCards.value[i].w = size.w;
+  draftCards.value[i].h = size.h;
 }
 
 function move(i: number, dir: -1 | 1) {
@@ -272,7 +407,7 @@ function move(i: number, dir: -1 | 1) {
 }
 
 async function saveCustom() {
-  const picked = draftCards.value.filter((c) => draftOn[c]);
+  const picked = draftCards.value.filter((c) => draftOn[c.id]);
   if (!picked.length) {
     ElMessage.warning("至少保留一张卡片");
     return;
@@ -302,6 +437,165 @@ async function resetCustom() {
   } finally {
     customSaving.value = false;
   }
+}
+
+// ---------- 拖拽重排与缩放（鼠标直接操作） ----------
+
+const gridEl = ref<HTMLElement>();
+
+/// 拖拽态：正在拖的卡片 + 相对起点的位移（只做视觉跟随，不改布局）
+const drag = reactive({ id: null as DashCard | null, from: -1, dx: 0, dy: 0 });
+/// 指针悬停到的卡片索引；-1 表示没落在任何卡片上
+const dropIndex = ref(-1);
+/// 缩放态：w/h 是起点值，curW/curH 是拖动过程中的实时预览值
+const resize = reactive({
+  id: null as DashCard | null,
+  x: 0,
+  y: 0,
+  w: 1,
+  h: 1,
+  curW: 1,
+  curH: 1,
+});
+let pointerStart = { x: 0, y: 0 };
+
+function clamp(v: number, lo: number, hi: number) {
+  return Math.min(hi, Math.max(lo, v));
+}
+
+/// 栅格当前列数（窄屏是 2 列）。从 computed 的像素列表数出来，
+/// 不去硬编码断点 —— 断点改了这一行不用跟着改。
+function gridCols(): number {
+  if (!gridEl.value) return 4;
+  const cols = getComputedStyle(gridEl.value).gridTemplateColumns;
+  return cols.split(" ").filter(Boolean).length || 4;
+}
+
+/// 单元格宽度（含一个间距）：把指针的像素位移换算成列数
+function colWidth(): number {
+  if (!gridEl.value) return 0;
+  const n = gridCols();
+  return (gridEl.value.clientWidth - GAP * (n - 1)) / n;
+}
+
+/// 渲染用的跨度：正在缩放的那张卡走实时预览值
+function cellW(c: CardView) {
+  return resize.id === c.id ? resize.curW : c.w;
+}
+function cellH(c: CardView) {
+  return resize.id === c.id ? resize.curH : c.h;
+}
+
+/// 当前生效的配置（未定制时按默认顺序 + 各自默认尺寸现生成一份）
+function currentConfig(): CardConfig[] {
+  return dash.cards
+    ? dash.cards.map((c) => ({ ...c }))
+    : DASH_CARDS.map((id) => ({ id, ...defaultSize(id) }));
+}
+
+async function saveLayout(cfg: CardConfig[]) {
+  try {
+    await dash.save(cfg);
+    // 尺寸或顺序变了，图表容器也跟着变，等 DOM 更新后重算画布
+    await nextTick();
+    chart?.resize();
+  } catch (e: unknown) {
+    const err = e as { response?: { data?: { error?: string } } };
+    ElMessage.error(err.response?.data?.error ?? "保存布局失败");
+  }
+}
+
+function onCardPointerDown(e: PointerEvent, i: number) {
+  // 触摸设备上整卡拖拽会跟页面滚动抢手势，那里只认右下角手柄
+  if (e.pointerType !== "mouse") return;
+  e.preventDefault();
+  drag.id = visibleCards.value[i].id;
+  drag.from = i;
+  drag.dx = 0;
+  drag.dy = 0;
+  dropIndex.value = i;
+  pointerStart = { x: e.clientX, y: e.clientY };
+  window.addEventListener("pointermove", onPointerMove);
+  window.addEventListener("pointerup", onPointerUp, { once: true });
+}
+
+function onResizeStart(e: PointerEvent, i: number) {
+  e.preventDefault();
+  e.stopPropagation();
+  const c = visibleCards.value[i];
+  resize.id = c.id;
+  resize.x = e.clientX;
+  resize.y = e.clientY;
+  resize.w = c.w;
+  resize.h = c.h;
+  resize.curW = c.w;
+  resize.curH = c.h;
+  pointerStart = { x: e.clientX, y: e.clientY };
+  window.addEventListener("pointermove", onPointerMove);
+  window.addEventListener("pointerup", onPointerUp, { once: true });
+}
+
+function onPointerMove(e: PointerEvent) {
+  if (drag.id !== null) {
+    drag.dx = e.clientX - pointerStart.x;
+    drag.dy = e.clientY - pointerStart.y;
+    // 被拖的卡片设了 pointer-events:none，这里的命中会穿到它下面的卡片
+    const under = document.elementFromPoint(e.clientX, e.clientY);
+    const cardEl = under?.closest<HTMLElement>(".card");
+    const idx = cardEl?.dataset.index;
+    if (idx !== undefined) dropIndex.value = Number(idx);
+    return;
+  }
+  if (resize.id !== null) {
+    const dw = Math.round((e.clientX - resize.x) / (colWidth() + GAP));
+    const dh = Math.round((e.clientY - resize.y) / (ROW_H + GAP));
+    // 上限与后端校验同源：宽度是栅格列数，高度 3 行防滥用
+    resize.curW = clamp(resize.w + dw, 1, MAX_CARD_W);
+    resize.curH = clamp(resize.h + dh, 1, MAX_CARD_H);
+  }
+}
+
+async function onPointerUp() {
+  window.removeEventListener("pointermove", onPointerMove);
+
+  // 拖拽落位：把卡片从原索引搬到落点索引；没挪动就什么都不做
+  if (
+    drag.id !== null &&
+    drag.from >= 0 &&
+    dropIndex.value >= 0 &&
+    dropIndex.value !== drag.from
+  ) {
+    const from = drag.from;
+    const to = dropIndex.value;
+    drag.id = null;
+    dropIndex.value = -1;
+    const cfg = currentConfig();
+    const [moved] = cfg.splice(from, 1);
+    cfg.splice(to, 0, moved);
+    await saveLayout(cfg);
+    return;
+  }
+
+  // 缩放落位：尺寸没变就不必打扰服务端
+  if (resize.id !== null) {
+    const id = resize.id;
+    const nextW = resize.curW;
+    const nextH = resize.curH;
+    const changed = nextW !== resize.w || nextH !== resize.h;
+    resize.id = null;
+    if (changed) {
+      const cfg = currentConfig();
+      const item = cfg.find((c) => c.id === id);
+      if (item) {
+        item.w = nextW;
+        item.h = nextH;
+        await saveLayout(cfg);
+      }
+    }
+  }
+
+  drag.id = null;
+  dropIndex.value = -1;
 }
 
 // ---------- 数据刷新 ----------
@@ -390,9 +684,28 @@ function onResize() {
   chart?.resize();
 }
 
+/// 图表容器长在卡片网格里，只有该卡片可见时才存在 ——
+/// 所以初始化/销毁必须跟着显隐走，不能只在 onMounted 里做一次。
+function initChart() {
+  if (chart) return;
+  const el = document.getElementById("dash-chart");
+  if (!el) return;
+  chartEl.value = el;
+  chart = echarts.init(el);
+  renderChart();
+}
+
+function destroyChart() {
+  chart?.dispose();
+  chart = null;
+  chartEl.value = undefined;
+}
+
 onMounted(async () => {
-  if (chartEl.value) chart = echarts.init(chartEl.value);
   await Promise.all([refresh(), refreshHistory(), dash.load()]);
+  // 等卡片按配置渲染出来，图表容器才存在
+  await nextTick();
+  initChart();
   // 卡片与趋势图同频，都是 5 秒 —— 采样本身也是 5 秒一条，图表跟着它走即可。
   // 早先给图表降频到每 3 个 tick（15 秒）拉一次，叠加落库延迟后最新点能滞后 20 秒，
   // 看上去就是「几十秒才动一下」。120 个点的历史请求开销可以忽略，不值得省。
@@ -404,10 +717,22 @@ onMounted(async () => {
   window.addEventListener("resize", onResize);
 });
 
+// 卡片显隐会换掉 DOM：趋势图卡从无到有时建实例，从有到无时销毁
+watch(
+  () => visibleCards.value.some((c) => c.isChart),
+  async (has) => {
+    await nextTick();
+    if (has) initChart();
+    else destroyChart();
+  },
+);
+
 onBeforeUnmount(() => {
   if (timer) clearInterval(timer);
   window.removeEventListener("resize", onResize);
-  chart?.dispose();
+  // 组件卸载时指针可能仍在拖拽中，把全局监听摘干净
+  window.removeEventListener("pointermove", onPointerMove);
+  destroyChart();
 });
 </script>
 
@@ -420,18 +745,104 @@ onBeforeUnmount(() => {
 .cards {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
+  /* 行高固定：卡片可以跨 2 行，拖拽缩放时要靠它把像素位移换算成行数
+     （脚本里的 ROW_H 常量必须与这个值一致） */
+  grid-auto-rows: 92px;
   gap: 16px;
 }
-.card,
-.chart-card {
+.card {
   background: var(--el-bg-color);
   border-radius: var(--radius);
   padding: 16px;
 }
-.chart-card {
-  min-height: 240px;
+/* grid 子项默认 min-width:auto，会被 nowrap 的长值（读 2.1M/s 写 480K/s）
+   顶开列宽、撑破栅格。置 0 后 1fr 才能正常收缩，超出部分交给省略号。 */
+.card {
+  position: relative;
+  min-width: 0;
+  /* 纵向撑满：进度条靠 margin-top:auto 推到底，小卡与大卡的下沿因此对齐 */
   display: flex;
   flex-direction: column;
+  /* 整卡可拖：抓手光标给出「这东西能拿起来」的暗示 */
+  cursor: grab;
+}
+/* 拖拽中：抬起层级、交出命中（好让 elementFromPoint 穿到下层卡片），
+   内描边 + 降透明度表达「被拎起来了」。位移来自内联 transform。 */
+.card--dragging {
+  z-index: 10;
+  pointer-events: none;
+  cursor: grabbing;
+  /* 压到 0.7：被拖的卡片会正好盖住落点卡片，不透就看不见「松手放哪儿」 */
+  opacity: 0.7;
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: -2px;
+}
+/* 落点提示：虚线描边 + 浅底。浅底是给「被上层卡片盖住」准备的 ——
+   拖拽卡 70% 不透明，底下这点色差正好能透出来。 */
+.card--drop {
+  outline: 2px dashed var(--el-text-color-placeholder);
+  outline-offset: -2px;
+  background: var(--el-fill-color-light);
+}
+/* 右下角缩放柄：平时隐形，悬停卡片才现形，不干扰读数 */
+.card-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 20px;
+  height: 20px;
+  cursor: nwse-resize;
+  /* 只在这里禁用浏览器手势。整卡不禁用 —— 否则手机上没法滚动页面 */
+  touch-action: none;
+  opacity: 0;
+}
+.card:hover .card-resize,
+.card--dragging .card-resize {
+  opacity: 1;
+}
+/* 用两条直角边框画手柄，比塞一个图标省事，也更容易对齐 */
+.card-resize::after {
+  content: "";
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid var(--el-text-color-placeholder);
+  border-bottom: 2px solid var(--el-text-color-placeholder);
+}
+/* 触屏没有 hover，手柄得常驻，否则无从下手 */
+@media (hover: none) {
+  .card-resize {
+    opacity: 1;
+  }
+}
+/* 渐显也算动效，减少动效模式下直接切换 */
+@media (prefers-reduced-motion: no-preference) {
+  .card-resize {
+    transition: opacity 160ms ease-out;
+  }
+}
+/* 大卡（跨 2 行）：数值放大并下移。
+   卡片只有标签/数值/进度条三个元素，撑到 200px 高时必然空出一大截；
+   给数值加上 auto 上边距后，它与进度条的 auto 上边距平分富余空间，
+   三者就自然分布成「标签顶 / 数值中 / 进度条底」。 */
+.card--lg .card-value {
+  font-size: 30px;
+  margin-top: auto;
+}
+/* 入场：自下浮入 + 交错（延迟由模板内联的 animation-delay 给出）。
+   只动 opacity / transform，不触发布局；12 张约 400ms 走完。 */
+@media (prefers-reduced-motion: no-preference) {
+  .card {
+    animation: card-in 260ms cubic-bezier(0.16, 1, 0.3, 1) backwards;
+  }
+}
+@keyframes card-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
 }
 .card-label {
   font-size: 13px;
@@ -443,12 +854,24 @@ onBeforeUnmount(() => {
   font-family: var(--panel-mono);
   font-variant-numeric: tabular-nums;
   margin: 6px 0;
+  /* 单行 + 省略号：卡片值里既有短值（62%）也有长值（读 2.1M/s 写 480K/s、
+     发行版 · 内核），允许换行会让卡片高度参差不齐、三行栅格对不齐 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .bar {
   height: 4px;
+  /* 无论卡片是 1 行还是 2 行高，进度条都贴底 */
+  margin-top: auto;
   border-radius: var(--radius);
   background: var(--el-fill-color);
   overflow: hidden;
+}
+/* 没有上限的指标（速率 / 计数 / 静态信息）不画槽，只留 4px 占位：
+   整块去掉会让同一行卡片的内容高度参差，凭空多出对不齐的留白 */
+.bar--none {
+  background: transparent;
 }
 .bar i {
   display: block;
@@ -456,19 +879,21 @@ onBeforeUnmount(() => {
   background: var(--el-text-color-primary);
   border-radius: var(--radius);
 }
+/* 图表卡头部：标题在左、时间窗在右 */
 .chart-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  flex: none;
 }
-.chart-title {
-  font-size: 14px;
-  color: var(--el-text-color-secondary);
-  margin-bottom: 8px;
-}
+/* 图表撑满卡片剩余高度。卡片高度随用户配置变化，图表必须跟着长 ——
+   写死像素会在「通栏」档位下留一大块空白。ECharts 读容器尺寸定画布，
+   flex 布局下拿到的是最终高度，不会有问题。 */
 .chart {
-  height: 320px;
+  flex: 1;
+  min-height: 0;
+  margin-top: 8px;
 }
 .range-group {
   display: flex;
@@ -516,7 +941,12 @@ onBeforeUnmount(() => {
 }
 .custom-btns {
   display: flex;
+  align-items: center;
   gap: 6px;
+}
+/* 尺寸下拉：够放下「小 / 宽 / 大 / 整宽 / 通栏」两个字即可 */
+.size-select {
+  width: 72px;
 }
 .custom-hint {
   margin-top: 10px;

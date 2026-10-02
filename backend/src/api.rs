@@ -1612,14 +1612,30 @@ const DASHBOARD_KEY: &str = "dashboard_config";
 /// 配置 JSON 字节上限：结构极小（一个字符串数组），4KB 已远超需要，纯防滥用
 const DASHBOARD_MAX_BYTES: usize = 4 * 1024;
 
-/// 仪表盘卡片白名单（与前端 Dashboard.vue 的卡片 id 一一对应）
-const DASHBOARD_CARDS: [&str; 8] = [
-    "cpu", "mem", "disk", "net", "load", "uptime", "swap", "procs",
+/// 仪表盘卡片白名单（与前端 stores/dashboard.ts 的 DASH_CARDS 一一对应）
+///
+/// 顺序即默认展示顺序，按「占用 / 活动 / 机器」三行排：前三行分别回答
+/// 「还剩多少」「现在在忙什么」「这是台什么机器」。
+const DASHBOARD_CARDS: [&str; 13] = [
+    "cpu", "mem", "disk", "swap", "diskio", "net", "load", "procs", "partitions", "uptime",
+    "cores", "sysinfo", "chart",
 ];
+
+/// 卡片可跨的最大列数 / 行数。
+///
+/// 列上限是栅格整宽（4 列）—— 趋势图这类需要横向空间的卡片要占满一行；
+/// 行上限 3：行高固定 92px，3 行近 300px，再多出来的只是空白。
+/// 🔴 必须与前端 `stores/dashboard.ts` 的栅格常量保持一致。
+const MAX_CARD_W: u64 = 4;
+const MAX_CARD_H: u64 = 3;
 
 /// 仪表盘配置校验（复用 P1-2 主题校验思路：白名单 + 类型 + 长度）：
 /// - 只允许一个顶层字段 cards；
-/// - cards 为非空字符串数组，长度 ≤ 白名单大小，元素在白名单内且不重复。
+/// - cards 为非空数组，长度 ≤ 白名单大小，元素在白名单内且不重复；
+/// - 元素可以是字符串（旧格式，等价于默认 1×1），或 `{id, w, h}` 对象。
+///
+/// 尺寸是后加的，**必须继续接受纯字符串写法** —— 否则老用户已存的配置
+/// 会在下次保存前就被判非法。
 fn validate_dashboard_config(cfg: &serde_json::Value) -> Result<(), String> {
     let obj = cfg
         .as_object()
@@ -1642,12 +1658,46 @@ fn validate_dashboard_config(cfg: &serde_json::Value) -> Result<(), String> {
     }
     let mut seen = std::collections::HashSet::new();
     for c in cards {
-        let s = c.as_str().ok_or_else(|| "卡片项必须是字符串".to_string())?;
-        if !DASHBOARD_CARDS.contains(&s) {
-            return Err(format!("未知卡片：{s}"));
+        // 卡片项兼容两种写法：字符串（最老格式）、{id,w,h}。尺寸是后加的，
+        // 老配置必须一直有效；布局由数组顺序决定，不接受显式坐标。
+        let id = match c {
+            serde_json::Value::String(s) => s.as_str(),
+            serde_json::Value::Object(o) => {
+                for k in o.keys() {
+                    if k != "id" && k != "w" && k != "h" {
+                        return Err(format!("卡片项含未知字段：{k}"));
+                    }
+                }
+                let id = o
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| "卡片项缺少 id".to_string())?;
+                // 缺省即 1×1：前端只在用户改过尺寸时才写出 w/h。
+                // 但写了就必须是整数 —— 类型不对属客户端 bug，静默按默认
+                // 处理会把错误藏起来，与项目其余校验的严格口径一致。
+                let w = match o.get("w") {
+                    Some(v) => v.as_u64().ok_or_else(|| "卡片宽度必须是整数".to_string())?,
+                    None => 1,
+                };
+                let h = match o.get("h") {
+                    Some(v) => v.as_u64().ok_or_else(|| "卡片高度必须是整数".to_string())?,
+                    None => 1,
+                };
+                if !(1..=MAX_CARD_W).contains(&w) {
+                    return Err(format!("卡片宽度超出范围（1–{MAX_CARD_W}）：{id}"));
+                }
+                if !(1..=MAX_CARD_H).contains(&h) {
+                    return Err(format!("卡片高度超出范围（1–{MAX_CARD_H}）：{id}"));
+                }
+                id
+            }
+            _ => return Err("卡片项必须是字符串或 {id,w,h} 对象".to_string()),
+        };
+        if !DASHBOARD_CARDS.contains(&id) {
+            return Err(format!("未知卡片：{id}"));
         }
-        if !seen.insert(s.to_string()) {
-            return Err(format!("卡片重复：{s}"));
+        if !seen.insert(id.to_string()) {
+            return Err(format!("卡片重复：{id}"));
         }
     }
     Ok(())
@@ -2644,6 +2694,27 @@ mod tests {
         assert!(
             validate_dashboard_config(&json!({ "cards": ["net", "disk", "mem", "cpu"] })).is_ok()
         );
+        // 带尺寸的对象写法
+        assert!(validate_dashboard_config(
+            &json!({ "cards": [{ "id": "cpu", "w": 2, "h": 2 }, { "id": "mem", "w": 2 }] })
+        )
+        .is_ok());
+        // w/h 缺省即 1×1 —— 前端只在用户改过尺寸时才写出它们
+        assert!(
+            validate_dashboard_config(&json!({ "cards": [{ "id": "cpu" }] })).is_ok()
+        );
+        // 新旧混写：老配置里追加一张带尺寸的卡片时会出现
+        assert!(validate_dashboard_config(
+            &json!({ "cards": ["mem", { "id": "cpu", "w": 2 }] })
+        )
+        .is_ok());
+        // 放宽后的上限：整宽 4 列 + 2 行（趋势图卡的默认尺寸）
+        assert!(
+            validate_dashboard_config(&json!({ "cards": [{ "id": "chart", "w": 4, "h": 2 }] }))
+                .is_ok()
+        );
+        // 高度到 3 行也合法
+        assert!(validate_dashboard_config(&json!({ "cards": [{ "id": "cpu", "h": 3 }] })).is_ok());
     }
 
     #[test]
@@ -2658,6 +2729,22 @@ mod tests {
         assert!(validate_dashboard_config(&json!({ "cards": [1] })).is_err());
         assert!(validate_dashboard_config(&json!({ "cards": ["cpu", "cpu"] })).is_err());
         assert!(validate_dashboard_config(&json!({ "cards": ["cpu"], "evil": 1 })).is_err());
+        // 尺寸相关：超范围 / 类型错 / 缺 id / 对象里有未知字段。
+        // 宽度上限 4 —— 这不是人为限制，是栅格本身只有 4 列，跨 5 列会溢出；
+        // 高度上限 3：行高固定 92px，再多只是空白
+        assert!(validate_dashboard_config(&json!({ "cards": [{ "id": "cpu", "w": 5 }] })).is_err());
+        assert!(validate_dashboard_config(&json!({ "cards": [{ "id": "cpu", "h": 4 }] })).is_err());
+        assert!(validate_dashboard_config(&json!({ "cards": [{ "id": "cpu", "w": 0 }] })).is_err());
+        assert!(validate_dashboard_config(&json!({ "cards": [{ "id": "cpu", "w": "2" }] })).is_err());
+        assert!(validate_dashboard_config(&json!({ "cards": [{ "w": 2 }] })).is_err());
+        assert!(validate_dashboard_config(&json!({ "cards": [{ "id": "evil", "w": 2 }] })).is_err());
+        // 坐标不是合法字段：布局由顺序决定，不接受显式位置
+        assert!(validate_dashboard_config(&json!({ "cards": [{ "id": "cpu", "x": 1 }] })).is_err());
+        assert!(validate_dashboard_config(&json!({ "cards": [{ "id": "cpu", "y": "0" }] })).is_err());
+        assert!(
+            validate_dashboard_config(&json!({ "cards": [{ "id": "cpu", "w": 2 }, "cpu"] }))
+                .is_err()
+        );
         // 数量超过白名单大小（复制白名单 + 1 也进不来，元素重复会先被拦）
         assert!(validate_dashboard_config(&json!({
             "cards": ["cpu", "mem", "disk", "net", "cpu", "mem", "disk", "net", "cpu"]
