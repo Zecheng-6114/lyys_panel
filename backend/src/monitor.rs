@@ -1,10 +1,19 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use serde::Serialize;
 use sysinfo::{Disks, Networks, Pid, ProcessesToUpdate, System};
 
 use crate::AppState;
+
+/// 单个挂载点的容量概况（只含真实块设备，虚拟/透传的已被 `is_virtual_fs` 滤掉）
+#[derive(Clone, Serialize)]
+pub struct MountInfo {
+    pub mount: String,
+    pub fs: String,
+    /// 占用百分比
+    pub pct: f64,
+}
 
 /// 单次系统快照（对外 API 返回结构）
 #[derive(Clone, Serialize)]
@@ -31,6 +40,21 @@ pub struct Snapshot {
     pub swap_total: i64,
     /// 进程数：数 /proc 下的数字目录，单次 readdir，刻意不走 sysinfo 全表刷新
     pub procs: usize,
+    /// 磁盘 I/O 速率（字节/秒），由 /proc/diskstats 扇区计数的差值换算
+    pub disk_read_per_sec: i64,
+    pub disk_write_per_sec: i64,
+    /// 分区数，以及占用率最高的那个挂载点 —— 「磁盘」卡看总量，
+    /// 这张看最紧张的一个：多分区机器上聚合值会把快满的分区平均掉。
+    pub disk_partitions: usize,
+    pub disk_worst_mount: String,
+    pub disk_worst_pct: f64,
+    /// 计入统计的挂载点明细 —— 分区构成因机器而异，「占用对不上」时
+    /// 需要能看到到底算了哪几个
+    pub disk_mounts: Vec<MountInfo>,
+    /// 机器信息（进程内不变）：编译架构、发行版、内核版本
+    pub arch: String,
+    pub distro: String,
+    pub kernel: String,
 }
 
 /// 磁盘容量枚举的复用间隔。容量变化以分钟计，跟着 5 秒的采样节奏刷新纯属浪费。
@@ -41,8 +65,27 @@ pub struct Monitor {
     sys: System,
     last_net: HashMap<String, (u64, u64)>,
     last_instant: Instant,
-    /// 磁盘容量缓存：`(刷新时刻, 已用, 总量)`，为 None 时强制刷新
-    disk_cache: Option<(Instant, i64, i64)>,
+    /// 磁盘容量与分区缓存：为 None 时强制刷新
+    disk_cache: Option<(Instant, DiskStat)>,
+    /// 上次磁盘 I/O 累计值 `(读字节, 写字节, 采样时刻)`，用于换算速率
+    last_disk_io: Option<(u64, u64, Instant)>,
+    /// 发行版与内核版本：进程生命周期内不变，首次读取后缓存
+    os_name: Option<String>,
+    kernel: Option<String>,
+    /// 最近一次采样的结果，供 `latest()` 读取
+    last_snapshot: Option<Snapshot>,
+}
+
+/// 磁盘容量统计（`disk_cache` 的载荷）
+#[derive(Clone)]
+struct DiskStat {
+    used: i64,
+    total: i64,
+    partitions: usize,
+    /// 占用率最高的挂载点及其百分比
+    worst_mount: String,
+    worst_pct: f64,
+    mounts: Vec<MountInfo>,
 }
 
 impl Monitor {
@@ -52,8 +95,12 @@ impl Monitor {
         Self {
             sys,
             disk_cache: None,
+            last_disk_io: None,
             last_net: HashMap::new(),
             last_instant: Instant::now(),
+            os_name: None,
+            kernel: None,
+            last_snapshot: None,
         }
     }
 
@@ -69,7 +116,8 @@ impl Monitor {
         let mem_used = self.sys.used_memory() as i64;
         let mem_total = self.sys.total_memory() as i64;
 
-        let (disk_used, disk_total) = self.disk_usage();
+        let disk = self.disk_usage();
+        let (disk_used, disk_total) = (disk.used, disk.total);
 
         // 网络速率 = (本次累计 - 上次累计) / 时间间隔
         let now = Instant::now();
@@ -89,7 +137,15 @@ impl Monitor {
         self.last_net = new_net;
         self.last_instant = now;
 
-        Snapshot {
+        // 磁盘 I/O 速率：与网络同一套差值算法，共用本次的 now
+        let (io_read, io_write) = Self::disk_io_total();
+        let (prev_read, prev_write, prev_at) = self.last_disk_io.unwrap_or((io_read, io_write, now));
+        let io_dt = now.duration_since(prev_at).as_secs_f64().max(1e-6);
+        self.last_disk_io = Some((io_read, io_write, now));
+
+        let (os_name, kernel) = self.os_info();
+
+        let snap = Snapshot {
             ts: time::OffsetDateTime::now_utc().unix_timestamp(),
             cpu,
             mem_used,
@@ -116,25 +172,126 @@ impl Monitor {
                         .count()
                 })
                 .unwrap_or(0),
+            disk_read_per_sec: (io_read.saturating_sub(prev_read) as f64 / io_dt) as i64,
+            disk_write_per_sec: (io_write.saturating_sub(prev_write) as f64 / io_dt) as i64,
+            disk_partitions: disk.partitions,
+            disk_worst_mount: disk.worst_mount,
+            disk_worst_pct: disk.worst_pct,
+            disk_mounts: disk.mounts,
+            arch: std::env::consts::ARCH.to_string(),
+            distro: os_name,
+            kernel,
+        };
+        // 缓存下来给 latest() 用：速率类指标由本次调用算了差值，别的
+        // 消费者再算一次会把采样窗口切碎（见 latest() 的说明）。
+        self.last_snapshot = Some(snap.clone());
+        snap
+    }
+
+    /// 最近一次采样的快照。
+    ///
+    /// **速率类指标（网络、磁盘 I/O）靠「本次累计 − 上次累计」得出，因此
+    /// 每次调用 `snapshot()` 都会重置差值基准。** 它只能由后台采样器按固定
+    /// 的 5 秒节奏调用；其余消费者（HTTP 接口、诊断）一律走这里读缓存。
+    ///
+    /// 曾经的写法是接口直接调 `snapshot()`：前端每来一次请求就把采样窗口
+    /// 切成「距上次后台采样 0.1 秒」的一小段，窗口内几乎没有新增 I/O，
+    /// 于是速率恒被算成 0 —— 网络卡其实也有同样的问题，只是一直没暴露。
+    pub fn latest(&mut self) -> Snapshot {
+        match &self.last_snapshot {
+            Some(s) => s.clone(),
+            // 服务刚起、采样器还没跑过第一轮时现场补一次，避免首屏全零
+            None => self.snapshot(),
         }
     }
 
-    /// 磁盘容量快照：枚举所有挂载点需要逐次 statfs，而容量变化很慢，
+    /// 磁盘容量与分区快照：枚举所有挂载点需要逐次 statfs，而容量变化很慢，
     /// 没必要跟着 5 秒的采样节奏刷新 —— 缓存一段时间复用即可。
-    fn disk_usage(&mut self) -> (i64, i64) {
-        if let Some((at, used, total)) = self.disk_cache {
+    ///
+    /// 顺便挑出占用率最高的挂载点：聚合总量会把「某个分区快满了」
+    /// 平均成「整体不高」，而那才是运维真正要找的信息。
+    fn disk_usage(&mut self) -> DiskStat {
+        if let Some((at, stat)) = &self.disk_cache {
             if at.elapsed() < DISK_REFRESH_INTERVAL {
-                return (used, total);
+                return stat.clone();
             }
         }
         let mut used = 0i64;
         let mut total = 0i64;
+        let mut partitions = 0usize;
+        let mut worst_mount = String::new();
+        let mut worst_pct = 0f64;
+        let mut mounts = Vec::new();
+        let mut seen_devices: HashSet<String> = HashSet::new();
         for d in Disks::new_with_refreshed_list().iter() {
-            total += d.total_space() as i64;
-            used += (d.total_space() - d.available_space()) as i64;
+            let t = d.total_space();
+            let fs = d.file_system().to_string_lossy().into_owned();
+            if t == 0 || is_virtual_fs(&fs) {
+                continue;
+            }
+            // 同一块设备常被 bind mount 到多处：这台 WSL 上 /mnt/wslg/distro
+            // 与 /var/lib/docker 都绑在根分区，三处占用率完全相同。按挂载点
+            // 累加会把容量算成 3 倍（实测 3.24T，而设备只有 1007G）——
+            // 百分比侥幸没变，绝对数值则是假的。按设备名去重。
+            let dev = d.name().to_string_lossy().into_owned();
+            if !dev.is_empty() && !seen_devices.insert(dev) {
+                continue;
+            }
+            let busy = t - d.available_space();
+            total += t as i64;
+            used += busy as i64;
+            partitions += 1;
+            // 按占用率比较，不按剩余字节：100G 用到 90% 比 1T 用到 10%
+            // 更该被看见
+            let pct = busy as f64 / t as f64 * 100.0;
+            mounts.push(MountInfo {
+                mount: d.mount_point().to_string_lossy().into_owned(),
+                fs,
+                pct,
+            });
+            if pct > worst_pct {
+                worst_pct = pct;
+                worst_mount = mounts.last().map(|m| m.mount.clone()).unwrap_or_default();
+            }
         }
-        self.disk_cache = Some((Instant::now(), used, total));
-        (used, total)
+        let stat = DiskStat {
+            used,
+            total,
+            partitions,
+            worst_mount,
+            worst_pct,
+            mounts,
+        };
+        self.disk_cache = Some((Instant::now(), stat.clone()));
+        stat
+    }
+
+    /// 磁盘累计 I/O 字节数（读、写）。
+    ///
+    /// 直接读 /proc/diskstats，而不是走 sysinfo 的 `Disk::usage()`：后者要求
+    /// 每次刷新都重新枚举挂载点（逐次 statfs），而 `/mnt/c` 这类 9p 挂载的
+    /// statfs 并不便宜；diskstats 只是一次纯文件读，成本可忽略。
+    fn disk_io_total() -> (u64, u64) {
+        std::fs::read_to_string("/proc/diskstats")
+            .map(|text| parse_diskstats(&text))
+            .unwrap_or((0, 0))
+    }
+
+    /// 发行版与内核版本。
+    ///
+    /// 两者在进程生命周期内都不变：只需首次读 /etc/os-release 与 uname，
+    /// 之后复用缓存，「系统」卡片每 5 秒刷新也不会重复解析。
+    fn os_info(&mut self) -> (String, String) {
+        if self.os_name.is_none() {
+            self.os_name = System::name();
+        }
+        if self.kernel.is_none() {
+            self.kernel = System::kernel_version();
+        }
+        (
+            self.os_name.clone().unwrap_or_default(),
+            self.kernel.clone().unwrap_or_default(),
+        )
     }
 
     /// 进程列表（按 CPU 降序）
@@ -338,4 +495,110 @@ pub fn spawn_sampler(state: AppState) {
             }
         }
     });
+}
+
+/// 虚拟 / 透传文件系统：容量不属于本机磁盘，计入会污染「磁盘」占用率与
+/// 「分区」卡的最紧张挂载点。
+///
+/// 在 WSL 上尤其明显：`/mnt/c`、`/usr/lib/wsl/drivers` 都是 Windows 分区的
+/// 9p 透传。把它们和 Linux 根分区一起求和，会得到「13.8T 用了 3.4T」这种
+/// 既不是宿主、也不是 guest 的数字，而且「最紧张的分区」会指向一个
+/// Windows 驱动目录 —— 对运维毫无意义。
+const VIRTUAL_FS: [&str; 13] = [
+    "tmpfs",    // 内存盘（/run、/dev/shm）
+    "devtmpfs", // /dev
+    "devfs",
+    "squashfs", // snap 等只读镜像
+    "9p",       // WSL 宿主目录透传
+    "drvfs",    // 同上（旧版 WSL）
+    "vboxsf",   // VirtualBox 共享目录
+    "virtiofs",
+    "nfs",
+    "nfs4",
+    "cifs",
+    "smb3",
+    "overlay", // 容器叠加层
+];
+
+/// 是否为虚拟/透传文件系统。`fuse` 按前缀匹配 —— fuse.sshfs 这类
+/// 用户态文件系统种类太多，逐个列举不如一律排除。
+fn is_virtual_fs(fs: &str) -> bool {
+    let fs = fs.to_ascii_lowercase();
+    VIRTUAL_FS.contains(&fs.as_str()) || fs.starts_with("fuse")
+}
+
+/// 解析 /proc/diskstats，累加读写扇区计数并换算成字节。
+///
+/// 字段布局（内核 5.x 起）：0 major / 1 minor / 2 name / 3 reads / 4 merged /
+/// 5 sectors_read / 6 ms_reading / 7 writes / 8 merged / 9 sectors_written …
+/// 扇区固定按 512 字节换算 —— 内核的扇区单位恒为 512，与设备物理扇区无关。
+///
+/// 跳过三类设备，否则会重复计数或计入噪声：
+///   `loop*` / `ram*` —— 回环与内存盘，不是真实 I/O
+///   `dm-*`           —— device-mapper 映射层，其底层物理设备已被单独计数
+///   `sr*`            —— 光驱
+fn parse_diskstats(text: &str) -> (u64, u64) {
+    let mut read = 0u64;
+    let mut write = 0u64;
+    for line in text.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 14 {
+            continue;
+        }
+        let name = f[2];
+        if name.starts_with("loop")
+            || name.starts_with("ram")
+            || name.starts_with("dm-")
+            || name.starts_with("sr")
+        {
+            continue;
+        }
+        read += f[5].parse::<u64>().unwrap_or(0) * 512;
+        write += f[9].parse::<u64>().unwrap_or(0) * 512;
+    }
+    (read, write)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diskstats_sums_real_devices_only() {
+        // 真实 /proc/diskstats 的行格式（字段数按内核 5.x 对齐）
+        let text = concat!(
+            "   8       0 sda 1000 0 2000 50 2000 0 4000 80 0 0 0 0 0 0\n",
+            "   7       0 loop0 500 0 999999 10 0 0 0 0 0 0 0 0 0 0\n",
+            " 253       0 dm-0 100 0 123456 5 100 0 654321 5 0 0 0 0 0 0\n",
+            "  11       0 sr0 1 0 8 0 0 0 0 0 0 0 0 0 0 0\n",
+        );
+        let (read, write) = parse_diskstats(text);
+        // 只累加 sda：2000 扇区读、4000 扇区写，各 ×512
+        assert_eq!(read, 2000 * 512);
+        assert_eq!(write, 4000 * 512);
+    }
+
+    #[test]
+    fn diskstats_ignores_short_lines() {
+        // 字段不足的行直接跳过，不能 panic（老内核或裁剪格式）
+        assert_eq!(parse_diskstats("8 0 sda 1 2 3"), (0, 0));
+        assert_eq!(parse_diskstats(""), (0, 0));
+    }
+
+    #[test]
+    fn virtual_filesystems_are_excluded_from_disk_totals() {
+        // WSL 的 Windows 透传挂载、内存盘、容器层都不能算进磁盘容量
+        assert!(is_virtual_fs("9p"));
+        assert!(is_virtual_fs("drvfs"));
+        assert!(is_virtual_fs("tmpfs"));
+        assert!(is_virtual_fs("overlay"));
+        // fuse 按前缀匹配：种类太多，一律排除
+        assert!(is_virtual_fs("fuse.sshfs"));
+        // 大小写不应影响判定（内核返回的写法不保证）
+        assert!(is_virtual_fs("TMPFS"));
+        // 真实文件系统必须保留
+        assert!(!is_virtual_fs("ext4"));
+        assert!(!is_virtual_fs("xfs"));
+        assert!(!is_virtual_fs("btrfs"));
+    }
 }

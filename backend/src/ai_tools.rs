@@ -194,7 +194,9 @@ pub(super) async fn execute(
     let result: anyhow::Result<String> = match name {
         "get_system_state" => {
             let mut m = state.monitor.lock().await;
-            serde_json::to_string(&m.snapshot()).map_err(|e| e.into())
+            // latest() 而非 snapshot()：后者会重置速率差值基准，
+            // AI 每问一次系统状态就把网络/磁盘 I/O 的采样窗口切碎一次
+            serde_json::to_string(&m.latest()).map_err(|e| e.into())
         }
         "get_system_history" => {
             let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(24).clamp(1, 2000);

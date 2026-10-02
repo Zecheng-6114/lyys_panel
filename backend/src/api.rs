@@ -796,7 +796,9 @@ async fn system_state(
     _user: AuthUser,
 ) -> Result<Json<monitor::Snapshot>, ApiError> {
     let mut m = state.monitor.lock().await;
-    Ok(Json(m.snapshot()))
+    // 读采样器留下的那一份，而不是现场重算 —— 重算会重置速率差值基准，
+    // 使网络与磁盘 I/O 恒接近 0（详见 Monitor::latest 的说明）
+    Ok(Json(m.latest()))
 }
 
 #[derive(Deserialize)]
