@@ -60,6 +60,13 @@ pub struct Snapshot {
 /// 磁盘容量枚举的复用间隔。容量变化以分钟计，跟着 5 秒的采样节奏刷新纯属浪费。
 const DISK_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// 进程表刷新的最短间隔。sysinfo 的进程 CPU = 「本进程 CPU 时间增量 ÷ 距上次刷新
+/// 的时长」，而 `refresh_processes` 是一次全系统 /proc 扫描；两次调用若只隔几毫秒
+/// （连续两次请求、或后台采样刚跑完又来一个请求），分母小到失真，多线程进程的每个
+/// 线程都能「占满」这个窗口，于是直接顶到 **核数×100%** 的天花板 —— 12 核机上就是
+/// 1200.0%，比百分比还大。卡一个下限，间隔内复用上一次结果。
+const PROC_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// 监控采集器：持有 sysinfo 实例并维护网络速率计算所需的上一次采样
 pub struct Monitor {
     sys: System,
@@ -74,6 +81,8 @@ pub struct Monitor {
     kernel: Option<String>,
     /// 最近一次采样的结果，供 `latest()` 读取
     last_snapshot: Option<Snapshot>,
+    /// 进程列表缓存 `(刷新时刻, 结果)`：见 PROC_REFRESH_INTERVAL
+    proc_cache: Option<(Instant, Vec<ProcessInfo>)>,
 }
 
 /// 磁盘容量统计（`disk_cache` 的载荷）
@@ -101,6 +110,7 @@ impl Monitor {
             os_name: None,
             kernel: None,
             last_snapshot: None,
+            proc_cache: None,
         }
     }
 
@@ -303,8 +313,23 @@ impl Monitor {
     /// 判定按 `thread_kind`：`Some(Userland)` 是用户线程（剔除）；
     /// `Some(Kernel)` 是内核线程 —— 它们是各自独立的进程（Tgid == Pid），
     /// 进程页本就该显示；`None` 是普通进程。
+    ///
+    /// CPU 值统一换算成「整机 = 100%」的尺度（除以逻辑核数），并保证刷新窗口
+    /// 不小于 PROC_REFRESH_INTERVAL —— 两条都是为了让这个数停在 0–100% 以内。
     pub fn processes(&mut self) -> Vec<ProcessInfo> {
+        // 距上次刷新不足一个间隔就直接复用上次结果：sysinfo 的进程 CPU 靠两次刷新
+        // 求差，窗口被切到几毫秒时多线程进程会顶到 核数×100%（见 PROC_REFRESH_INTERVAL）
+        if let Some((at, cached)) = &self.proc_cache
+            && at.elapsed() < PROC_REFRESH_INTERVAL
+        {
+            return cached.clone();
+        }
         self.sys.refresh_processes(ProcessesToUpdate::All, true);
+        // sysinfo 的进程 CPU 以「单核 = 100%」计，多核机器上会超过 100（其文档原话：
+        // might be bigger than 100 on multi-core machine）。面板其它 CPU 读数
+        // （仪表盘的 CPU 卡、实例卡里按单元求和）都是「整机 = 100%」这把尺子，
+        // 这里除以逻辑核数换算到同一把尺上，进程页才不会出现 1200% 这种比百分比更大的数。
+        let cores = self.sys.cpus().len().max(1) as f64;
         let mut list: Vec<ProcessInfo> = self
             .sys
             .processes()
@@ -313,7 +338,8 @@ impl Monitor {
             .map(|(pid, p)| ProcessInfo {
                 pid: pid.as_u32(),
                 name: p.name().to_string_lossy().into_owned(),
-                cpu: p.cpu_usage() as f64,
+                // 除以核数后再夹一道 0–100：极端窗口下 sysinfo 仍可能给出发散值
+                cpu: (p.cpu_usage() as f64 / cores).clamp(0.0, 100.0),
                 mem: p.memory() as i64,
                 user: p.user_id().map(|u| u.to_string()).unwrap_or_default(),
                 status: p.status().to_string(),
@@ -324,6 +350,7 @@ impl Monitor {
             })
             .collect();
         list.sort_by(|a, b| b.cpu.total_cmp(&a.cpu));
+        self.proc_cache = Some((Instant::now(), list.clone()));
         list
     }
 
@@ -336,7 +363,7 @@ impl Monitor {
 }
 
 /// 进程信息（对外 API 返回结构）
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct ProcessInfo {
     pub pid: u32,
     pub name: String,
@@ -613,6 +640,24 @@ mod tests {
             listed.iter().any(|p| p.pid == me),
             "测试进程自己是主线程，不该被滤掉"
         );
+    }
+
+    #[test]
+    fn process_cpu_stays_within_one_hundred_percent() {
+        // 面板的 CPU 读数统一是「整机 = 100%」这把尺子（仪表盘、实例卡求和同源），
+        // 进程页不能出现 1200% 这种比百分比还大的数 —— sysinfo 以单核为 100% 计，
+        // 多核机器上会超，必须除过核数再夹一道。
+        let mut m = Monitor::new();
+        let _ = m.processes();
+        // 第二次调用距第一次只有几毫秒：过去正是这种被切碎的窗口把值顶到天花板
+        for p in m.processes() {
+            assert!(
+                (0.0..=100.0).contains(&p.cpu),
+                "{} 的 CPU 越界：{}",
+                p.name,
+                p.cpu
+            );
+        }
     }
 
     #[test]
