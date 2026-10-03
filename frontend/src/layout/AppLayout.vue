@@ -118,6 +118,7 @@ import http from "../api/http";
 import AiBall from "../components/AiBall.vue";
 import { useThemeStore } from "../stores/theme";
 import { useAuthStore } from "../stores/auth";
+import { useJobsStore } from "../stores/jobs";
 import {
   Odometer,
   Cpu,
@@ -142,11 +143,14 @@ const route = useRoute();
 const router = useRouter();
 const theme = useThemeStore();
 const auth = useAuthStore();
+const jobWatch = useJobsStore();
 const appVersion = __APP_VERSION__;
 
 // 进入布局（已登录）时拉取服务端主题定制配置与当前账号信息（角色/强制改密）
 onMounted(async () => {
   theme.load();
+  // 服务端可能已经有作业在跑（提交完刷新过页面）：补登记，跑完照样通知
+  void jobWatch.adoptRunning();
   try {
     await auth.load();
   } catch {

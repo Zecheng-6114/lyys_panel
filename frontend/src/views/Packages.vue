@@ -138,6 +138,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import http from "../api/http";
 import { pkgMetaSafe, type PkgMeta } from "../api/meta";
 import { submitJob, type JobKind } from "../api/jobs";
+import { useJobsStore } from "../stores/jobs";
 
 interface Pkg {
   name: string;
@@ -153,6 +154,8 @@ const SEARCH_LIMIT = 300;
 const LIST_LIMIT = 2000;
 /** 每页行数档位 */
 const PAGE_SIZES = [50, 100, 200, 500];
+
+const jobWatch = useJobsStore();
 
 const mode = ref<"installed" | "upgradable" | "search">("installed");
 const keyword = ref("");
@@ -300,7 +303,9 @@ async function doAction(action: string, names: string[]) {
   }
   acting.value = true;
   try {
-    await submitJob(kind, { action, names });
+    const id = await submitJob(kind, { action, names });
+    // 登记：跑完会弹通知，不用守着「任务」页
+    jobWatch.watch(id);
     return true;
   } catch (e: any) {
     ElMessage.error(e.response?.data?.error ?? `${ACTION_LABEL[action] ?? action}提交失败`);

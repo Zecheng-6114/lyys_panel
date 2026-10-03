@@ -38,6 +38,7 @@
 import { onMounted, ref } from "vue";
 import http from "../api/http";
 import { submitJob } from "../api/jobs";
+import { useJobsStore } from "../stores/jobs";
 
 interface BackupInfo {
   name: string;
@@ -45,6 +46,7 @@ interface BackupInfo {
   mtime: number;
 }
 
+const jobWatch = useJobsStore();
 const keep = 7;
 const rows = ref<BackupInfo[]>([]);
 const loading = ref(false);
@@ -76,7 +78,9 @@ async function load() {
 async function createNow() {
   creating.value = true;
   try {
-    await submitJob("backup_create");
+    const id = await submitJob("backup_create");
+    // 登记：跑完会弹通知，不用守着「任务」页
+    jobWatch.watch(id);
     ElMessage.success("已加入任务队列，可在「任务」页查看进度");
   } catch (e: any) {
     ElMessage.error(e.response?.data?.error ?? "提交备份失败");

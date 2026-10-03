@@ -151,6 +151,7 @@ import { ArrowDown } from "@element-plus/icons-vue";
 import http from "../api/http";
 import { pkgMetaSafe, type PkgMeta } from "../api/meta";
 import { submitJob } from "../api/jobs";
+import { useJobsStore } from "../stores/jobs";
 
 interface DockerStatus {
   installed: boolean;
@@ -190,6 +191,7 @@ interface Project {
 }
 
 const router = useRouter();
+const jobWatch = useJobsStore();
 
 const status = ref<DockerStatus | null>(null);
 /** 发行版能力：安装提示里的命令名与包名随发行版不同 */
@@ -268,7 +270,9 @@ async function loadCompose() {
 async function install() {
   installing.value = true;
   try {
-    await submitJob("docker_install");
+    const id = await submitJob("docker_install");
+    // 登记：跑完会弹通知，不用守着「任务」页
+    jobWatch.watch(id);
     ElMessage.success("已加入任务队列，可在「任务」页查看进度");
   } catch (e: any) {
     ElMessage.error(e.response?.data?.error ?? "提交安装失败");
@@ -361,7 +365,9 @@ async function pullImage() {
   }
   pulling.value = true;
   try {
-    await submitJob("docker_pull", { target: name });
+    const id = await submitJob("docker_pull", { target: name });
+    // 登记：跑完会弹通知，不用守着「任务」页
+    jobWatch.watch(id);
     ElMessage.success("已加入任务队列，可在「任务」页查看进度");
     pullName.value = "";
   } catch (e: any) {
