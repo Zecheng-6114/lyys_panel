@@ -3,6 +3,24 @@
 本文件记录 LYYS Panel 的显著变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循语义化版本（[SemVer](https://semver.org/lang/zh-CN/)）。
 
+## [1.8.0] - 2026-10-03
+
+### 新增
+- 软件列表分页 (8c50cd5)
+
+### 变更
+- 主题间距统一到 `--sp-*` 标尺，页面不再整体滚动 (03efddc)
+- 后端迁移到 Rust 2024 edition：测试里的 `std::env` 读写收进 `set_env` /
+  `clear_env` 两个包装，`auth.rs` 的随机数改用 `Rng::r#gen`，
+  clippy 报的嵌套 `if` 折叠为 let-chain (b153e06)
+
+### 修复
+- 两个告警表格都能撑满内容区 (9933304)
+- AI 悬浮球被拖到视口外后无法回到屏幕内 (9378963)
+- 进程监控不再把用户态线程算成独立进程，采样周期由 5 秒改为 2 秒 (da56846)
+- 实例页容器列表改为后台采样并改用 cgroup 内存读数，
+  单次请求的 docker CLI 开销不再主导响应时间 (0d353fc)
+
 ## [1.7.0] - 2026-10-03
 
 ### 新增
