@@ -418,29 +418,29 @@ onMounted(async () => {
 
 <style scoped>
 .panel {
-  padding: 20px 24px;
+  padding: var(--sp-4) var(--sp-5);
   border-radius: var(--radius);
   background: var(--el-bg-color-page);
-  margin-bottom: 16px;
+  margin-bottom: var(--sp-4);
 }
 .panel-title {
   font-size: 16px;
   font-weight: 600;
-  margin-bottom: 8px;
+  margin-bottom: var(--sp-2);
 }
 .hint {
   color: var(--el-text-color-secondary);
   line-height: 1.7;
-  margin: 0 0 16px;
+  margin: 0 0 var(--sp-4);
 }
 .hint-inline {
   color: var(--el-text-color-secondary);
   font-size: 13px;
-  margin-left: 8px;
+  margin-left: var(--sp-2);
 }
 .empty {
   color: var(--el-text-color-secondary);
-  padding: 32px 0;
+  padding: var(--sp-5) 0;
   text-align: center;
 }
 .inst-tabs {

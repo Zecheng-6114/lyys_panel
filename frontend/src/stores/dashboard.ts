@@ -50,9 +50,12 @@ export const CARD_SIZES = [
 ] as const;
 
 /// 栅格常量：行高与间距必须和 .cards 的 CSS 保持一致 ——
-/// 拖拽缩放要靠它们做像素换算；跨度上限与后端校验同源。
-export const ROW_H = 92;
-export const GAP = 16;
+/// 拖拽缩放要靠它们做像素换算（见 Dashboard.onPointerMove 的分母）；
+/// 跨度上限与后端校验同源。
+/// 改这两个数之前先看 Dashboard.vue 里 .cards 的 grid-auto-rows / gap，
+/// 两边漏改一边，缩放就会按错误的格宽换算、拖一下跳两格。
+export const ROW_H = 88;
+export const GAP = 12;
 export const MAX_CARD_W = 4;
 export const MAX_CARD_H = 3;
 

@@ -224,17 +224,19 @@ const chartEl = ref<HTMLElement>();
 let chart: ReturnType<typeof echarts.init> | null = null;
 let timer: number | undefined;
 
-// 趋势图时间窗：原始 5 秒采样，点数 = 秒数/5，全部落在后端 limit 上限内
+// 趋势图时间窗：后端按 2 秒采样一条，点数 = 秒数/2，全部落在后端 limit 上限内。
+// label 是按钮上的短标签（四个按钮并排在卡片头部，写「10 分钟」就挤不下），
+// full 是标题里的完整读数。两者分开，标题与按钮各说各需要的那一版。
 const RANGES = [
-  { key: "10m", label: "10 分钟", secs: 600, points: 120 },
-  { key: "30m", label: "30 分钟", secs: 1800, points: 360 },
-  { key: "1h", label: "1 小时", secs: 3600, points: 720 },
-  { key: "2h", label: "2 小时", secs: 7200, points: 1440 },
+  { key: "10m", label: "10分", full: "10 分钟", secs: 600, points: 120 },
+  { key: "30m", label: "30分", full: "30 分钟", secs: 1800, points: 360 },
+  { key: "1h", label: "1小时", full: "1 小时", secs: 3600, points: 720 },
+  { key: "2h", label: "2小时", full: "2 小时", secs: 7200, points: 1440 },
 ] as const;
 type RangeKey = (typeof RANGES)[number]["key"];
 const rangeKey = ref<RangeKey>("10m");
 const rangeLabel = computed(
-  () => RANGES.find((r) => r.key === rangeKey.value)?.label ?? "10 分钟",
+  () => RANGES.find((r) => r.key === rangeKey.value)?.full ?? "10 分钟",
 );
 function setRange(k: RangeKey) {
   rangeKey.value = k;
@@ -505,9 +507,16 @@ async function saveLayout(cfg: CardConfig[]) {
   }
 }
 
+/// 卡片里的可交互控件：趋势图头部那一排时间窗按钮。
+/// 指针按在这些元素上时整卡拖拽必须让路 —— 拖拽要 preventDefault 掉
+/// pointerdown（否则会顺手选中文字、拖出图片ghost），而 pointerdown 的
+/// preventDefault 会连带取消后续的 click：按钮从此点不动，一按就变成拖卡片。
+const INTERACTIVE = "button, a, input, select, textarea, [role='button']";
+
 function onCardPointerDown(e: PointerEvent, i: number) {
   // 触摸设备上整卡拖拽会跟页面滚动抢手势，那里只认右下角手柄
   if (e.pointerType !== "mouse") return;
+  if ((e.target as HTMLElement | null)?.closest(INTERACTIVE)) return;
   e.preventDefault();
   drag.id = visibleCards.value[i].id;
   drag.from = i;
@@ -706,14 +715,14 @@ onMounted(async () => {
   // 等卡片按配置渲染出来，图表容器才存在
   await nextTick();
   initChart();
-  // 卡片与趋势图同频，都是 5 秒 —— 采样本身也是 5 秒一条，图表跟着它走即可。
-  // 早先给图表降频到每 3 个 tick（15 秒）拉一次，叠加落库延迟后最新点能滞后 20 秒，
+  // 卡片与趋势图同频，都是 2 秒 —— 后端采样同样是 2 秒一条，图表跟着它走即可。
+  // 早先采样 5 秒 + 图表降到 15 秒拉一次，叠加落库延迟后最新点能滞后 20 秒，
   // 看上去就是「几十秒才动一下」。120 个点的历史请求开销可以忽略，不值得省。
   timer = window.setInterval(() => {
     // 401 时拦截器会跳登录，这里吞掉 rejection 避免轮询抛出未处理错误
     refresh().catch(() => {});
     refreshHistory().catch(() => {});
-  }, 5000);
+  }, 2000);
   window.addEventListener("resize", onResize);
 });
 
@@ -740,20 +749,26 @@ onBeforeUnmount(() => {
 .dash {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--sp-3);
 }
 .cards {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   /* 行高固定：卡片可以跨 2 行，拖拽缩放时要靠它把像素位移换算成行数
-     （脚本里的 ROW_H 常量必须与这个值一致） */
-  grid-auto-rows: 92px;
-  gap: 16px;
+     （脚本里的 ROW_H 常量必须与这个值一致）。88 = 内距 12×2 + 标签 19
+     + 数值 20 + 进度条 4 ≈ 81，留 7px 余量给换行与缩放，够贴又不会溢出。 */
+  grid-auto-rows: 88px;
+  gap: var(--sp-3);
 }
 .card {
   background: var(--el-bg-color);
   border-radius: var(--radius);
-  padding: 16px;
+  padding: var(--sp-3);
+  /* 与 .el-card 同档的一层投影：仪表盘卡片是 div 不吃 EP 变量，
+     这里显式给一次，全站「卡片浮在底色上」的语言才是同一套。
+     拖拽时 .card--dragging 会把透明度压到 0.7，投影跟着一起淡，
+     「被拎起来」的读法反而更清楚。 */
+  box-shadow: var(--panel-card-shadow);
 }
 /* grid 子项默认 min-width:auto，会被 nowrap 的长值（读 2.1M/s 写 480K/s）
    顶开列宽、撑破栅格。置 0 后 1fr 才能正常收缩，超出部分交给省略号。 */
@@ -853,7 +868,7 @@ onBeforeUnmount(() => {
   font-weight: 600;
   font-family: var(--panel-mono);
   font-variant-numeric: tabular-nums;
-  margin: 6px 0;
+  margin: var(--sp-1) 0;
   /* 单行 + 省略号：卡片值里既有短值（62%）也有长值（读 2.1M/s 写 480K/s、
      发行版 · 内核），允许换行会让卡片高度参差不齐、三行栅格对不齐 */
   white-space: nowrap;
@@ -879,13 +894,24 @@ onBeforeUnmount(() => {
   background: var(--el-text-color-primary);
   border-radius: var(--radius);
 }
-/* 图表卡头部：标题在左、时间窗在右 */
+/* 图表卡头部：标题在左、时间窗在右。
+ * 两处防重叠：标题要 min-width:0 —— flex 子项默认 min-width:auto，
+ * 「负载趋势（10 分钟）」这串在窄卡里会把按钮组顶到卡片外、压在一起；
+ * 按钮组 flex:none 不跟着压缩（文字一压就叠字），真放不下时整组换行到第二排，
+ * 图表自己会往上让。 */
 .chart-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
   flex: none;
+}
+.chart-head .card-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 /* 图表撑满卡片剩余高度。卡片高度随用户配置变化，图表必须跟着长 ——
    写死像素会在「通栏」档位下留一大块空白。ECharts 读容器尺寸定画布，
@@ -893,11 +919,12 @@ onBeforeUnmount(() => {
 .chart {
   flex: 1;
   min-height: 0;
-  margin-top: 8px;
+  margin-top: var(--sp-1);
 }
 .range-group {
   display: flex;
-  gap: 6px;
+  flex: none;
+  gap: var(--sp-1);
 }
 /* 选中的时间窗：反色块（无边框设计规范） */
 .mini-btn--on {
@@ -915,7 +942,7 @@ onBeforeUnmount(() => {
   background: var(--el-fill-color-light);
   color: var(--el-text-color-primary);
   border-radius: var(--radius);
-  padding: 6px 12px;
+  padding: var(--sp-1) var(--sp-3);
   font-size: 12px;
   cursor: pointer;
 }
@@ -927,12 +954,12 @@ onBeforeUnmount(() => {
   cursor: not-allowed;
 }
 .mini-btn--sm {
-  padding: 2px 8px;
+  padding: var(--sp-1) var(--sp-2);
 }
 .custom-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--sp-1);
 }
 .custom-row {
   display: flex;
@@ -949,14 +976,14 @@ onBeforeUnmount(() => {
   width: 72px;
 }
 .custom-hint {
-  margin-top: 10px;
+  margin-top: var(--sp-3);
   font-size: 12px;
   color: var(--el-text-color-secondary);
 }
 /* 弹窗底部按钮组 */
 :deep(.el-dialog__footer) {
   display: flex;
-  gap: 8px;
+  gap: var(--sp-2);
   justify-content: flex-end;
 }
 @media (max-width: 768px) {

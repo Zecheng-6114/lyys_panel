@@ -431,7 +431,7 @@ onMounted(() => {
 .card {
   background: var(--el-bg-color);
   border-radius: var(--radius, 8px);
-  padding: 20px 24px;
+  padding: var(--sp-4) var(--sp-5);
 }
 .card-title {
   font-size: 15px;

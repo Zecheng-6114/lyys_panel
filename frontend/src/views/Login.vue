@@ -71,19 +71,27 @@ async function submit() {
   align-items: center;
   justify-content: center;
   background: var(--el-bg-color-page);
+  /* 外壳已把整页锁成不滚（见 theme.css），登录页是唯一没有 .content 包裹的
+     页面，所以由它自己兜住：极矮屏下卡片纵向居中会被裁，这里放行内部滚动。 */
+  overflow: auto;
 }
 .login-card {
-  /* 窄屏上不硬顶 320px，否则小屏（如 320px 宽）会溢出屏幕 */
+  /* 320 → 336，内距 32 → 20（纵向）、32 → 28（横向）。登录是唯一「一屏只有一张卡」的界面，
+     内距一放大，那张卡就整块往外撑、中间反而更空 —— 收紧之后内容区
+     宽 280，账号/密码输入框跟着变宽，一屏信息密度反而上来了。
+     窄屏不硬顶这个数，否则 320px 宽的屏会溢出。 */
   width: 100%;
-  max-width: 320px;
+  max-width: 336px;
   box-sizing: border-box;
   background: var(--el-bg-color);
   border-radius: var(--radius);
-  padding: 32px;
+  padding: var(--sp-5);
+  /* 与全站卡片同一档投影：登录卡浮在页面底色上，边界一眼就交代清楚 */
+  box-shadow: var(--panel-card-shadow);
 }
 @media (max-width: 768px) {
   .login-card {
-    padding: 24px 20px;
+    padding: var(--sp-4) var(--sp-5);
   }
 }
 .login-brand {
@@ -98,7 +106,7 @@ async function submit() {
 .login-sub {
   font-size: 13px;
   color: var(--el-text-color-secondary);
-  margin: 4px 0 24px;
+  margin: var(--sp-1) 0 var(--sp-5);
 }
 .login-btn {
   width: 100%;

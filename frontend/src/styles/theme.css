@@ -1,5 +1,14 @@
 /* 极简黑白主题：覆盖 Element Plus 关键 CSS 变量
-   设计约束：纯黑白灰、圆角 6px、无彩色、无阴影 */
+   设计约束：纯黑白灰、圆角 6px、无彩色、无边框。
+   层次只用三样东西表达：底色深浅、一层 6% 的黑投影、留白（间距标尺 --sp-*）。
+   全站不画分隔线 —— 表格的行线、卡片的外框、输入框的描边都按这一条去掉了，
+    所以表格去掉行线之后靠表头底色和 hover 底色分行，卡片靠投影立边界。
+   这里的「无边框」指的是不画描边（border），不是完全不用投影：
+   卡片与页面的底色只差约 3% 明度，一连片时下滚分不清哪块是哪块，
+   补一层 1px/2px 的 6% 黑投影把边界交代清楚（见 --panel-card-shadow）。
+   要加描边（边框）之前先想清楚：这件事能不能用底色/投影/留白说清楚？
+   投影也只许用 --panel-card-shadow 这一个变量，别在各页面里抄同一串字面量。 */
+
 
 /* HarmonyOS Sans SC：按许可协议以【原样 TTF】内嵌分发（协议第 2 条禁止
    任何修改/格式转换，LICENSE.txt 随字体目录一同保留）。六字重全量声明。 */
@@ -161,13 +170,56 @@
   --el-box-shadow-dark: none;
 
   /* ---------- 面板自定义变量 ---------- */
+
+  /* ---------- 间距标尺 ----------
+     全站留白只取 4 的倍数这 6 档：4 / 8 / 12 / 16 / 20 / 24。
+     此前各页面各写一套（10 / 14 / 18 / 22 混着来），同一类内容在两页里
+     松紧不一致，看似都是「加了边距」却读不出结构；收敛到标尺后，页面之间的
+     留白能互相换算，改留白先来这里换档位，别在各页面里写裸数字。 */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+
+  /* 顶栏高度提到全局：列表页表格的高度要用它反推（见 --panel-table-height），
+     而表格高度的定义在全局样式里，读不到 AppLayout scoped 块里的局部变量。 */
+  --panel-topbar-h: 52px;
+
+  /* 全站唯一的卡片投影。EP 的 --el-box-shadow-* 在这套主题里被整体置为 none
+     （「无阴影」指的不画描边，卡片仍需要一层极淡投影把从页面底色上立起来），
+     所以卡片只能自己用这一个对象。三处用到它的地方 —— .el-card（EP 卡片）、
+     Dashboard 的 .card 与登录页的 .login-card（都是原生 div，吃不到 EP 变量）——
+     全部写 var(--panel-card-shadow)：此前三处各抄一遍同一串字面量，改一处漏两处
+     就出现「有的卡片浮起来、有的没有」。
+     只给「1px 扩散 2px 的 6% 黑」这一档：比这重就成描边了，比这轻等于没有。 */
+  --panel-card-shadow: 0 1px 2px rgb(0 0 0 / 6%);
+
   /* 机器数据字体：统一用鸿蒙字体 + 表格数字（tnum）。经实测该字体
      0-9 字身宽全部一致（570 单位）且带 tnum 特性，数字列天然对齐，
      不再需要独立等宽栈。 */
   --panel-mono: "HarmonyOS Sans SC", -apple-system, "Segoe UI", Roboto,
     "PingFang SC", "Microsoft YaHei", sans-serif;
-  /* 列表页表格/日志框统一高度（随顶栏+工具栏预留，改这里即可全站生效） */
-  --panel-table-height: calc(100vh - 160px);
+  /* 工具栏占位：单行时 = 按钮 32 + 下边距 12。列表页都在表格上方挂一条
+     .toolbar，算表格可用高度时它必须扣掉（见下）。
+     🔴 踩过：--panel-table-height 早先漏算这一块，表格比可用空间高出 32px，
+     于是 .content 每个列表页都稳稳地多滚 32px、右侧常驻一条滚动条。 */
+  --panel-toolbar-h: 44px;
+
+  /* 列表页表格/日志框统一高度（改这里的标尺即全站生效）。
+     从实际占位反推：顶栏 52 + 内容区上下内距 16×2 + 工具栏 44 = 128。
+     早先按「顶栏 56 + 内距 24×2 + 余量」估了一个 164，比实际多出近 70px，
+     表格被压矮一圈、底部凭空多一条缝；改成从标尺算之后，顶栏高度或内距
+     一变这里自动跟上，不再需要记得手动改数字。 */
+  --panel-table-height: calc(
+    100vh - var(--panel-topbar-h) - var(--sp-4) * 2 - var(--panel-toolbar-h)
+  );
+
+  /* 单元格纵向内距回到 8：长表格（进程/日志/软件）一屏要塞 20 行以上，
+     纵向每多 2px、一屏就少两行；横向 12 —— 路径/命令这类长文本
+     本来就要横着吃空间，横向是越宽越好看，纵向不是。 */
+  --el-table-cell-padding: var(--sp-2) var(--sp-3);
 }
 
 /* 全局基础 */
@@ -180,11 +232,46 @@ body,
   height: 100%;
   margin: 0;
   padding: 0;
+  /* 外壳锁死：整页永远不出滚动条，滚动只发生在 .content（以及登录页
+     .login-wrap、日志/运维/任务页的内部容器）里。
+     不加这句的话，任何一个页面把内容撑到超过视口，滚动条就跑到整个窗口
+     上，顶栏和侧栏会跟着一起滚 ——「框架不滚、内容滚」的布局就破功了。
+     登录页自带 overflow:auto（见 Login.vue），极矮屏也能在内部滚到卡片。 */
+  overflow: hidden;
 }
 body {
   font-family: var(--el-font-family);
   background: var(--el-bg-color-page);
   color: var(--el-text-color-primary);
+}
+
+/* 滚动条：细（6px）+ 静止时全透明，指针停在该滚动条上才显形。
+   沿用侧栏那套（4px 透明、hover 显形）的思路，理由是这个面板的布局：
+   .content 占满视口宽，它的纵向滚动条就贴在窗口最右缘 —— 外观和
+   「整页滚动条」完全重合。修好滚动归属之后 html/body 已经推不动了，
+   但那条贯穿全高的灰竖条还在，看上去就像整个框架还能滚。
+   压细 + 静止透明之后竖条消失，只在真的滚动时才浮出来，
+   「框架钉死、只有内容在滚」这件事才在视觉上站得住。
+   只写 webkit 伪元素、不写 scrollbar-width/scrollbar-color：
+   两套属性一起给时 Chromium 会走标准属性、忽略这里的透明色，
+   滚动条又会常驻一条灰线（跟本段要消除的目标相反）。
+   另一个同类坑：本文件里出现第二处 ::-webkit-scrollbar 就会互相覆盖
+   （后写的赢 + 压缩器合并），所以只保留这一段，别再另起一份。 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: transparent;
+  /* 圆角走 --radius（6px）而不是自创数值：滑块是整站唯一一条常驻的细长形，
+     它的圆角必须跟卡片/按钮/输入框是同一个数，否则一滚起来就跳出来。 */
+  border-radius: var(--radius);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--el-border-color);
 }
 
 /* 工具类：实心/空心状态点（替代彩色状态标签） */
@@ -240,21 +327,13 @@ body {
   border-radius: var(--radius);
 }
 
-/* 原生滚动条（日志框、apt 输出框等 overflow:auto 容器）：默认直角滑块，需单独设圆角 */
-::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-::-webkit-scrollbar-thumb {
-  background: var(--el-fill-color-dark);
-  border-radius: var(--radius);
-}
-::-webkit-scrollbar-thumb:hover {
-  background: var(--el-fill-color-darker);
-}
+/* ⚠️ 全文件只允许这一段 ::-webkit-scrollbar。
+   曾经在这里另写了一段 10px + 灰 thumb 的「日志框专用」，那段写在上面
+   6px 透明段之后 —— 同名选择器、特异性相同，谁写在后面谁赢，构建压缩时
+   两段还会被合并成一条、只留下后面的声明，结果上面那段 6px 透明等于没写。
+   视觉表现：右侧常驻一条 10px 灰竖条，看上去整个框架还能滚。
+   要改滚动条外观只改上面那一段；别的容器（日志框/输出框/.log-pane）的
+   滚动条走的就是这一段，不存在「单独设圆角」的额外需求（3px 圆角已在上面给了）。 */
 
 /* 全局工具类：页面内容区背景（主题定制可注入 --panel-bg-image 铺背景图；
    AppLayout 的 scoped 规则只改底色，图片/尺寸/定位由这里统一给） */
@@ -287,16 +366,26 @@ body {
 .el-button--default:hover {
   background-color: var(--el-fill-color);
 }
-/* 卡片：无边框，靠白底与页面灰底对比区分层次（不加阴影） */
+/* 卡片：无边框，靠白底与页面底色对比 + 一档极淡投影区分层次。
+ * 只有底色差（#fff vs #f5f5f5，约 3% 明度）时，页面上卡片一连片，
+ * 往下滚就分不清哪块是哪块；补一层 1px/2px 的 6% 黑投影把边界交代清楚，
+ * 同时不碰「无边框、无彩色」的约定。深色主题下这层投影等于不可见，
+ * 那边靠 #1d1d1d 与 #141414 的底色差分层，本来就够。 */
 .el-card {
   border-color: transparent;
+  box-shadow: var(--panel-card-shadow);
 }
-/* 表格统一：白底块 + 行无边框 + 表头浅灰底 + hover 浅灰（所有列表页同款） */
+/* 表格统一：白底块 + 表头浅灰底 + hover 浅灰（所有列表页同款）。
+ *
+ * 行分隔线是「无边框」设计里唯一漏网的那条 —— 每个单元格自己描一条下边，
+ * 几十行连起来就是一片横向条纹，反而比没有线更吵，跟整站靠底色/投影分层的
+ * 语言也打架。去掉之后行与行的区隔交给两处底色：表头用 --el-fill-color
+ * （比白底深一档，一眼认出是列名），hover 行用主色 4% 的透明底
+ * （不能用写死的灰：明暗两套主题下它得能跟着反转，
+ *   rgb(var(--el-color-primary-rgb) / …) 在两套主题里都是「比底深一点」）。
+ * 高对比主题（radius 0）靠线条分层，那边的表格线由该主题自己补回来。 */
 .el-table {
   background: var(--el-bg-color);
-}
-.el-table .el-table__cell {
-  border-bottom: none;
 }
 .el-table .el-table__inner-wrapper::before {
   display: none;
@@ -305,12 +394,43 @@ body {
   background: transparent;
 }
 .el-table .el-table__body tr:hover > td.el-table__cell {
-  background: var(--el-fill-color-light);
+  background: rgb(var(--el-color-primary-rgb) / 0.04);
 }
 .el-table .el-table__header th.el-table__cell {
-  background: var(--el-fill-color-lighter);
+  background: var(--el-fill-color);
   color: var(--el-text-color-secondary);
   font-weight: 500;
+}
+
+/* ---------- 标签（实例卡上的「容器」「服务」）：去掉描边，靠底色分层 ----------
+   EP 的 plain 款是「1px 描边 + 只着文字色」，整站既然不描线，这里就只剩一圈
+   孤零零的浅灰框浮在卡片上。边框收成透明后，「容器」仍靠主色 9% 淡底 +
+   主色字、「服务」靠 --el-fill-color 淡底 + 次级色字区分，层次不丢。
+   🔴 type 变体把 --el-tag-border-color 声明在标签元素自身，元素本地声明
+   优先于从 .el-tag 继承，所以每个变体都要列上 —— 只写 .el-tag 管得住 plain，
+   primary/info 那几个照样带框。
+   这里只列 .el-tag 与 .el-tag--plain（全站实际用到的两档）：EP 另外还有
+   light / dark 两个变体，但面板里没有任何 `effect="light" / "dark"` 的标签，
+   列上就是两条永不被命中的死规则。以后真有人用上，再按下面的注释补进来。
+   以后要给标签描边（例如高对比预设）就在 .el-tag 这一层加回来，别逐个页面改。 */
+.el-tag,
+.el-tag--plain {
+  border-color: transparent;
+}
+/* plain 款的底是 --el-fill-color-blank（等于透明），所以只抹边框的话「容器/服务」
+   在卡片上就退化成一段普通文字，两者也分不出主次。补一档最浅的底把它托成实心小
+   胶囊，再按类型给字色：容器走主色、服务走次级色。
+   主色底用 rgb(var(--el-color-primary-rgb) / …) 而不是写死浅蓝 —— 与表格 hover
+   同源，亮色下是极淡的灰底黑字、暗色下自动翻成略亮的浅底浅字。 */
+.el-tag--plain {
+  background: var(--el-fill-color-light);
+}
+.el-tag--plain.el-tag--primary {
+  background: rgb(var(--el-color-primary-rgb) / 0.06);
+  color: var(--el-color-primary);
+}
+.el-tag--plain.el-tag--info {
+  color: var(--el-text-color-regular);
 }
 
 /* ---------- 反色选中块：前景色必须跟随背景色 ----------
@@ -339,12 +459,39 @@ body {
   background-color: var(--el-bg-color);
 }
 
+/* ---------- 表单与对话框：留白对齐到内容区 ----------
+   这两块的 EP 默认内距（16/20、表单项 18）用在设置页、账号管理这种十几项
+   的长表单里，会做出「内容区四边都松、只有表单挤成一团」的割裂；
+   统一到内容区那档（16）后，卡片、表格、表单三者的边缘是同一条线。
+   纵向留 16 而不是 20：长表单一屏少一项就靠这两像素。 */
+
+/* 表单项：18px 的 EP 默认值是「一行标签 + 一行输入」紧贴着走，
+   十几项连起来分不出项与项的边界，够密但不够清楚。 */
+.el-form-item {
+  margin-bottom: var(--sp-4);
+}
+/* 对话框：页头去掉 EP 默认的下内距 ——
+   标题与首行输入之间不需要两道空白，header 只负责标题本身。 */
+.el-dialog__header {
+  padding: var(--sp-5) var(--sp-5) 0;
+}
+.el-dialog__body {
+  padding: var(--sp-4) var(--sp-5);
+}
+.el-dialog__footer {
+  padding: 0 var(--sp-5) var(--sp-5);
+}
+
 /* ---------- 通用工具类（各页面统一复用，避免 scoped 重复实现） ---------- */
-/* 页面工具栏：统一间距与垂直对齐 */
+/* 页面工具栏：统一间距与垂直对齐。
+ * 允许换行（row-gap 收小、column-gap 放宽）：下拉框 + 输入框 + 一串按钮
+ * 在一行 700px 以内会挤成两条互相叠的歪斜行，换行则整齐地掉到第二排。 */
 .toolbar {
   display: flex;
-  gap: 8px;
-  margin-bottom: 12px;
+  flex-wrap: wrap;
+  column-gap: var(--sp-2);
+  row-gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
   align-items: center;
 }
 /* 工具栏弹性占位（把右侧按钮推到行尾） */
@@ -364,16 +511,16 @@ body {
   background: var(--el-fill-color-light);
   border: none;
   border-radius: var(--radius);
-  padding: 5px 12px;
+  padding: var(--sp-1) var(--sp-3);
   cursor: pointer;
 }
 .mini-btn:hover {
   background: var(--el-fill-color);
 }
-/* 紧凑尺寸（对话框内等空间受限场景） */
+/* 紧凑尺寸（趋势图时间窗、对话框内等空间受限场景） */
 .mini-btn--sm {
   font-size: 12px;
-  padding: 3px 10px;
+  padding: var(--sp-1) var(--sp-2);
 }
 
 /* ---------- 动效 ---------- */

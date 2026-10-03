@@ -358,13 +358,20 @@ async function logout() {
 .layout {
   display: flex;
   height: 100%;
-  /* 顶栏高度：既是 .topbar 的实际高度，也是 .content 圆角的纵向基准。 */
-  --topbar-h: 52px;
+  /* 顶栏高度：既是 .topbar 的实际高度，也是 .content 圆角的纵向基准。
+     52 这个数同时被全局的 --panel-table-height 用来反推列表页表格高度，
+     改动要记得那里也读的是 --panel-topbar-h。 */
+  --topbar-h: var(--panel-topbar-h);
   /* 侧边栏宽度：.sidebar 的实际宽度，也是 .content 圆角的横向基准。
-     不要在别处硬编码这个数字 —— .sidebar 的 width 从它派生。 */
-  --sidebar-w: 180px;
+     不要在别处硬编码这个数字 —— .sidebar 的 width 从它派生。
+     196 → 184：加宽是为了「计划任务」「深度运维」这类四字条目不被切，
+     但每宽 1px 内容区就窄 1px，1366 的屏上已经会少掉半张仪表盘卡片。 */
+  --sidebar-w: 184px;
   /* 内凹圆角露出的底色 = 侧边栏/顶栏的面板色，用 .layout 自己的背景承载。 */
   background: var(--el-bg-color);
+  /* 兜底裁剪：任何页面把内容顶出视口时，裁在这里而不是让 document 长出
+     滚动条。真要滚的只有 .content（它自带 min-height:0 + overflow:auto）。 */
+  overflow: hidden;
 }
 .sidebar {
   width: var(--sidebar-w);
@@ -372,8 +379,8 @@ async function logout() {
   display: flex;
   flex-direction: column;
   background: var(--el-bg-color);
-  /* 右边留 20px：与 .content 的 padding 对齐，使菜单项与内容区左边线成一条竖线。 */
-  padding: 16px 20px 16px 12px;
+  /* 右边留 16px：与 .content 的 padding 对齐，使菜单项与内容区左边线成一条竖线。 */
+  padding: var(--sp-3) var(--sp-4) var(--sp-3) var(--sp-3);
 }
 /* 交汇处的内凹圆角 = .content 的 border-top-left-radius，见下方 .content 规则。
    曾经用「额外 span + 径向渐变」实现，绕了十几轮且反复出错；
@@ -382,7 +389,7 @@ async function logout() {
   font-size: 15px;
   font-weight: 600;
   letter-spacing: 0.5px;
-  padding: 0 8px 16px;
+  padding: 0 var(--sp-2) var(--sp-3);
 }
 .brand span {
   font-weight: 400;
@@ -418,7 +425,7 @@ async function logout() {
 /* 分组标题：小字 + 宽字距，只靠字号与颜色分层 —— 主题约定无边框，
    所以不用分隔线，分组感由标题留白承担 */
 .side-menu :deep(.el-menu-item-group__title) {
-  padding: 14px 12px 4px;
+  padding: var(--sp-3) var(--sp-3) var(--sp-1);
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.08em;
@@ -432,9 +439,9 @@ async function logout() {
 .side-menu :deep(.el-menu-item) {
   height: 32px;
   line-height: 32px;
-  /* 组内收紧到 2px，组与组之间的层次交给分组标题的留白 */
-  margin: 2px 0;
-  padding: 0 12px;
+  /* 组内紧贴（4px），组与组之间的层次交给分组标题的留白 */
+  margin: var(--sp-1) 0;
+  padding: 0 var(--sp-3);
   border-radius: var(--radius);
   font-size: 13px;
   transition: background-color 160ms ease-out;
@@ -470,7 +477,7 @@ async function logout() {
 /* 版本号贴在侧边栏左下角：左内边距与菜单项文字对齐（菜单项本身 padding 0 12px） */
 .version {
   flex: none;
-  padding: 8px 0 0 12px;
+  padding: var(--sp-2) 0 0 var(--sp-3);
   font-size: 12px;
   color: var(--el-text-color-secondary);
   user-select: none;
@@ -495,7 +502,7 @@ async function logout() {
 .menu-btn {
   align-items: center;
   justify-content: center;
-  margin-right: 10px;
+  margin-right: var(--sp-2);
   padding: 0;
   width: 32px;
   height: 32px;
@@ -571,8 +578,8 @@ async function logout() {
     display: none;
   }
   .topbar {
-    /* 12px → 8px：窄屏屏宽有限，顶栏不该再让出这么多边距 */
-    padding: 0 8px;
+    /* 窄屏屏宽有限，顶栏只留标尺最窄的 8px */
+    padding: 0 var(--sp-2);
   }
   /* 图标保持居中（靠左对齐会让它偏离按钮中心）。要贴边就整体左移按钮 ——
      44px 的触摸区域里，图标两侧各有 14px 留白，用负 margin 把这份留白
@@ -603,7 +610,7 @@ async function logout() {
     margin: 1px 0;
   }
   .content {
-    padding: 12px;
+    padding: var(--sp-3);
     /* 内凹圆角是为「侧边栏右边界 × 顶栏下沿」设计的。窄屏侧边栏不再常驻，
        交汇点不存在，留着会在左上角留下一个无来由的缺口。 */
     border-top-left-radius: 0;
@@ -614,6 +621,10 @@ async function logout() {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  /* .main 是 .layout（横向 flex）的子项，主轴是横向，min-height 不参与
+     自动最小尺寸，理论上可以省；但一旦以后 .layout 改成纵向，缺了它
+     .topbar + .content 会把 .main 顶高，又变回整页滚。写死更稳。 */
+  min-height: 0;
 }
 .topbar {
   height: var(--topbar-h);
@@ -621,19 +632,21 @@ async function logout() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 20px;
+  padding: 0 var(--sp-4);
   background: var(--el-bg-color);
 }
 .page-head {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--sp-2);
   min-width: 0;
 }
 /* 分组标识：与侧栏同一份数据源，形成「侧栏在哪一组 → 顶栏再确认一次」的闭环 */
 .page-group {
   flex: none;
-  padding: 2px 8px;
+  /* 纵向只有 4：这枚小标签要和顶栏文字贴在一起读，给它 12 就把标题顶下去一截
+     （横向仍取标尺的 8）。2px 那个裸数是漏在标尺外的，改回 4 的倍数。 */
+  padding: var(--sp-1) var(--sp-2);
   font-size: 11px;
   font-weight: 500;
   letter-spacing: 0.04em;
@@ -647,12 +660,22 @@ async function logout() {
 }
 .top-actions {
   display: flex;
-  gap: 8px;
+  gap: var(--sp-2);
 }
 .content {
   flex: 1;
   overflow: auto;
-  padding: 20px;
+  /* 🔴 整页滚动的根因就在这里：.content 是 .main（纵向 flex）的主轴子项，
+     flex 子项的 min-height 默认是 auto —— 也就是「不能比内容矮」，于是
+     内容一多 .content 就自己长高、撑破 .main/.layout，overflow:auto 根本
+     用不上，滚动条跑到整个窗口上去。补 min-height:0 才是让 overflow 生效
+     的唯一开关（横向对应的是 min-width:0）。 */
+  min-height: 0;
+  /* 内容区四周统一留 16（间距标尺的 --sp-4）。侧栏菜单项左边距
+     （侧栏内距 12 + 菜单项 12 = 24）比它宽 8px，所以左右两侧不是同一条竖线 ——
+     这条竖线的作用是让「侧栏边缘」和「内容边缘」各自成立，不是强制对齐。
+     再放上去会显空：16 的一圈已经够把页面从灰底上托起来。 */
+  padding: var(--sp-4);
   /* 侧边栏右边界 × 顶栏下沿交汇处的内凹圆角 —— 就这一行。
      .content 的左上角正好压在交汇点上，把它磨圆，露出的就是下层面板色
      （.layout 背景 / .sidebar），交汇处自然沿圆弧内凹。
