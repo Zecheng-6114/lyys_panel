@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use serde::Serialize;
-use sysinfo::{Disks, Networks, Pid, ProcessesToUpdate, System};
+use sysinfo::{Disks, Networks, Pid, ProcessesToUpdate, System, ThreadKind};
 
 use crate::AppState;
 
@@ -294,13 +294,23 @@ impl Monitor {
         )
     }
 
-    /// 进程列表（按 CPU 降序）
+    /// 进程列表（按 CPU 降序）。
+    ///
+    /// **只剔除用户线程**：sysinfo 会把同一进程的用户线程也列进来，每个线程条目
+    /// 都带着整份进程内存与 CPU（它们共享地址空间）。不过滤的话，进程页会多出
+    /// 成倍的「进程」，实例卡片求和更会得到「内存 400G / CPU 3500%」这类物理上
+    /// 不可能的数字 —— 多线程应用（java、tokio 服务）尤其明显。
+    ///
+    /// 判定按 `thread_kind`：`Some(Userland)` 是用户线程（剔除）；
+    /// `Some(Kernel)` 是内核线程 —— 它们是各自独立的进程（Tgid == Pid），
+    /// 进程页本就该显示；`None` 是普通进程。
     pub fn processes(&mut self) -> Vec<ProcessInfo> {
         self.sys.refresh_processes(ProcessesToUpdate::All, true);
         let mut list: Vec<ProcessInfo> = self
             .sys
             .processes()
             .iter()
+            .filter(|(_, p)| p.thread_kind() != Some(ThreadKind::Userland))
             .map(|(pid, p)| ProcessInfo {
                 pid: pid.as_u32(),
                 name: p.name().to_string_lossy().into_owned(),
@@ -340,7 +350,12 @@ pub struct ProcessInfo {
     pub exe: String,
 }
 
-/// 后台采样任务：每 5 秒写入一条监控历史，每小时聚合降采样 + 清理过期数据
+/// 采样周期。2 秒一条 —— 仪表盘卡片与趋势图都跟着这个节奏走：
+/// 放到 5 秒时前端再叠加一次轮询，最新点能滞后十几秒，看上去就是「几十秒才动一下」；
+/// 再快则落库量与告警评估开销线性增长，2 秒已经看不出更高的刷新率了。
+const SAMPLE_PERIOD: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// 后台采样任务：每 SAMPLE_PERIOD 写入一条监控历史，每小时聚合降采样 + 清理过期数据
 /// （保留策略常量见 db.rs）；每小时评估告警规则、执行每日自动备份
 pub fn spawn_sampler(state: AppState) {
     tokio::spawn(async move {
@@ -357,7 +372,7 @@ pub fn spawn_sampler(state: AppState) {
         let mut ticks: u32 = 0;
         loop {
             tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                _ = tokio::time::sleep(SAMPLE_PERIOD) => {}
                 changed = alert_reload.changed(), if reload_live => {
                     if changed.is_err() {
                         reload_live = false;
@@ -562,6 +577,44 @@ fn parse_diskstats(text: &str) -> (u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 进程列表里只允许出现线程组主线程（Tgid == Pid）。
+    ///
+    /// sysinfo 会把同一进程的**用户线程**也列进来，而每个线程条目都带着整份
+    /// 进程内存与 CPU（共享地址空间）—— 不过滤的话，进程页会多出成倍的
+    /// 「进程」，实例卡片按它求和更会得到「内存 400G / CPU 3507%」这类
+    /// 物理上不可能的数字。内核线程（Tgid == Pid，只是没有用户态地址
+    /// 空间）是各自独立的进程，必须保留。
+    #[test]
+    fn processes_never_include_userland_threads() {
+        let mut m = Monitor::new();
+        let listed = m.processes();
+        assert!(!listed.is_empty(), "至少要能列出自己这个进程");
+
+        // 每一项都必须是主线程：比对 /proc/<pid>/status 里的 Tgid
+        for p in &listed {
+            let Ok(status) = std::fs::read_to_string(format!("/proc/{}/status", p.pid)) else {
+                continue; // 刚退出的进程，跳过
+            };
+            let tgid = status
+                .lines()
+                .find_map(|l| l.strip_prefix("Tgid:"))
+                .and_then(|v| v.trim().parse::<u32>().ok());
+            assert_eq!(
+                tgid,
+                Some(p.pid),
+                "pid {} 是用户线程（属于 Tgid {tgid:?}），不该被当成进程列出",
+                p.pid
+            );
+        }
+
+        // 不能过滤过头：测试进程自己就是主线程，必须还在列表里
+        let me = std::process::id();
+        assert!(
+            listed.iter().any(|p| p.pid == me),
+            "测试进程自己是主线程，不该被滤掉"
+        );
+    }
 
     #[test]
     fn diskstats_sums_real_devices_only() {
