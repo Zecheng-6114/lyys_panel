@@ -244,8 +244,8 @@ fn trust_proxy() -> bool {
 /// 开启 `PANEL_TRUST_PROXY` 时改取 `X-Forwarded-For` 的最左值（原始客户端）；
 /// 该值解析失败则退回连接地址，不会因为一个畸形头把来源判成未知。
 fn client_ip(parts: &Parts) -> IpAddr {
-    if trust_proxy() {
-        if let Some(ip) = parts
+    if trust_proxy()
+        && let Some(ip) = parts
             .headers
             .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok())
@@ -254,7 +254,6 @@ fn client_ip(parts: &Parts) -> IpAddr {
         {
             return ip;
         }
-    }
     parts
         .extensions
         .get::<ConnectInfo<SocketAddr>>()
@@ -646,11 +645,10 @@ async fn users_update(
         return Err(ApiError::bad("非法角色"));
     }
     // 改名撞车检查（排除自己）
-    if let Some(existing) = state.db.find_user_async(&req.username).await? {
-        if existing.0 != id {
+    if let Some(existing) = state.db.find_user_async(&req.username).await?
+        && existing.0 != id {
             return Err(ApiError::bad("用户名已存在"));
         }
-    }
     // 自保护：不允许把自己降级或改走，防止把最后一个 admin 关在门外
     if id == actor.id && (req.role != "admin" || req.username != actor.username) {
         return Err(ApiError::bad("不能修改自己的用户名或降级自己"));
@@ -2167,11 +2165,10 @@ async fn alerts_webhook_set(
     let db = state.db.clone();
     let url = req.url.clone();
     // 校验失败必须以 400 反馈（save_webhook 内部会 validate）
-    if let Some(u) = &url {
-        if !u.is_empty() {
+    if let Some(u) = &url
+        && !u.is_empty() {
             crate::alerts::validate_webhook_url(u).map_err(|e| ApiError::bad(e.to_string()))?;
         }
-    }
     tokio::task::spawn_blocking(move || crate::alerts::save_webhook(&db, url.as_deref()))
         .await
         .map_err(|_| ApiError::internal())?

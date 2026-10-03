@@ -211,11 +211,10 @@ impl Monitor {
     /// 顺便挑出占用率最高的挂载点：聚合总量会把「某个分区快满了」
     /// 平均成「整体不高」，而那才是运维真正要找的信息。
     fn disk_usage(&mut self) -> DiskStat {
-        if let Some((at, stat)) = &self.disk_cache {
-            if at.elapsed() < DISK_REFRESH_INTERVAL {
+        if let Some((at, stat)) = &self.disk_cache
+            && at.elapsed() < DISK_REFRESH_INTERVAL {
                 return stat.clone();
             }
-        }
         let mut used = 0i64;
         let mut total = 0i64;
         let mut partitions = 0usize;

@@ -205,11 +205,10 @@ pub async fn run_with_stdin(cmd: &mut Command, input: &[u8], budget: Budget) -> 
         .kill_on_drop(true);
     let mut child = cmd.spawn().context("启动外部命令失败")?;
     // 先写 stdin 再关管道；写失败（对端提前退出）不致命，继续等命令结果
-    if let Some(mut stdin) = child.stdin.take() {
-        if let Err(e) = stdin.write_all(input).await {
+    if let Some(mut stdin) = child.stdin.take()
+        && let Err(e) = stdin.write_all(input).await {
             tracing::warn!("写入命令 stdin 失败（对端可能已退出）：{e}");
         }
-    }
     collect_and_wait(child, budget).await
 }
 

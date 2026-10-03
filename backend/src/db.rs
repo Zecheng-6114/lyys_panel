@@ -124,11 +124,10 @@ fn job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
 impl Db {
     /// 打开（或创建）SQLite 数据库并执行初始化建表
     pub fn open(path: &str) -> Result<Self> {
-        if let Some(parent) = Path::new(path).parent() {
-            if !parent.as_os_str().is_empty() {
+        if let Some(parent) = Path::new(path).parent()
+            && !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).context("创建数据目录失败")?;
             }
-        }
         let manager = SqliteConnectionManager::file(path);
         let pool = Pool::builder()
             .max_size(4)

@@ -14,8 +14,8 @@ pub struct Asset;
 /// index.html 不缓存，保证发版后浏览器立即拿到新资源引用。
 pub async fn handler(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
-    if !path.is_empty() {
-        if let Some(file) = Asset::get(path) {
+    if !path.is_empty()
+        && let Some(file) = Asset::get(path) {
             let mime = mime_guess::from_path(path).first_or_octet_stream();
             let cache = if path.starts_with("assets/") {
                 "public, max-age=31536000, immutable"
@@ -36,7 +36,6 @@ pub async fn handler(uri: Uri) -> Response {
             )
                 .into_response();
         }
-    }
     match Asset::get("index.html") {
         Some(file) => {
             let body = String::from_utf8_lossy(&file.data).into_owned();

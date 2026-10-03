@@ -25,7 +25,8 @@ pub struct Claims {
 
 /// 生成 n 个随机字节
 fn random_bytes(n: usize) -> Vec<u8> {
-    (0..n).map(|_| rand::thread_rng().gen()).collect()
+    // `gen` 在 2024 版里是保留字，方法路径位置也要转义（rand 0.8 的 API 名没变）
+    (0..n).map(|_| rand::Rng::r#gen(&mut rand::thread_rng())).collect()
 }
 
 /// 随机 JWT 密钥（64 位十六进制字符串 = 32 字节）
@@ -604,25 +605,34 @@ mod tests {
         assert!(!verify_password(password, "not-a-valid-phc-hash"));
     }
 
+    /// Rust 2024 起 env 读写在编译期之外都不再是安全操作，测试里统一走这两个
+    /// 包装，避免每个调用点各写一坨 unsafe 块。
+    fn set_env(name: &str, value: &str) {
+        unsafe { std::env::set_var(name, value) };
+    }
+    fn clear_env(name: &str) {
+        unsafe { std::env::remove_var(name) };
+    }
+
     /// load_jwt_secret 全路径覆盖。
     ///
-    /// 本测试会读写 `PANEL_JWT_SECRET` 环境变量；Rust 2021 的 env 修改在多线程
-    /// 测试下可能竞态，因此把涉及该变量的**全部**场景收进这一个测试函数内串行执行。
+    /// 本测试会读写 `PANEL_JWT_SECRET` 环境变量；env 修改在多线程测试下可能
+    /// 竞态，因此把涉及该变量的**全部**场景收进这一个测试函数内串行执行。
     #[test]
     fn load_jwt_secret_env_file_and_generate() {
         // 场景 1：环境变量密钥过短（<32 字节）→ 拒绝
-        std::env::set_var("PANEL_JWT_SECRET", "tooshort");
+        set_env("PANEL_JWT_SECRET", "tooshort");
         let dir = temp_dir("jwt");
         assert!(load_jwt_secret(&dir).is_err());
 
         // 场景 2：合法环境变量密钥 → 原样加载（字节即 env 值）
         let good = "0123456789abcdef0123456789abcdef"; // 恰 32 字节
-        std::env::set_var("PANEL_JWT_SECRET", good);
+        set_env("PANEL_JWT_SECRET", good);
         let loaded = load_jwt_secret(&dir).unwrap();
         assert_eq!(loaded, good.as_bytes());
         // env 优先级最高：不应落盘密钥文件
         assert!(!dir.join("jwt_secret.key").exists());
-        std::env::remove_var("PANEL_JWT_SECRET");
+        clear_env("PANEL_JWT_SECRET");
 
         // 场景 3：无 env、无文件 → 生成 32 字节密钥并写盘（0600）
         let generated = load_jwt_secret(&dir).unwrap();

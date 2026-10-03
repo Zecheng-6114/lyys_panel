@@ -28,11 +28,10 @@ pub fn set_protected_dir(dir: PathBuf) {
 /// 判断路径是否受保护：位于数据目录内，或本身是 SQLite 数据库文件
 /// （`*.db` / `*.db-wal` / `*.db-shm`，后者是 SQLite 写前日志与共享内存伴生文件）。
 fn is_protected(p: &Path) -> bool {
-    if let Some(dir) = PROTECTED_DIR.get() {
-        if p.starts_with(dir) {
+    if let Some(dir) = PROTECTED_DIR.get()
+        && p.starts_with(dir) {
             return true;
         }
-    }
     let name = p
         .file_name()
         .and_then(|s| s.to_str())

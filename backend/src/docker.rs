@@ -427,11 +427,10 @@ pub async fn compose_projects() -> Result<Vec<ComposeProject>> {
         let mut args: Vec<String> = prefix[1..].to_vec();
         args.extend(["ls", "--all", "--format", "json"].map(String::from));
         let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        if let Ok(text) = run(&prog, &refs, LIST_TIMEOUT, "列 compose 项目").await {
-            if let Ok(projects) = parse_compose_json(&text) {
+        if let Ok(text) = run(&prog, &refs, LIST_TIMEOUT, "列 compose 项目").await
+            && let Ok(projects) = parse_compose_json(&text) {
                 return Ok(projects);
             }
-        }
     }
     compose_projects_from_labels().await
 }

@@ -19,14 +19,13 @@ static CURRENT: OnceLock<Distro> = OnceLock::new();
 /// 读取 /etc/os-release 的 KEY=VALUE 字段（去除引号）
 fn field(content: &str, key: &str) -> Option<String> {
     for line in content.lines() {
-        if let Some(rest) = line.strip_prefix(key) {
-            if let Some(v) = rest.strip_prefix('=') {
+        if let Some(rest) = line.strip_prefix(key)
+            && let Some(v) = rest.strip_prefix('=') {
                 let v = v.trim().trim_matches('"').to_string();
                 if !v.is_empty() {
                     return Some(v);
                 }
             }
-        }
     }
     None
 }

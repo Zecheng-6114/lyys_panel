@@ -406,8 +406,7 @@ async fn run_turn(
                             .get("reasoning_content")
                             .or_else(|| delta.get("reasoning"))
                             .and_then(|c| c.as_str())
-                        {
-                            if !t.is_empty() {
+                            && !t.is_empty() {
                                 let _ = tx
                                     .send(TurnEvent::Delta {
                                         kind: "reasoning",
@@ -415,9 +414,8 @@ async fn run_turn(
                                     })
                                     .await;
                             }
-                        }
-                        if let Some(d) = delta.get("content").and_then(|c| c.as_str()) {
-                            if !d.is_empty() {
+                        if let Some(d) = delta.get("content").and_then(|c| c.as_str())
+                            && !d.is_empty() {
                                 content.push_str(d);
                                 // 接收端被丢弃 = 前端断开，中止本轮
                                 if tx
@@ -431,7 +429,6 @@ async fn run_turn(
                                     return Err(AiError::upstream("客户端已断开"));
                                 }
                             }
-                        }
                         fold_tool_calls(&mut calls, delta);
                     }
                 }
@@ -601,14 +598,13 @@ pub(super) async fn ai_chat(
         match engine.await {
             Ok(Ok(res)) => {
                 // 正文非空才落库（工具轮耗尽/客户端断开不产生半截 assistant 消息）
-                if !res.content.trim().is_empty() {
-                    if let Err(e) =
+                if !res.content.trim().is_empty()
+                    && let Err(e) =
                         db.ai_msg_add_async(uid, "assistant".into(), res.content, now_ts())
                             .await
                     {
                         tracing::warn!("保存助手回复失败：{e}");
                     }
-                }
                 let _ = out_tx.send(Ok(Bytes::from("data: [DONE]\n\n"))).await;
             }
             Ok(Err(e)) => {
@@ -666,12 +662,21 @@ mod tests {
         }
     }
 
+    // Rust 2024 起 env 读写在编译期之外都不再是安全操作，测试里统一走这两个
+    // 包装，避免每个调用点各写一坨 unsafe 块。
+    fn set_env(name: &str, value: &str) {
+        unsafe { std::env::set_var(name, value) };
+    }
+    fn clear_env(name: &str) {
+        unsafe { std::env::remove_var(name) };
+    }
+
     // 所有场景共用一个 #[test]：resolve 读进程级环境变量，
     // 拆成多个并行 test 会互相污染（env 是全局的），必须串行执行。
     #[test]
     fn config_resolution() {
         // 1) 设置页与环境变量均未配置密钥：报未配置（BAD_REQUEST）
-        std::env::remove_var("AI_API_KEY");
+        clear_env("AI_API_KEY");
         let e = err_of(resolve(&StoredAiConfig::default()));
         assert_eq!(e.status, StatusCode::BAD_REQUEST);
 
@@ -686,8 +691,8 @@ mod tests {
         assert_eq!(model, "gpt-4o-mini");
 
         // 3) 环境变量兜底 + 协议校验
-        std::env::set_var("AI_API_KEY", "sk-env");
-        std::env::set_var("AI_API_BASE", "ftp://evil");
+        set_env("AI_API_KEY", "sk-env");
+        set_env("AI_API_BASE", "ftp://evil");
         let e = err_of(resolve(&StoredAiConfig::default()));
         assert_eq!(e.status, StatusCode::BAD_REQUEST);
         assert!(e.message.contains("http(s)"));
@@ -699,8 +704,8 @@ mod tests {
             model: "my-model".into(),
             ..Default::default()
         };
-        std::env::set_var("AI_API_BASE", "https://env.example.com/v1");
-        std::env::set_var("AI_MODEL", "env-model");
+        set_env("AI_API_BASE", "https://env.example.com/v1");
+        set_env("AI_MODEL", "env-model");
         let (base, key, model) = resolve(&stored).expect("valid config should pass");
         assert_eq!(base, "https://api.example.com/v1");
         assert_eq!(key, "sk-stored");
@@ -717,9 +722,9 @@ mod tests {
         assert_eq!(base, "https://env.example.com/v1");
         assert_eq!(model, "env-model");
 
-        std::env::remove_var("AI_API_KEY");
-        std::env::remove_var("AI_API_BASE");
-        std::env::remove_var("AI_MODEL");
+        clear_env("AI_API_KEY");
+        clear_env("AI_API_BASE");
+        clear_env("AI_MODEL");
     }
 
     #[test]

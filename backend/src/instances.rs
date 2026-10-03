@@ -69,11 +69,10 @@ pub fn service_id(unit: &str) -> String {
 /// `foo@.service`，因为实例是从模板生成的，磁盘上只有模板。
 fn admin_unit_paths(unit: &str) -> Vec<String> {
     let mut names = vec![unit.to_string()];
-    if let (Some(at), Some(dot)) = (unit.find('@'), unit.rfind('.')) {
-        if at < dot {
+    if let (Some(at), Some(dot)) = (unit.find('@'), unit.rfind('.'))
+        && at < dot {
             names.push(format!("{}@{}", &unit[..at], &unit[dot..]));
         }
-    }
     ADMIN_UNIT_DIRS
         .iter()
         .flat_map(|dir| names.iter().map(move |n| format!("{dir}{n}")))
@@ -110,11 +109,10 @@ fn cgroup_dirs(unit: &str) -> [String; 2] {
 fn cgroup_memory_bytes(unit: &str) -> Option<u64> {
     let [v2, v1] = cgroup_dirs(unit);
     for (dir, file) in [(v2, "memory.current"), (v1, "memory.usage_in_bytes")] {
-        if let Ok(s) = std::fs::read_to_string(format!("{dir}/{file}")) {
-            if let Ok(n) = s.trim().parse::<u64>() {
+        if let Ok(s) = std::fs::read_to_string(format!("{dir}/{file}"))
+            && let Ok(n) = s.trim().parse::<u64>() {
                 return Some(n);
             }
-        }
     }
     None
 }
@@ -147,11 +145,10 @@ static CONTAINER_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 async fn containers_cached() -> Result<Vec<crate::docker::ContainerInfo>> {
     // 用 std 的锁，守卫不会跨 await：取快照 + 克隆这个 vec 是纯内存操作，
     // 持锁期间不可能被别的任务抢走，不存在死锁面。
-    if let Ok(g) = container_slot().lock() {
-        if let Some(list) = g.as_ref() {
+    if let Ok(g) = container_slot().lock()
+        && let Some(list) = g.as_ref() {
             return Ok(list.clone());
         }
-    }
     // 后台已经试过并且失败：docker 不可达，这里再同步试一遍也是同一遍白跑，按空列表走
     if CONTAINER_UNAVAILABLE.load(Ordering::Relaxed) {
         return Ok(Vec::new());
