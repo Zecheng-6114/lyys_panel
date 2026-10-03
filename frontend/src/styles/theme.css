@@ -189,9 +189,10 @@
 
   /* 全站唯一的卡片投影。EP 的 --el-box-shadow-* 在这套主题里被整体置为 none
      （「无阴影」指的不画描边，卡片仍需要一层极淡投影把从页面底色上立起来），
-     所以卡片只能自己用这一个对象。三处用到它的地方 —— .el-card（EP 卡片）、
-     Dashboard 的 .card 与登录页的 .login-card（都是原生 div，吃不到 EP 变量）——
-     全部写 var(--panel-card-shadow)：此前三处各抄一遍同一串字面量，改一处漏两处
+     所以卡片只能自己用这一个对象。四处用到它的地方 —— .el-card（EP 卡片）、
+     Dashboard 的 .card 与登录页的 .login-card（都是原生 div，吃不到 EP 变量）、
+     还有作业完成通知 .el-notification（浮层，下面没有遮罩托底，全靠这层投影立起来）——
+     全部写 var(--panel-card-shadow)：历史上那三处各抄一遍同一串字面量，改一处漏两处
      就出现「有的卡片浮起来、有的没有」。
      只给「1px 扩散 2px 的 6% 黑」这一档：比这重就成描边了，比这轻等于没有。 */
   --panel-card-shadow: 0 1px 2px rgb(0 0 0 / 6%);
@@ -375,14 +376,27 @@ body {
   border-color: transparent;
   box-shadow: var(--panel-card-shadow);
 }
+/* 作业完成通知是浮层，跟卡片吃同一档投影：无边框的前提下，浮层背景
+ * 与页面底色只差 4% 明度，不补这层就分不出它的边界在哪。 */
+.el-notification {
+  box-shadow: var(--panel-card-shadow);
+}
 /* 表格统一：白底块 + 表头浅灰底 + hover 浅灰（所有列表页同款）。
  *
  * 行分隔线是「无边框」设计里唯一漏网的那条 —— 每个单元格自己描一条下边，
  * 几十行连起来就是一片横向条纹，反而比没有线更吵，跟整站靠底色/投影分层的
  * 语言也打架。去掉之后行与行的区隔交给两处底色：表头用 --el-fill-color
- * （比白底深一档，一眼认出是列名），hover 行用主色 4% 的透明底
+ * （比白底深一档，一眼认出是列名），hover 行用主色 12% 的透明底
  * （不能用写死的灰：明暗两套主题下它得能跟着反转，
- *   rgb(var(--el-color-primary-rgb) / …) 在两套主题里都是「比底深一点」）。
+ *   rgba(var(--el-color-primary-rgb), …) 在两套主题里都是「比底深一点」）。
+ * 两档深浅要真的拉开：实测暗色主题下 8% 的 hover 只有 #2d2d2d，
+ * 比表头的 #313131 还暗半档，所以 hover 给到 12%（约 #353535）才压得住表头。
+ * 🔴 只许写 rgba(var(--el-color-primary-rgb), X)，不许写 rgb(var(...) / X)：
+ * 本主题给 --el-color-primary-rgb 的值是「17, 17, 17」这种逗号分隔串，
+ * 塞进斜杠语法就成了 rgb(17, 17, 17 / 0.08) —— 非法值，整条声明被浏览器丢弃。
+ * 症状是「CSS 里明明写着底色，表格划过却毫无变化」。
+ * 踩过两轮：1.8.0 主题重构把 1.7.0 的实色 var(--el-fill-color-light)
+ * 换成了这个斜杠写法，hover 整个失效，白查了半天的类名和选择器。
  * 高对比主题（radius 0）靠线条分层，那边的表格线由该主题自己补回来。 */
 .el-table {
   background: var(--el-bg-color);
@@ -394,7 +408,7 @@ body {
   background: transparent;
 }
 .el-table .el-table__body tr:hover > td.el-table__cell {
-  background: rgb(var(--el-color-primary-rgb) / 0.04);
+  background: rgba(var(--el-color-primary-rgb), 0.12);
 }
 .el-table .el-table__header th.el-table__cell {
   background: var(--el-fill-color);
@@ -420,13 +434,15 @@ body {
 /* plain 款的底是 --el-fill-color-blank（等于透明），所以只抹边框的话「容器/服务」
    在卡片上就退化成一段普通文字，两者也分不出主次。补一档最浅的底把它托成实心小
    胶囊，再按类型给字色：容器走主色、服务走次级色。
-   主色底用 rgb(var(--el-color-primary-rgb) / …) 而不是写死浅蓝 —— 与表格 hover
-   同源，亮色下是极淡的灰底黑字、暗色下自动翻成略亮的浅底浅字。 */
+   主色底用 rgba(var(--el-color-primary-rgb), …) 而不是写死浅蓝 —— 与表格 hover
+   同源，亮色下是极淡的灰底黑字、暗色下自动翻成略亮的浅底浅字。
+   （写法必须是 rgba(var(...), X)，斜杠版 rgb(var(...) / X) 会被浏览器丢掉，
+    原因见上面表格那段的注释。） */
 .el-tag--plain {
   background: var(--el-fill-color-light);
 }
 .el-tag--plain.el-tag--primary {
-  background: rgb(var(--el-color-primary-rgb) / 0.06);
+  background: rgba(var(--el-color-primary-rgb), 0.06);
   color: var(--el-color-primary);
 }
 .el-tag--plain.el-tag--info {
