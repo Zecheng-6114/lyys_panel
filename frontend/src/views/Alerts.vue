@@ -6,23 +6,28 @@
       <span class="hint">指标越过阈值触发告警，回落时自动恢复；规则变更一小时内生效</span>
     </div>
 
-    <el-table v-loading="loading" :data="rules" size="small" height="240px">
-      <el-table-column label="指标" width="120">
-        <template #default="{ row }">{{ metricLabel(row.metric) }}</template>
-      </el-table-column>
-      <el-table-column label="阈值" width="100">
-        <template #default="{ row }">{{ row.threshold }}%</template>
-      </el-table-column>
-      <el-table-column label="恢复通知" width="100">
-        <template #default="{ row }">{{ row.notify_resolve ? "是" : "否" }}</template>
-      </el-table-column>
-      <el-table-column label="操作" width="120" align="right">
-        <template #default="{ $index }">
-          <el-button link size="small" @click="openEdit($index)">编辑</el-button>
-          <el-button link size="small" @click="removeRule($index)">删除</el-button>
-        </template>
-      </el-table-column>
-    </el-table>
+    <!-- 规则表与事件表各吃一块剩余高度（不再写死 240px / 100vh 相减），
+         这样整页高度 = 内容区高度，页面本身不产生纵向滚动，滚动只发生在表格内部。 -->
+    <div class="block block-rules">
+      <div class="section-title">告警规则</div>
+      <el-table v-loading="loading" :data="rules" size="small">
+        <el-table-column label="指标" width="120">
+          <template #default="{ row }">{{ metricLabel(row.metric) }}</template>
+        </el-table-column>
+        <el-table-column label="阈值" width="100">
+          <template #default="{ row }">{{ row.threshold }}%</template>
+        </el-table-column>
+        <el-table-column label="恢复通知" width="100">
+          <template #default="{ row }">{{ row.notify_resolve ? "是" : "否" }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="120" align="right">
+          <template #default="{ $index }">
+            <el-button link size="small" @click="openEdit($index)">编辑</el-button>
+            <el-button link size="small" @click="removeRule($index)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </div>
 
     <div class="section-title">Webhook 通知</div>
     <div class="webhook-row">
@@ -35,27 +40,29 @@
       <el-button size="small" @click="saveWebhook">保存</el-button>
     </div>
 
-    <div class="section-title">最近告警事件</div>
-    <el-table v-loading="eventsLoading" :data="events" size="small" height="var(--panel-table-height)">
-      <el-table-column label="时间" width="180">
-        <template #default="{ row }">{{ fmtTime(row.ts) }}</template>
-      </el-table-column>
-      <el-table-column label="指标" width="100" prop="metric" />
-      <el-table-column label="当前值" width="100">
-        <template #default="{ row }">{{ row.value.toFixed(1) }}%</template>
-      </el-table-column>
-      <el-table-column label="阈值" width="100" class-name="col-p3" label-class-name="col-p3">
-        <template #default="{ row }">{{ row.threshold.toFixed(0) }}%</template>
-      </el-table-column>
-      <el-table-column label="状态" min-width="120">
-        <template #default="{ row }">
-          <span class="dot-wrap">
-            <i class="dot" :class="row.state === 'firing' ? 'dot-on' : 'dot-off'" />
-            {{ row.state === "firing" ? "触发" : "恢复" }}
-          </span>
-        </template>
-      </el-table-column>
-    </el-table>
+    <div class="block block-events">
+      <div class="section-title">最近告警事件</div>
+      <el-table v-loading="eventsLoading" :data="events" size="small">
+        <el-table-column label="时间" width="180">
+          <template #default="{ row }">{{ fmtTime(row.ts) }}</template>
+        </el-table-column>
+        <el-table-column label="指标" width="100" prop="metric" />
+        <el-table-column label="当前值" width="100">
+          <template #default="{ row }">{{ row.value.toFixed(1) }}%</template>
+        </el-table-column>
+        <el-table-column label="阈值" width="100" class-name="col-p3" label-class-name="col-p3">
+          <template #default="{ row }">{{ row.threshold.toFixed(0) }}%</template>
+        </el-table-column>
+        <el-table-column label="状态" min-width="120">
+          <template #default="{ row }">
+            <span class="dot-wrap">
+              <i class="dot" :class="row.state === 'firing' ? 'dot-on' : 'dot-off'" />
+              {{ row.state === "firing" ? "触发" : "恢复" }}
+            </span>
+          </template>
+        </el-table-column>
+      </el-table>
+    </div>
 
     <el-dialog v-model="showEdit" :title="editIndex === null ? '新增规则' : '编辑规则'" width="400px">
       <el-form label-width="80px" size="small">
@@ -206,6 +213,47 @@ onMounted(loadAll);
 </script>
 
 <style scoped>
+/* 整根撑满内容区，纵向不再靠「页面滚动」消化溢出 —— 溢出交给表格自己的 body 区。
+   高度基准来自 .content（它已经是视口 - 顶栏的确定高度），这里只做 100% 继承。 */
+.alerts {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+/* 两块表格区各自吃掉一部分剩余高度。
+   min-height 是矮屏兜底：视口过矮时保住表格可读性，宁可让 .content 出现内部滚动，
+   也不把两行缩成一条线。 */
+.block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-height: 0;
+}
+.block-rules {
+  flex: 1 1 30%;
+  min-height: 96px;
+}
+.block-events {
+  flex: 1 1 70%;
+  min-height: 144px;
+}
+/* EP 表格默认是「内容多高就多高」（.el-table{height:fit-content}），
+   这里把它拉成 flex 子项填满 .block，表头固定、body 区滚动。 */
+.block :deep(.el-table) {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+  display: flex;
+  flex-direction: column;
+}
+.block :deep(.el-table__body-wrapper) {
+  flex: 1;
+  min-height: 0;
+  /* EP 默认 overflow:hidden（靠 height prop 的场景由它自己处理滚动）；
+     这里 height 交给 flex，滚动就得由这条规则兜住。 */
+  overflow: auto;
+}
+
 .hint {
   font-size: 12px;
   color: var(--el-text-color-secondary);
@@ -214,12 +262,15 @@ onMounted(loadAll);
 .section-title {
   font-size: 14px;
   font-weight: 500;
-  margin: 20px 0 10px;
+  /* 原来 20px 上下外距，在 flex 列里会和 gap 叠成双倍间距 */
+  margin: 0;
+  flex: none;
 }
 .webhook-row {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex: none;
 }
 .dot-wrap {
   display: inline-flex;
