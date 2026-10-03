@@ -10,7 +10,7 @@
 
 LYYS Panel 面向单台 Linux 服务器的日常运维，把系统监控、进程与服务管理、日志、文件、软件包、计划任务、网络、Docker、AI 助手、备份恢复、自更新与告警等操作收进一个 Web 界面。
 
-整个产品编译为一个静态 Rust 二进制，前端构建产物在编译期打入其中，目标机器零运行时依赖——随构建机不同也不需要 Node 环境。适合受信内网自托管。
+整个产品编译为一个静态 Rust 二进制，前端构建产物在编译期打入其中，目标机器零运行时依赖（连 Node 都不需要）。适合受信内网自托管。
 
 ## 界面预览
 
@@ -21,22 +21,25 @@ LYYS Panel 面向单台 Linux 服务器的日常运维，把系统监控、进�
 
 | 模块 | 说明 |
 |---|---|
-| 仪表盘 | CPU / 内存 / 磁盘 / 网络 / 负载 / 进程数实时卡片，历史趋势折线图（可选时间窗） |
-| 进程 | 进程列表查看与结束（全量） |
-| 服务 | systemd 服务查看、启动 / 停止 / 重启 |
+| 仪表盘 | 14 张可配置卡片（CPU / 内存 / 交换区 / 磁盘 / 磁盘 I/O / 网络 / 负载 / 进程 / 分区 / 运行时长 / CPU 规格 / 系统），勾选、拖边缩放与布局均持久化；负载趋势折线图（可选时间窗） |
+| 进程 | 进程列表查看与结束（列表全量拉取，页面内关键字过滤） |
+| 服务 | systemd 服务查看、启动 / 停止 / 重启 / 重载 |
 | 实例 | 容器与 systemd 服务的统一入口：状态与资源占用，直达日志（容器日志 / journal 单元）与进程，服务可启停 |
-| 运维 | 磁盘 SMART 健康、unit 文件查看、系统快捷入口 |
+| 运维 | 磁盘 SMART 健康、unit 文件查看、容器日志流（实时 tail，可选尾部行数） |
 | 日志 | journal 日志查询、日志文件列表与实时 tail |
 | 文件 | 目录浏览、在线编辑、上传下载、新建 / 重命名 / 删除 |
 | 软件 | 包列表、可升级查询、搜索、安装 / 卸载 / 升级（Debian 系 apt、Arch 系 pacman） |
 | 计划任务 | crontab 增删改查 |
 | 网络 | 网卡、路由、连接、DNS 查看 |
+| 任务 | 后台作业队列：安装 / 更新等长操作转后台执行，可离开页面，列表回看进度与输出尾部（每个作业保留最近 200 行），支持取消 |
+| 在线会话 | 已登录用户的会话列表，可按会话强制下线 |
 | Docker | 容器列表与启动 / 停止 / 重启 / 删除、容器日志、镜像拉取与删除、Compose 项目启停；未安装时页面上可直接安装 |
-| AI 助手 | 流式对话（OpenAI 兼容上游，支持 Ollama 等本地模型），配置可在设置页在线修改 |
+| AI 助手 | 流式对话（OpenAI 兼容上游，支持 Ollama 等本地模型，含工具调用），配置可在设置页在线修改 |
 | 备份 | 数据库快照列表 / 立即备份 / 下载 / 删除 / 恢复（重启生效），每日自动备份保留 7 份 |
 | 面板更新 | 检查 GitHub Release、在线下载替换二进制、内网手动上传旁路 |
 | 告警 | CPU / 内存 / 磁盘阈值规则（滞回防抖）、事件历史、可选 webhook 通知 |
-| 账号 | 多用户 + RBAC（admin / viewer）、会话管理、操作审计日志 |
+| 账号 | 多用户 + RBAC（admin / operator / viewer，写操作按等级分派）、在线会话、操作审计日志 |
+| 系统设置 | 仅管理员可改的服务端配置（AI 上游地址 / 密钥 / 模型）与界面预设 |
 
 **亮点**
 
@@ -54,7 +57,7 @@ LYYS Panel 面向单台 Linux 服务器的日常运维，把系统监控、进�
 
 - **登录限流**：同一「来源 IP + 用户名」连续登录失败会触发指数退避（1s、2s、4s…… 封顶 30s），
   触发期间返回 `429`。这是退避而非锁定，合法用户输错几次只会觉得变慢，不会被锁在门外。
-  退避状态存于内存，重启即清空。
+  退避记录存在数据库，重启后依然生效（最多保留 4096 条，距上次失败超过 300 秒重新计数）。
 - **默认 HTTPS（自签证书）**：首次启动自动生成自签证书并以 HTTPS 提供服务（默认端口 3789），
   浏览器提示证书不受信任属自签的正常现象；可用 `PANEL_TLS=custom` 挂载 CA 签发的正式证书，
   也可 `PANEL_TLS=off` 回退纯 HTTP。
@@ -63,7 +66,7 @@ LYYS Panel 面向单台 Linux 服务器的日常运维，把系统监控、进�
 
 ## 技术栈
 
-- **后端**：Rust · Axum 0.8 · Tokio · rusqlite（bundled，无外部 SQLite 依赖）· JWT + Argon2 · rustls（TLS）
+- **后端**：Rust 2024 edition · Axum 0.8 · Tokio · rusqlite（bundled，无外部 SQLite 依赖）· JWT + Argon2 · rustls（TLS）
 - **前端**：Vue 3 · TypeScript · Vite 5 · Element Plus · Pinia · ECharts · HarmonyOS Sans SC
 - **前端嵌入**：`rust-embed` 编译期把 `frontend/dist` 打入二进制
 
@@ -76,16 +79,20 @@ release 二进制，创建系统用户与目录、生成 env 模板（默认 HTT
 systemd 单元并启动服务：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Zecheng-6114/lyys_panel/main/scripts/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/Zecheng-6114/lyys_panel/main/scripts/install.sh \
+  | sudo bash -s -- [选项]
 ```
 
 常用选项（也可先下载脚本再执行 `sudo bash install.sh --help`）：
 
 ```bash
-sudo bash install.sh --version v1.0.0     # 指定版本（默认最新 release）
-sudo bash install.sh --addr 127.0.0.1:3789
-sudo bash install.sh --no-tls             # 关闭 HTTPS，纯 HTTP
-sudo bash uninstall.sh                    # 卸载；--purge 连数据与用户一起删
+sudo bash install.sh --version v1.7.0      # 指定 release 标签（默认查最新）
+sudo bash install.sh --addr 0.0.0.0:3789   # 监听地址（脚本默认 0.0.0.0:3789）
+sudo bash install.sh --no-tls              # 关闭 HTTPS，纯 HTTP
+sudo bash install.sh -h                    # 查看全部选项
+sudo bash uninstall.sh                     # 卸载：删配置目录，保留数据与系统用户
+sudo bash uninstall.sh --purge             # 连数据目录（数据库 / 证书 / 备份）与系统用户一起删
+sudo bash uninstall.sh --keep-conf         # 保留 /etc/lyys-panel 配置目录
 ```
 
 重复执行 install.sh 即为升级（覆盖二进制与 systemd 单元，不改动已有配置与数据）。
@@ -93,7 +100,7 @@ sudo bash uninstall.sh                    # 卸载；--purge 连数据与用户�
 
 ### 前置要求（从源码构建）
 
-- Rust stable（含 rustfmt / clippy，见 `backend/rust-toolchain.toml`）
+- Rust stable ≥ 1.85（后端使用 2024 edition；工具链含 rustfmt / clippy，见 `backend/rust-toolchain.toml`）
 - Node.js 20+ 与 npm
 
 ### 一条命令构建
@@ -148,11 +155,13 @@ cd frontend && npm run dev
 | `PANEL_TLS` | `auto` | `auto`=首启生成自签证书启用 HTTPS；`custom`+`PANEL_TLS_CERT`/`PANEL_TLS_KEY`=已有证书；`off`=纯 HTTP |
 | `PANEL_HTTP_PORT` | 未设置 | 设置后额外监听一个纯 HTTP 端口，301 跳转到 HTTPS |
 | `PANEL_JWT_SECRET` | 自动生成 | JWT 签名密钥（≥32 字节）；未设置时使用数据目录下的 0600 密钥文件 |
+| `PANEL_TRUST_PROXY` | 未设置 | 设为 `1` / `true` / `yes` 时按 `X-Forwarded-For` 最左值判定来源 IP（面板须位于可信反代之后，且反代对每个请求都覆盖而非追加该头）；未设时按连接地址判定。取值只在首次调用时读一次 |
 | `AI_API_BASE` | `https://api.openai.com/v1` | AI 上游地址（OpenAI 兼容，Ollama 为 `http://<host>:11434/v1`）。设置页配置优先于环境变量 |
 | `AI_API_KEY` | 无 | AI 上游密钥；未配置时 AI 功能拒绝请求。设置页配置优先 |
 | `AI_MODEL` | `gpt-4o-mini` | AI 对话模型名。设置页配置优先 |
 
-未设置 `PANEL_ADMIN_PASSWORD` 时会生成随机密码并打印到日志。
+未设置 `PANEL_ADMIN_PASSWORD` 时会生成随机密码，写入数据目录下的
+`initial_admin_password.txt`（权限 0600，明文**不打印到日志**），首次登录成功后自动删除（详见下方 FAQ）。
 
 ## 部署(systemd)
 
@@ -184,23 +193,26 @@ PANEL_ADMIN_PASSWORD=你的强密码
 ```ini
 [Unit]
 Description=LYYS Server Panel
-After=network.target
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=simple
 ExecStart=/opt/lyys-panel/lyys-panel
 EnvironmentFile=/etc/lyys-panel/panel.env
 WorkingDirectory=/opt/lyys-panel
-# 数据库放独立数据目录，避免污染程序目录
+# 数据库放独立数据目录，避免污染程序目录；面板需管理系统服务 / 进程 / 日志，以 root 运行
 Environment=PANEL_DB=/var/lib/lyys-panel/panel.db
+User=root
 Restart=on-failure
 RestartSec=3
-# 面板需要管理系统服务/进程/日志，以 root 运行
-User=root
+LimitNOFILE=65535
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+（等效于 `scripts/install.sh` 写出的单元；手动部署时照抄即可。）
 
 ### 4. 启用并启动
 
@@ -253,18 +265,22 @@ admin 可在「账号管理」页重置任意用户的密码；admin 自己的�
 
 **aarch64 机器能用吗？**
 
-可以。Release 提供 `lyys-panel-aarch64` 产物，`install.sh` 会按机器架构自动
-选择。注意内置「在线自更新」目前按固定资产名拉取 x86_64 二进制，aarch64 升级
-请使用「面板更新」页的手动上传通道，或重新执行 `install.sh`。
+可以。`install.sh` 会按机器架构选择 release 资产（x86_64 取 `lyys-panel`、
+aarch64 取 `lyys-panel-aarch64`）。但内置的「在线自更新」固定拉取名为
+`lyys-panel` 的 x86_64 资产，aarch64 机器升级请走「面板更新」页的手动上传通道，
+或重新执行 `install.sh`。
 
 ## 项目结构
 
 ```
 lyys_panel/
-├── backend/            Rust 后端
+├── backend/            Rust 后端（2024 edition）
 │   ├── src/
 │   │   ├── main.rs         入口、配置、路由装配
-│   │   ├── api.rs          HTTP 处理器与路由表
+│   │   ├── api.rs          HTTP 处理器与路由表（路由集中在 main.rs，
+│   │   │                   真正复杂的业务分散在各领域模块，本文件只做编排）
+│   │   ├── cmd.rs          统一命令执行器：超时预算、分组互斥、输出上限、进程回收
+│   │   ├── jobs.rs         后台作业队列（长操作的进度、输出尾部、取消）
 │   │   ├── auth.rs         登录、JWT、Argon2、管理员引导、登录退避
 │   │   ├── db.rs           SQLite 连接池、版本化迁移与建表
 │   │   ├── embed.rs        内嵌前端资源服务（含 SPA 回退与缓存头）
@@ -273,40 +289,55 @@ lyys_panel/
 │   │   ├── alerts.rs       阈值告警规则（滞回状态机）与 webhook 通知
 │   │   ├── backup.rs       数据库备份 / 恢复（VACUUM INTO + 标记重启生效）
 │   │   ├── update.rs       自更新（GitHub Release 检查 / 下载 / 校验 / 原子替换）
-│   │   ├── ai.rs           AI 流式对话代理（OpenAI 兼容上游，SSE 透传）
+│   │   ├── ai.rs / ai_tools.rs  AI 流式对话代理（OpenAI 兼容上游，SSE 透传）+ 工具模式
 │   │   ├── files.rs        文件浏览 / 读写 / 上传下载
+│   │   ├── container_files.rs  容器内文件浏览 / 读写（复用 files.rs 的口径）
 │   │   ├── distro.rs       发行版检测（仅支持 Debian / Arch 系，不支持则退出）
 │   │   ├── packages.rs     软件包管理（apt / pacman 按家族分派）
 │   │   ├── crontab.rs      计划任务
 │   │   ├── network.rs      网络信息
 │   │   ├── logs.rs         日志查询
 │   │   ├── docker.rs       Docker 容器 / 镜像 / Compose（含一键安装）
-│   │   ├── ops.rs / opservice.rs / rprocess.rs   SMART 磁盘 / systemd 服务 / 进程操作
-│   │   └── migrations/     SQL 迁移脚本（按版本号顺序应用，事务包裹）
-│   └── Cargo.toml
+│   │   ├── instances.rs    容器与 systemd 服务的统一视图（容器后台采样、cgroup 记账）
+│   │   └── ops.rs / opservice.rs / rprocess.rs   SMART 磁盘 / systemd 服务 / 进程操作
+│   ├── Cargo.toml
+│   ├── rust-toolchain.toml
+│   └── migrations/         SQL 迁移脚本（0001…0010，按版本号顺序应用，事务包裹）
 ├── frontend/           Vue 3 前端
 │   ├── public/fonts/       HarmonyOS Sans SC 原样 TTF（含许可协议）
+│   ├── index.html          构建入口（vite 构建产物根目录）
+│   ├── tsconfig.json
+│   ├── vite.config.ts
 │   └── src/
 │       ├── layout/AppLayout.vue   侧边栏 + 顶栏（电源 / 改密 / 设置）+ 内容区骨架
-│       ├── views/                 各功能页面
-│       ├── router/                路由与登录守卫
-│       ├── stores/                主题等全局状态
-│       ├── api/                   axios 封装与拦截器
-│       └── styles/theme.css       Element Plus 变量覆盖（黑白无边框主题 + 字体）
+│       ├── views/                 各功能页面（Dashboard / Processes / Services / Logs /
+│       │                           Files / Packages / Tasks / Instances / Network /
+│       │                           Ops / Cron / Sessions / Users / Backups /
+│       │                           Alerts / Settings / Update）
+│       ├── components/AiBall.vue  AI 悬浮球（视口内可拖动，点击展开对话面板）
+│       ├── router/                路由与登录守卫（adminOnly 按角色拦截）
+│       ├── stores/                auth（角色 / 会话）/ theme（主题）/ dashboard（卡片布局）
+│       ├── themes/presets.ts      主题预设（浅色 / 深色 / 柔和纸色 / 高对比）
+│       ├── api/                   http（axios 封装与拦截器）/ jobs / meta
+│       └── styles/                theme.css：Element Plus 变量覆盖（主题 / 圆角 / 字体）
+│                                  responsive.css：窄屏断点
 ├── scripts/            git 钩子安装与 install / uninstall 一键部署脚本
+├── docs/               设计稿与落地方案（任务队列、实例边界重构、成熟度路线图）
 ├── .github/workflows/  CI（PR 检查）与 Release（tag 多平台发布）工作流
 ├── CHANGELOG.md        更新日志（Keep a Changelog）
 ├── CONTRIBUTING.md     贡献规范（Conventional Commits + SemVer）
+├── AGENTS.md           AI 在本仓库的 git 行为规则
 ├── screenshots/        界面预览截图
 └── build.sh            一键构建脚本
 ```
 
 ## 开发者约定
 
-- **无边框设计**：所有 `--el-border-color*` 均为 `transparent`，层次靠背景色差表达。请勿添加实色边框。
-- **全部圆角**：统一 6px，基准变量为 `theme.css` 中的 `--radius`。新增组件优先引用该变量。
-- 主题为纯黑白灰，无彩色、无阴影。注意浏览器自动填充的输入框底色由浏览器绘制（暗色下是一层暗黄），不受面板变量控制。
-- **字体**：全站统一 HarmonyOS Sans SC（`--el-font-family` 与 `body` 均引用）；数据展示区（`.mono`、日志、路径栏等）用同一字体加 `font-variant-numeric: tabular-nums` 保证数字列对齐——该字体数字字身宽全部一致，无需等宽栈。字体文件必须**原样分发**（Huawei 协议禁止修改/转格式），新增字重或裁剪均不允许。
+- **无边框设计**：所有 `--el-border-color*` 均为 `transparent`，层次只靠背景色差与一层极淡投影表达，不要给卡片加实色边框。
+  卡片一律用 `--panel-card-shadow`（`theme.css` 中的极淡一层）立边界，不要另写硬编码 `box-shadow`。
+- **圆角基准**：`theme.css` 中 `--radius` 默认 6px，全站圆角（含 Element Plus 各圆角变量与侧边栏内凹）都引用它；主题配置可自带 `radius` 覆盖（高对比预设就是 0），设置页也能单独调。新增组件一律引用该变量，不要写死数值。
+- **主题定制**：`themes/presets.ts` 内置浅色 / 深色 / 柔和纸色 / 高对比 4 套预设，设置页可切换预设并自定义主色、页面底色、卡片底色、文字色、圆角与背景图（配置存服务端，对所有设备生效）；自定义后层次表达同上，仍靠背景色差而非彩色描边。注意浏览器自动填充的输入框底色由浏览器绘制（暗色下是一层暗黄），不受面板变量控制。
+- **字体**：全站统一 HarmonyOS Sans SC（`--el-font-family` 与 `body` 均引用）；数据展示区（`.mono`、日志、路径栏等）用同一字体并加 `font-variant-numeric: tabular-nums` 保证数字列对齐。字体文件必须**原样分发**（Huawei 协议禁止修改/转格式），新增字重或裁剪均不允许。
 - 按钮与输入框并排时不要给按钮写死高度（会变成正方形），也不要给文本域写死 `rows`；让容器 `align-items: stretch`，按钮跟随输入框高度。
 - 圆角容器若内部子元素带背景（表头、hover 行、加载遮罩等），**必须配 `overflow: hidden`**，否则背景会填满四角、把圆角盖成直角。
 
@@ -319,20 +350,25 @@ lyys_panel/
 
 **安全**
 
-- 文件模块可访问整个文件系统（不设根目录约束）—— 仅限受信网络内使用
-- 登录限流基于内存，重启后清零；且未接入反向代理时按来源 IP 计数，
-  若置于 NAT 之后，同一出口的多个用户会共享退避额度
+- 文件模块可访问整个文件系统（不设根目录约束，唯一屏蔽的是 `PANEL_DATA_DIR` 自身）—— 仅限受信网络内使用
+- 登录退避记录已存数据库（重启不清零，最多 4096 条）；键是「来源 IP + 用户名」，
+  不开 `PANEL_TRUST_PROXY` 时 NAT 后的多个用户会共用一个出口 IP（各自按用户名分账，
+  但同一人会被同出口的其他人拖慢）；置于可信反代之后时开 `PANEL_TRUST_PROXY` 取真实客户端 IP
 
 **功能与工程**
 
-- 外部命令调用无超时（Docker 请求除外，见其实现）；apt 同步操作无并发锁
+- 外部命令全部走 `cmd.rs`：已按命令类别给超时预算、分组互斥（Package / Docker / Systemd 各自串行）
+  与输出上限，但**未做重试**；apt / pacman 安装这类长操作靠「任务」页转后台，不代表失败会自动重试
 - 实例页只收两类显式边界：Docker 容器，以及 unit 文件位于 `/etc/systemd/system/`
   或 `/run/systemd/system/` 的 systemd 服务。软件包自带的单元（`/usr/lib/systemd/system/`）
   留在「服务」页；手工 `nohup` 起、没有 unit 的进程不在实例页，需托管请先写 unit
 - Docker 的 Compose 项目在「独立 `docker-compose` 命令」这一路径下，会以容器 label 反推项目，
   容器被全部删除的项目不可见
-- `frontend/package.json` 声明了 `lint` / `format` 脚本，但仓库尚未提交对应的 ESLint / Prettier 配置，直接执行会失败
-- 自更新不区分 CPU 架构：aarch64 部署的升级请走「面板更新」页手动上传通道，或重跑 `install.sh`
+- `frontend/package.json` 里 `npm run lint` 用的是 eslint 8 的 `--ext` 参数，而仓库只有 eslint 9 依赖、
+  也没提交 flat config，该脚本会直接失败；`npm run format` 能跑，但同样没有 Prettier 配置文件，
+  会按 prettier 默认风格格式化（当前 `prettier --check` 报 23 个文件不合默认风格）。前端改动靠 `npm run build` 校验
+- 内置「在线自更新」固定拉取 x86_64 的 `lyys-panel` 资产，不区分 CPU 架构；
+  aarch64 部署的升级请走「面板更新」页手动上传通道，或重跑 `install.sh`
 - 前端无自动化测试（后端已有核心路径集成测试）
 
 **已解决**
@@ -341,6 +377,7 @@ lyys_panel/
 - ~~面板默认明文 HTTP~~ → 已默认 HTTPS（自签证书，支持挂正式证书与 HTTP 跳转）
 - ~~前后端均无自动化测试；无 CI~~ → 后端核心路径集成测试 + GitHub Actions CI（PR 检查、tag 多平台发布）
 - ~~缺少「修改管理员密码」界面~~ → 多用户 RBAC + 账号管理页（admin 可重置密码）+ 顶栏改密
+- ~~外部命令无超时、包管理器无并发锁~~ → `cmd.rs` 统一执行器：按类别超时预算、分组互斥、输出上限
 
 ## License
 
