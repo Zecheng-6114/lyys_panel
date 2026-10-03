@@ -20,7 +20,7 @@
     </button>
 
     <!-- 对话面板 -->
-    <div v-if="open" class="panel" @pointerdown.stop>
+    <div v-if="open" class="panel" :class="panelClass" @pointerdown.stop>
       <div class="panel-head">
         <span class="panel-title">AI 助手</span>
         <span class="spacer" />
@@ -77,7 +77,7 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, reactive, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
 import http from "../api/http";
 
@@ -116,11 +116,31 @@ const loaded = ref(false);
 
 // ---------- 悬浮球位置（可拖动，记忆到 localStorage） ----------
 const BALL_SIZE = 48;
+/** 面板尺寸，与 .panel 的 CSS 对应；翻边判断要用 */
+const PANEL_W = 360;
+const PANEL_H = 460;
+/** 视口尺寸做成响应式：窗口一变，球的位置与面板的展开方向都要跟着重算 */
+const vw = ref(window.innerWidth);
+const vh = ref(window.innerHeight);
+
+/** 视口内允许的坐标上限（整球可见，各留 4px 边距） */
+function maxX() {
+  return Math.max(4, vw.value - BALL_SIZE - 4);
+}
+function maxY() {
+  return Math.max(4, vh.value - BALL_SIZE - 4);
+}
+/** 把球夹回视口内。窗口从大缩小时坐标可能已落在视口外，球就"消失"了 */
+function clampIntoView() {
+  pos.x = Math.min(Math.max(pos.x, 4), maxX());
+  pos.y = Math.min(Math.max(pos.y, 4), maxY());
+}
+function persist() {
+  localStorage.setItem("ai_ball_pos", JSON.stringify({ x: pos.x, y: pos.y }));
+}
+
 function defaultPos() {
-  return {
-    x: window.innerWidth - BALL_SIZE - 20,
-    y: window.innerHeight - BALL_SIZE - 90,
-  };
+  return { x: vw.value - BALL_SIZE - 20, y: vh.value - BALL_SIZE - 90 };
 }
 const pos = reactive(
   (() => {
@@ -128,7 +148,13 @@ const pos = reactive(
       const raw = localStorage.getItem("ai_ball_pos");
       if (raw) {
         const p = JSON.parse(raw);
-        if (typeof p.x === "number" && typeof p.y === "number") return p;
+        // 记忆里的坐标可能来自更大的窗口，挂载时先夹一次
+        if (typeof p.x === "number" && typeof p.y === "number") {
+          return {
+            x: Math.min(Math.max(p.x, 4), maxX()),
+            y: Math.min(Math.max(p.y, 4), maxY()),
+          };
+        }
       }
     } catch {
       /* 损坏则用默认 */
@@ -136,6 +162,13 @@ const pos = reactive(
     return defaultPos();
   })()
 );
+
+/** 面板朝哪边展开：贴边时翻到另一侧，否则会被视口裁掉 */
+const panelClass = computed(() => ({
+  "panel--open-right": pos.x < PANEL_W - BALL_SIZE,
+  "panel--open-down": pos.y < PANEL_H + 56,
+}));
+
 // 拖动与点击区分：位移超过阈值算拖动，pointerup 时抑制紧随的 click
 let drag: { startX: number; startY: number; ox: number; oy: number; moved: boolean } | null = null;
 let suppressClick = false;
@@ -149,17 +182,35 @@ function onDragMove(e: PointerEvent) {
   const dy = e.clientY - drag.startY;
   if (Math.abs(dx) + Math.abs(dy) > 6) drag.moved = true;
   if (drag.moved) {
-    pos.x = Math.min(Math.max(drag.ox + dx, 4), window.innerWidth - BALL_SIZE - 4);
-    pos.y = Math.min(Math.max(drag.oy + dy, 4), window.innerHeight - BALL_SIZE - 4);
+    pos.x = Math.min(Math.max(drag.ox + dx, 4), maxX());
+    pos.y = Math.min(Math.max(drag.oy + dy, 4), maxY());
   }
 }
 function onDragEnd() {
   if (drag?.moved) {
     suppressClick = true;
-    localStorage.setItem("ai_ball_pos", JSON.stringify({ x: pos.x, y: pos.y }));
+    persist();
   }
   drag = null;
 }
+
+/** 视口变化：先更新尺寸基准，再把球拉回可视区并覆写记忆值 */
+function onViewportChange() {
+  vw.value = window.innerWidth;
+  vh.value = window.innerHeight;
+  const x = pos.x;
+  const y = pos.y;
+  clampIntoView();
+  if (x !== pos.x || y !== pos.y) persist();
+}
+
+onMounted(() => {
+  clampIntoView();
+  window.addEventListener("resize", onViewportChange);
+});
+onBeforeUnmount(() => {
+  window.removeEventListener("resize", onViewportChange);
+});
 
 function onClick() {
   if (suppressClick) {
@@ -323,6 +374,45 @@ async function send() {
 .ball:active {
   cursor: grabbing;
 }
+/* 键盘可达：主色球上用文本色画外环，避免与球面同色看不见 */
+.ball:focus-visible {
+  outline: 2px solid var(--el-text-color-primary);
+  outline-offset: 3px;
+}
+/* 入场 + 悬停/按压反馈。
+   入场只播一次（组件每次加载挂载一次），transform/opacity 不触发布局。 */
+@media (prefers-reduced-motion: no-preference) {
+  .ai-ball {
+    animation: ball-in 340ms cubic-bezier(0.16, 1, 0.3, 1) backwards;
+  }
+  .ball {
+    transition:
+      transform 160ms ease-out,
+      filter 160ms ease-out;
+  }
+  .ball:hover {
+    transform: scale(1.06);
+    filter: brightness(1.06);
+  }
+  .ball:active {
+    transform: scale(0.94);
+  }
+  .panel {
+    animation: panel-in 180ms cubic-bezier(0.16, 1, 0.3, 1) backwards;
+  }
+}
+@keyframes ball-in {
+  from {
+    opacity: 0;
+    transform: scale(0.6) translateY(10px);
+  }
+}
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+}
 .panel {
   position: absolute;
   right: 0;
@@ -337,6 +427,15 @@ async function send() {
   border: 1px solid var(--el-border-color-light);
   border-radius: var(--radius);
   overflow: hidden;
+}
+/* 贴左边缘时改从球的右侧展开，贴顶时改朝下开 —— 否则面板会被视口裁掉 */
+.panel--open-right {
+  right: auto;
+  left: 0;
+}
+.panel--open-down {
+  bottom: auto;
+  top: 56px;
 }
 .panel-head {
   flex: none;
