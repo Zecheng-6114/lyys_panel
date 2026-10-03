@@ -770,7 +770,14 @@ impl Db {
 
     /// 历史查询（1.2：自动按时间跨度选表）。
     /// 起点落在原始保留窗口内 → 查 5 秒原始表；更早 → 查小时聚合表。
-    /// 返回按时间升序、最多 limit 个点（取窗口尾部）。
+    ///
+    /// 返回按时间升序、**均匀覆盖整个 [from, to] 窗口**、最多 limit 个点。
+    ///
+    /// 刻意不用 `ORDER BY ts DESC LIMIT`：那样取到的是窗口**尾部**的 limit 条，
+    /// limit 决定的是覆盖范围而不是分辨率。10 分钟窗口按 2 秒一条是 300 个点，
+    /// 前端要 120 个 → 只回最后 4 分钟，而 x 轴仍按 10 分钟铺开，曲线只占右边
+    /// 四成，看上去就是「趋势图没有数据 / 没有变化」。改成按固定时长分桶降采样：
+    /// 每桶取平均、时间取桶内最早一条，于是 limit 只管精度，窗口宽度永远画满。
     pub fn history(
         &self,
         from: i64,
@@ -779,16 +786,26 @@ impl Db {
         limit: i64,
     ) -> Result<Vec<MetricPoint>> {
         let conn = self.pool.get().context("获取数据库连接失败")?;
+        // 分桶时长 = 窗口长 / limit（至少 1 秒）；窗口短于 limit 秒时退化为逐点。
+        let bucket = ((to - from).max(1) / limit.max(1)).max(1);
         let sql = if from >= raw_from {
-            "SELECT ts, cpu, mem_used, net_in, net_out FROM metrics
-             WHERE ts >= ?1 AND ts <= ?2 ORDER BY ts DESC LIMIT ?3"
+            // 平均是 REAL，整数字段要 CAST 回 INTEGER —— rusqlite 不做隐式转换，
+            // 直接把 REAL 读成 i64 会报 InvalidColumnType。
+            "SELECT MIN(ts), AVG(cpu), CAST(AVG(mem_used) AS INTEGER),
+                    CAST(AVG(net_in) AS INTEGER), CAST(AVG(net_out) AS INTEGER)
+             FROM metrics
+             WHERE ts >= ?1 AND ts <= ?2
+             GROUP BY (ts - ?1) / ?3 ORDER BY 1"
         } else {
-            "SELECT hour_ts, cpu_avg, mem_used_avg, net_in_avg, net_out_avg FROM metrics_hourly
-             WHERE hour_ts >= ?1 AND hour_ts <= ?2 ORDER BY hour_ts DESC LIMIT ?3"
+            "SELECT MIN(hour_ts), AVG(cpu_avg), CAST(AVG(mem_used_avg) AS INTEGER),
+                    CAST(AVG(net_in_avg) AS INTEGER), CAST(AVG(net_out_avg) AS INTEGER)
+             FROM metrics_hourly
+             WHERE hour_ts >= ?1 AND hour_ts <= ?2
+             GROUP BY (hour_ts - ?1) / ?3 ORDER BY 1"
         };
         let mut stmt = conn.prepare(sql)?;
-        let mut rows = stmt
-            .query_map(rusqlite::params![from, to, limit], |row| {
+        let rows = stmt
+            .query_map(rusqlite::params![from, to, bucket], |row| {
                 Ok(MetricPoint {
                     ts: row.get(0)?,
                     cpu: row.get(1)?,
@@ -798,7 +815,6 @@ impl Db {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows.reverse();
         Ok(rows)
     }
 
@@ -1595,6 +1611,39 @@ mod tests {
             let fresh = db.history(1000, 100000, 500, 100).unwrap();
             assert_eq!(fresh.len(), 2);
             assert_eq!(fresh[0].ts, 1000, "结果按时间升序");
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 窗口内的点数多于 limit 时，降采样必须**铺满整个窗口**，而不是只取窗口尾部。
+    /// 取尾部正是「趋势图只画了最后几分钟、看着像没数据」的成因。
+    #[test]
+    fn history_downsampling_still_covers_the_whole_window() {
+        let path = temp_db_path("history_span");
+        {
+            let db = Db::open(&path).unwrap();
+            let conn = db.pool.get().unwrap();
+            // 1000 起每 2 秒一条、共 300 条，窗口 [1000, 1598]；cpu 依次 0..299
+            let mut sql =
+                String::from("INSERT INTO metrics (ts, cpu, mem_used, net_in, net_out) VALUES ");
+            for i in 0..300 {
+                if i > 0 {
+                    sql.push(',');
+                }
+                sql.push_str(&format!("({}, {i}, 0, 0, 0)", 1000 + i * 2));
+            }
+            conn.execute_batch(&sql).unwrap();
+
+            // 600 秒窗口只要 120 点（每桶 5 秒）→ 宽度必须仍然是 600 秒
+            let pts = db.history(1000, 1600, 0, 120).unwrap();
+            assert_eq!(pts.len(), 120, "点数应被压到 limit");
+            assert_eq!(pts[0].ts, 1000, "首个点要落在窗口起点");
+            let last = pts.last().unwrap().ts;
+            assert!(last >= 1595, "末个点要落在窗口最后那个桶里，实测 {last}");
+            assert!(pts.windows(2).all(|w| w[0].ts < w[1].ts), "时间严格升序");
+            // 每桶取平均 → 整段均值应接近中位 149.5，而不是尾部那段的均值
+            let avg: f64 = pts.iter().map(|p| p.cpu).sum::<f64>() / pts.len() as f64;
+            assert!((100.0..200.0).contains(&avg), "应是整段窗口的均值，实测 {avg}");
         }
         let _ = std::fs::remove_file(path);
     }

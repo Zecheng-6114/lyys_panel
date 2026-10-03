@@ -7,7 +7,11 @@
         自定义卡片
       </button>
     </div>
-    <div ref="gridEl" class="cards">
+    <div
+      ref="gridEl"
+      class="cards"
+      :style="{ gridTemplateColumns: `repeat(${cols}, 1fr)` }"
+    >
       <!-- 4.2 卡片按用户配置的顺序与尺寸渲染（先到先得，自动排列）。
            按住卡片拖动换位；右下角拖拽改尺寸；松手即存服务端。 -->
       <div
@@ -465,24 +469,37 @@ function clamp(v: number, lo: number, hi: number) {
   return Math.min(hi, Math.max(lo, v));
 }
 
-/// 栅格当前列数（窄屏是 2 列）。从 computed 的像素列表数出来，
-/// 不去硬编码断点 —— 断点改了这一行不用跟着改。
-function gridCols(): number {
-  if (!gridEl.value) return 4;
-  const cols = getComputedStyle(gridEl.value).gridTemplateColumns;
-  return cols.split(" ").filter(Boolean).length || 4;
+/// 栅格列数断点：≤480 单列、≤768 两列、其余四列（宽屏与 CSS 里的默认 4 列一致）。
+/// 早先是「数 gridTemplateColumns 的已用轨道」来推列数，但那恰好数不出这里的毛病 ——
+/// 有卡片跨度超过列数时，栅格会为超出的跨度凭空多出隐式轨道，数出来正好是被撑大的
+/// 那个数，于是「列数」看着永远是对的。改成由这里算出来、再用内联
+/// grid-template-columns 下发，CSS 与脚本不会各说一套。
+const NARROW_W = 480;
+const MEDIUM_W = 768;
+function colsFor(width: number): number {
+  if (width <= NARROW_W) return 1;
+  if (width <= MEDIUM_W) return 2;
+  return 4;
+}
+const cols = ref(colsFor(window.innerWidth));
+function syncCols() {
+  cols.value = colsFor(window.innerWidth);
 }
 
 /// 单元格宽度（含一个间距）：把指针的像素位移换算成列数
 function colWidth(): number {
   if (!gridEl.value) return 0;
-  const n = gridCols();
+  const n = cols.value;
   return (gridEl.value.clientWidth - GAP * (n - 1)) / n;
 }
 
-/// 渲染用的跨度：正在缩放的那张卡走实时预览值
+/// 渲染用的跨度：正在缩放的那张卡走实时预览值。
+/// 必须钳到当前列数 —— 配置里的跨度是按 4 列存的（趋势图默认 4×2），窄屏只有
+/// 1–2 列时 `grid-column: span 4` 会撑出隐式轨道，整个栅格宽过屏幕、左侧卡片被裁成
+/// 竖条（手机上的仪表盘就是这么坏的）。
 function cellW(c: CardView) {
-  return resize.id === c.id ? resize.curW : c.w;
+  const w = resize.id === c.id ? resize.curW : c.w;
+  return Math.min(w, cols.value);
 }
 function cellH(c: CardView) {
   return resize.id === c.id ? resize.curH : c.h;
@@ -558,8 +575,9 @@ function onPointerMove(e: PointerEvent) {
   if (resize.id !== null) {
     const dw = Math.round((e.clientX - resize.x) / (colWidth() + GAP));
     const dh = Math.round((e.clientY - resize.y) / (ROW_H + GAP));
-    // 上限与后端校验同源：宽度是栅格列数，高度 3 行防滥用
-    resize.curW = clamp(resize.w + dw, 1, MAX_CARD_W);
+    // 上限与后端校验同源：宽度是栅格列数，高度 3 行防滥用；
+    // 窄屏列数更少，宽度上限跟着列数收
+    resize.curW = clamp(resize.w + dw, 1, Math.min(MAX_CARD_W, cols.value));
     resize.curH = clamp(resize.h + dh, 1, MAX_CARD_H);
   }
 }
@@ -633,6 +651,16 @@ function renderChart() {
   const sub = v("--el-text-color-secondary") || "#777777";
   const grid = v("--el-fill-color-dark") || "#ebebeb";
   const cardBg = v("--el-bg-color") || "#ffffff";
+  const cpuData = history.value.map((p) => Number(p.cpu.toFixed(2)));
+  const memData = history.value.map((p) =>
+    snap.mem_total > 0 ? Number(((p.mem_used / snap.mem_total) * 100).toFixed(1)) : 0,
+  );
+  // 两条线量级差得远（CPU 常年个位数、内存几十个百分点），共用一根写死 0–100 的轴时
+  // CPU 只能贴着底边走直线 —— 这就是「趋势看不出变化」的主因。各给一根轴、上限按各自
+  // 数据自适应（最大值的 1.2 倍），并留一个下限，免得空数据时轴塌成一条线。
+  const axisMax = (vals: number[], floor: number) =>
+    vals.length ? Math.max(floor, Math.ceil(Math.max(...vals) * 1.2 * 10) / 10) : floor;
+
   chart.setOption({
     backgroundColor: "transparent",
     // 统一调色板为灰阶（tooltip 标记等默认色也走这里）
@@ -647,7 +675,8 @@ function renderChart() {
     // 里 top 被注释、改设 bottom），于是图例会压在 x 轴标签上。这里显式钉回顶部，
     // 正好落在 grid.top 预留的空间里；bottom 保留默认值不影响 top 的解析。
     legend: { data: ["CPU %", "内存 %"], textStyle: { color: sub }, top: 0 },
-    grid: { left: 40, right: 20, top: 40, bottom: 30 },
+    // 右侧留出第二根轴的刻度（原 20 放不下）
+    grid: { left: 40, right: 36, top: 40, bottom: 30 },
     xAxis: {
       type: "category",
       boundaryGap: false,
@@ -657,19 +686,32 @@ function renderChart() {
       axisLine: { lineStyle: { color: grid } },
       axisLabel: { color: sub },
     },
-    yAxis: {
-      type: "value",
-      max: 100,
-      splitLine: { lineStyle: { color: grid } },
-      axisLabel: { color: sub },
-    },
+    // 双轴：左 CPU、右内存。轴刻度色与对应折线一致（CPU=正文色、内存=次要色），
+    // 不加轴名也能看出哪条线读哪根轴；网格线只留一根，免得两套刻度叠成密网。
+    yAxis: [
+      {
+        type: "value",
+        min: 0,
+        max: axisMax(cpuData, 1),
+        splitLine: { lineStyle: { color: grid } },
+        axisLabel: { color: line, fontSize: 10 },
+      },
+      {
+        type: "value",
+        min: 0,
+        max: axisMax(memData, 10),
+        splitLine: { show: false },
+        axisLabel: { color: sub, fontSize: 10 },
+      },
+    ],
     series: [
       {
         name: "CPU %",
         type: "line",
+        yAxisIndex: 0,
         smooth: true,
         showSymbol: false,
-        data: history.value.map((p) => Number(p.cpu.toFixed(1))),
+        data: cpuData,
         itemStyle: { color: line },
         lineStyle: { color: line, width: 2 },
         areaStyle: { color: line, opacity: 0.08 },
@@ -677,11 +719,10 @@ function renderChart() {
       {
         name: "内存 %",
         type: "line",
+        yAxisIndex: 1,
         smooth: true,
         showSymbol: false,
-        data: history.value.map((p) =>
-          snap.mem_total > 0 ? Number(((p.mem_used / snap.mem_total) * 100).toFixed(1)) : 0,
-        ),
+        data: memData,
         itemStyle: { color: sub },
         lineStyle: { color: sub, width: 2, type: "dashed" },
       },
@@ -690,6 +731,8 @@ function renderChart() {
 }
 
 function onResize() {
+  // 跨过断点时列数会变（4 ↔ 2 ↔ 1），跨度钳制与卡片宽度都要跟着重算
+  syncCols();
   chart?.resize();
 }
 
@@ -714,6 +757,7 @@ onMounted(async () => {
   await Promise.all([refresh(), refreshHistory(), dash.load()]);
   // 等卡片按配置渲染出来，图表容器才存在
   await nextTick();
+  syncCols();
   initChart();
   // 卡片与趋势图同频，都是 2 秒 —— 后端采样同样是 2 秒一条，图表跟着它走即可。
   // 早先采样 5 秒 + 图表降到 15 秒拉一次，叠加落库延迟后最新点能滞后 20 秒，
@@ -753,6 +797,9 @@ onBeforeUnmount(() => {
 }
 .cards {
   display: grid;
+  /* 实际列数由脚本按屏宽算好、用内联 grid-template-columns 下发（窄屏 1–2 列），
+     这里只是没有脚本时的兜底值。旧的窄屏媒体查询已删除 —— 见 cellW 的注释：
+     列数和卡片跨度必须出自同一处，否则 span 会大于列数、撑出隐式轨道。 */
   grid-template-columns: repeat(4, 1fr);
   /* 行高固定：卡片可以跨 2 行，拖拽缩放时要靠它把像素位移换算成行数
      （脚本里的 ROW_H 常量必须与这个值一致）。88 = 内距 12×2 + 标签 19
@@ -986,9 +1033,7 @@ onBeforeUnmount(() => {
   gap: var(--sp-2);
   justify-content: flex-end;
 }
-@media (max-width: 768px) {
-  .cards {
-    grid-template-columns: repeat(2, 1fr);
-  }
-}
+/* 窄屏不再单独改 grid-auto-rows / gap：行高与间距是拖拽缩放的换算基准
+   （stores/dashboard.ts 的 ROW_H / GAP 必须与它们一致），只在媒体查询里改
+   会让换算用错格宽。列数由脚本算（cellW 注释），这里没有需要覆盖的。 */
 </style>
