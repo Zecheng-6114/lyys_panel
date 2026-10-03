@@ -68,8 +68,9 @@
     </div>
 
     <el-table
+      ref="tableEl"
       v-loading="loading"
-      :data="displayRows"
+      :data="pagedRows"
       size="small"
       row-key="name"
       class="ptable"
@@ -77,7 +78,7 @@
       :empty-text="emptyText"
       @selection-change="(v: Pkg[]) => (selected = v)"
     >
-      <el-table-column v-if="selectable" type="selection" width="36" />
+      <el-table-column v-if="selectable" type="selection" width="36" reserve-selection />
       <el-table-column label="包名" prop="name" min-width="200" />
       <el-table-column label="版本" width="250" class-name="col-p2" label-class-name="col-p2">
         <template #default="{ row }">
@@ -117,6 +118,18 @@
       <el-table-column label="描述" prop="description" min-width="300" show-overflow-tooltip />
     </el-table>
 
+    <!-- 分页：表格组件不做虚拟滚动，一次渲染两千行必然卡；分页让渲染量恒定 -->
+    <div v-if="displayRows.length" class="pager">
+      <el-pagination
+        v-model:current-page="page"
+        v-model:page-size="pageSize"
+        :page-sizes="PAGE_SIZES"
+        :total="displayRows.length"
+        layout="sizes, prev, pager, next, jumper"
+        size="small"
+        background
+      />
+    </div>
   </div>
 </template>
 
@@ -138,6 +151,8 @@ interface Pkg {
 /** 搜索/列表的条数上限：与后端 clamp 范围（5000）留出余量 */
 const SEARCH_LIMIT = 300;
 const LIST_LIMIT = 2000;
+/** 每页行数档位 */
+const PAGE_SIZES = [50, 100, 200, 500];
 
 const mode = ref<"installed" | "upgradable" | "search">("installed");
 const keyword = ref("");
@@ -158,6 +173,22 @@ const displayRows = computed(() =>
     ? rows.value.filter((r) => !r.installed)
     : rows.value
 );
+/** 当前页与每页行数。表格一次只渲染这么多行，滚动与交互不再随包数变卡 */
+const page = ref(1);
+const pageSize = ref(100);
+/** el-table 实例：换页签时清掉跨页保留的勾选 */
+const tableEl = ref<{ clearSelection: () => void } | null>(null);
+
+const pagedRows = computed(() => {
+  const start = (page.value - 1) * pageSize.value;
+  return displayRows.value.slice(start, start + pageSize.value);
+});
+
+// 行数或每页条数变化时把页码收进有效范围（过滤、重查、改每页条数都会触发）
+watch([() => displayRows.value.length, pageSize], () => {
+  const pages = Math.max(1, Math.ceil(displayRows.value.length / pageSize.value));
+  if (page.value > pages) page.value = pages;
+});
 /** 命中上限即视为被截断（后端按 limit 截断，不额外回传是否截断的标志） */
 const truncated = computed(() =>
   mode.value === "search"
@@ -202,6 +233,7 @@ async function load() {
     return;
   }
   loading.value = true;
+  page.value = 1;
   try {
     if (mode.value === "installed") {
       const { data } = await http.get("/packages", {
@@ -229,6 +261,8 @@ async function load() {
 // 切回「已安装」看到的是上一次清空后的空表（表现为 No Data）
 watch(mode, () => {
   selected.value = [];
+  tableEl.value?.clearSelection();
+  page.value = 1;
   hideInstalled.value = false;
   rows.value = [];
   if (mode.value === "search" && !keyword.value.trim()) {
@@ -369,6 +403,13 @@ onMounted(async () => {
 
 .opt {
   margin-left: 4px;
+}
+
+/* 分页条：贴右对齐，与表格同宽 */
+.pager {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--sp-3);
 }
 
 .count {
