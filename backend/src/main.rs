@@ -155,6 +155,8 @@ async fn main() -> anyhow::Result<()> {
 
     // 启动后台监控采样任务
     monitor::spawn_sampler(state.clone());
+    // 容器列表的后台采样：CLI 每次 fork 都要 ~170ms，不能让实例页每请求付一遍
+    instances::spawn_container_sampler();
 
     // 压缩放在外层：前端产物里 element-plus 一个包就 790KB，不压的话每次
     // 打开页面都在裸传。默认谓词已排除 SSE 与图片等不可压内容。

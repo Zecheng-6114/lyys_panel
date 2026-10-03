@@ -29,7 +29,7 @@ pub struct DockerStatus {
 }
 
 /// 容器信息
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct ContainerInfo {
     /// 短 ID
     pub id: String,
