@@ -13,16 +13,19 @@
       class="ctable"
       height="var(--panel-table-height)"
     >
-      <el-table-column label="说明" min-width="140">
+      <el-table-column label="说明" v-bind="col(140, true)">
         <template #default="{ row }">{{ row.comment || "-" }}</template>
       </el-table-column>
-      <el-table-column label="分" prop="minute" width="70" />
-      <el-table-column label="时" prop="hour" width="70" class-name="col-p2" label-class-name="col-p2" />
-      <el-table-column label="日" prop="day" width="70" class-name="col-p2" label-class-name="col-p2" />
-      <el-table-column label="月" prop="month" width="70" class-name="col-p3" label-class-name="col-p3" />
-      <el-table-column label="周" prop="weekday" width="70" class-name="col-p3" label-class-name="col-p3" />
-      <el-table-column label="命令" prop="command" min-width="280" show-overflow-tooltip />
-      <el-table-column label="操作" width="120" align="right">
+      <!-- 手机档把「分」也收起：时/日/月/周 早已在窄屏摘掉，单独留一个「分」
+           看着像完整调度，反而误导。手机上留「说明 + 命令 + 操作」这一组，
+           要看完整表达式进「编辑」。 -->
+      <el-table-column label="分" prop="minute" v-bind="col(70)" v-if="!hideColP2" />
+      <el-table-column label="时" prop="hour" v-bind="col(70)" v-if="!hideColP2" />
+      <el-table-column label="日" prop="day" v-bind="col(70)" v-if="!hideColP2" />
+      <el-table-column label="月" prop="month" v-bind="col(70)" v-if="!hideColP3" />
+      <el-table-column label="周" prop="weekday" v-bind="col(70)" v-if="!hideColP3" />
+      <el-table-column label="命令" prop="command" v-bind="col(280, true)" show-overflow-tooltip />
+      <el-table-column label="操作" v-bind="col(120)" align="right">
         <template #default="{ row, $index }">
           <el-button link size="small" @click="openEdit({ index: $index, entry: row })">
             编辑
@@ -71,6 +74,7 @@
 </template>
 
 <script setup lang="ts">
+import { col, hideColP2, hideColP3 } from "../composables/useResponsive";
 import { onMounted, reactive, ref } from "vue";
 import http from "../api/http";
 

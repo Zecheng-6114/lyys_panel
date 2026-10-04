@@ -105,12 +105,12 @@
           <el-button @click="loadImages">刷新</el-button>
         </div>
         <el-table :data="images" height="calc(100vh - 240px)" size="small">
-          <el-table-column prop="repository" label="仓库" min-width="180" />
-          <el-table-column prop="tag" label="标签" width="120" />
-          <el-table-column prop="id" label="镜像 ID" width="140" class-name="col-p2" label-class-name="col-p2" />
-          <el-table-column prop="size" label="大小" width="110" />
-          <el-table-column prop="created" label="创建于" width="140" class-name="col-p3" label-class-name="col-p3" />
-          <el-table-column label="操作" width="90">
+          <el-table-column prop="repository" label="仓库" v-bind="col(180, true)" />
+          <el-table-column prop="tag" label="标签" v-bind="col(120)" />
+          <el-table-column prop="id" label="镜像 ID" v-bind="col(140)" v-if="!hideColP2" />
+          <el-table-column prop="size" label="大小" v-bind="col(110)" />
+          <el-table-column prop="created" label="创建于" v-bind="col(140)" v-if="!hideColP3" />
+          <el-table-column label="操作" v-bind="col(90)">
             <template #default="{ row }">
               <el-button link size="small" @click="removeImage(row)">删除</el-button>
             </template>
@@ -127,11 +127,11 @@
           <el-button @click="loadCompose">刷新</el-button>
         </div>
         <el-table :data="projects" height="calc(100vh - 240px)" size="small">
-          <el-table-column prop="name" label="项目" min-width="180" />
-          <el-table-column prop="status" label="状态" width="180" />
-          <el-table-column prop="containers" label="容器数" width="90" class-name="col-p2" label-class-name="col-p2" />
-          <el-table-column prop="config_files" label="配置文件" min-width="220" show-overflow-tooltip class-name="col-p3" label-class-name="col-p3" />
-          <el-table-column label="操作" width="180">
+          <el-table-column prop="name" label="项目" v-bind="col(180, true)" />
+          <el-table-column prop="status" label="状态" v-bind="col(180)" />
+          <el-table-column prop="containers" label="容器数" v-bind="col(90)" v-if="!hideColP2" />
+          <el-table-column prop="config_files" label="配置文件" v-bind="col(220, true)" show-overflow-tooltip v-if="!hideColP3" />
+          <el-table-column label="操作" v-bind="col(180)">
             <template #default="{ row }">
               <el-button link size="small" @click="composeAct(row, 'up')">启动</el-button>
               <el-button link size="small" @click="composeAct(row, 'restart')">重启</el-button>
@@ -145,6 +145,7 @@
 </template>
 
 <script setup lang="ts">
+import { col, hideColP2, hideColP3 } from "../composables/useResponsive";
 import { computed, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ArrowDown } from "@element-plus/icons-vue";

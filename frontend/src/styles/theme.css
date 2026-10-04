@@ -223,6 +223,44 @@
   --el-table-cell-padding: var(--sp-2) var(--sp-3);
 }
 
+/* 手机档内容区四周内距从 16 收到 8（规则在 AppLayout.vue，那里写在 .content
+   之后才压得住），表格高度这一份反推跟着换用 --sp-2，否则表格会比可用空间
+   矮 16px、底部凭空空出一条。 */
+@media (max-width: 768px) {
+  :root {
+    --panel-table-height: calc(
+      100vh - var(--panel-topbar-h) - var(--sp-2) * 2 - var(--panel-toolbar-h)
+    );
+  }
+}
+
+/* 🔴 列表页（根节点直接挂着表格/日志框的页面）改成「撑满 .content」的纵向布局：
+   工具栏按自己的内容占高，表格吃掉剩下的全部高度。
+   为什么不能继续用 --panel-table-height 那个常数：它是「100vh − 顶栏 − 内距 −
+   工具栏」反推出来的，而工具栏在窄屏会折行 —— 手机档实测 32 → 110px（进程页
+   折两行 72，包管理页多一条状态行 110），多出来的高度没人扣，.content 就稳稳
+   多滚 24~78px。常数不可能预知折几行，只有让高度从实际占位算才成立。
+   桌面那 44 恰好 = 工具栏 32 + 下边距 12，所以桌面一直是准的 —— 弹性化后桌面
+   读出来的仍是同一个数（1440 进程页 772px，逐像素不变）。这条不做宽度分档、
+   桌面也走，是为了只留一套算法，别再出现「两种算法各算各的高度」。
+   ⚠️ 别再按「桌面矮了 12px」去改这里的数：那 12px 是工具栏自己的
+   margin-bottom，已经含在 44 里了。
+   :has() 不认识的老浏览器整条规则不生效，退回上面的 --panel-table-height，
+   与今天逐像素一致，不会更差。 */
+.content > *:has(> .el-table, > .logbox) {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+/* 表格/日志框吃剩余高度。flex-basis 归零后内联的 height 不再参与主轴计算 ——
+   各视图里那句 height="var(--panel-table-height)" 只作为上一条的兜底留着。 */
+.content > *:has(> .el-table, > .logbox) > .el-table,
+.content > *:has(> .el-table, > .logbox) > .logbox {
+  flex: 1 1 0;
+  min-height: 0;
+}
+
 /* 全局基础 */
 * {
   box-sizing: border-box;
@@ -531,6 +569,8 @@ body {
   border-radius: var(--radius);
   padding: var(--sp-1) var(--sp-3);
   cursor: pointer;
+  /* 按钮文案一律单行：窄屏父容器变窄时，默认会把两字按钮断成上下两行 */
+  white-space: nowrap;
 }
 .mini-btn:hover {
   background: var(--el-fill-color);

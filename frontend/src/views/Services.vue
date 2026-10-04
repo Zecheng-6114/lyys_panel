@@ -10,16 +10,16 @@
       <el-button @click="load">刷新</el-button>
     </div>
     <el-table :data="filtered" height="var(--panel-table-height)" size="small">
-      <el-table-column prop="name" label="服务" min-width="200" />
-      <el-table-column label="状态" width="120">
+      <el-table-column prop="name" label="服务" v-bind="col(200, true)" />
+      <el-table-column label="状态" v-bind="col(120)">
         <template #default="{ row }">
           <span :class="['dot', isActive(row) ? 'dot-on' : 'dot-off']" />
           {{ row.active || "未知" }}
         </template>
       </el-table-column>
-      <el-table-column prop="sub" label="子状态" width="120" class-name="col-p3" label-class-name="col-p3" />
-      <el-table-column prop="description" label="描述" min-width="220" show-overflow-tooltip class-name="col-p2" label-class-name="col-p2" />
-      <el-table-column label="操作" width="220">
+      <el-table-column prop="sub" label="子状态" v-bind="col(120)" v-if="!hideColP3" />
+      <el-table-column prop="description" label="描述" v-bind="col(220, true)" show-overflow-tooltip v-if="!hideColP2" />
+      <el-table-column label="操作" v-bind="col(220)">
         <template #default="{ row }">
           <el-button link size="small" @click="act(row.name, 'start')">启动</el-button>
           <el-button link size="small" @click="act(row.name, 'stop')">停止</el-button>
@@ -32,6 +32,7 @@
 </template>
 
 <script setup lang="ts">
+import { col, hideColP2, hideColP3 } from "../composables/useResponsive";
 import { computed, onMounted, ref } from "vue";
 import http from "../api/http";
 

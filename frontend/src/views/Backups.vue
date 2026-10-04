@@ -12,18 +12,18 @@
       size="small"
       height="var(--panel-table-height)"
     >
-      <el-table-column label="文件名" prop="name" min-width="240">
+      <el-table-column label="文件名" prop="name" v-bind="col(240, true)">
         <template #default="{ row }">
           <span class="mono">{{ row.name }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="大小" width="120">
+      <el-table-column label="大小" v-bind="col(120)">
         <template #default="{ row }">{{ fmtSize(row.size) }}</template>
       </el-table-column>
-      <el-table-column label="创建时间" width="180" class-name="col-p2" label-class-name="col-p2">
+      <el-table-column label="创建时间" v-bind="col(180)" v-if="!hideColP2">
         <template #default="{ row }">{{ fmtTime(row.mtime) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="180" align="right">
+      <el-table-column label="操作" v-bind="col(180)" align="right">
         <template #default="{ row }">
           <el-button link size="small" @click="download(row.name)">下载</el-button>
           <el-button link size="small" @click="restore(row.name)">恢复</el-button>
@@ -35,6 +35,7 @@
 </template>
 
 <script setup lang="ts">
+import { col, hideColP2 } from "../composables/useResponsive";
 import { onMounted, ref } from "vue";
 import http from "../api/http";
 import { submitJob } from "../api/jobs";

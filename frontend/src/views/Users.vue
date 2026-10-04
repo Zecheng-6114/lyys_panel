@@ -13,18 +13,18 @@
       size="small"
       height="var(--panel-table-height)"
     >
-      <el-table-column label="ID" prop="id" width="60" class-name="mono col-p3" label-class-name="col-p3" />
-      <el-table-column label="用户名" prop="username" min-width="140" />
-      <el-table-column label="角色" width="120">
+      <el-table-column label="ID" prop="id" v-bind="col(60)" class-name="mono" v-if="!hideColP3" />
+      <el-table-column label="用户名" prop="username" v-bind="col(140, true)" />
+      <el-table-column label="角色" v-bind="col(120)">
         <template #default="{ row }">
           <span class="dot" :class="row.role === 'admin' ? 'dot-on' : 'dot-off'" />
           {{ roleLabel(row.role) }}
         </template>
       </el-table-column>
-      <el-table-column label="待改密" width="90" class-name="col-p2" label-class-name="col-p2">
+      <el-table-column label="待改密" v-bind="col(90)" v-if="!hideColP2">
         <template #default="{ row }">{{ row.must_change ? "是" : "否" }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="220" align="right">
+      <el-table-column label="操作" v-bind="col(220)" align="right">
         <template #default="{ row }">
           <el-button link size="small" @click="openEdit(row)">编辑</el-button>
           <el-button link size="small" @click="kick(row)">踢下线</el-button>
@@ -66,6 +66,7 @@
 </template>
 
 <script setup lang="ts">
+import { col, hideColP2, hideColP3 } from "../composables/useResponsive";
 import { onMounted, reactive, ref } from "vue";
 import http from "../api/http";
 

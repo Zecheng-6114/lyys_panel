@@ -28,10 +28,10 @@
         :data="smart?.disks ?? []"
         size="small"
       >
-        <el-table-column label="设备" prop="device" width="130" class-name="mono" />
-        <el-table-column label="型号" prop="model" min-width="180" show-overflow-tooltip />
-        <el-table-column label="序列号" prop="serial" min-width="140" show-overflow-tooltip class-name="col-p3" label-class-name="col-p3" />
-        <el-table-column label="健康状态" width="120">
+        <el-table-column label="设备" prop="device" v-bind="col(130)" class-name="mono" />
+        <el-table-column label="型号" prop="model" v-bind="col(180, true)" show-overflow-tooltip />
+        <el-table-column label="序列号" prop="serial" v-bind="col(140, true)" show-overflow-tooltip v-if="!hideColP3" />
+        <el-table-column label="健康状态" v-bind="col(120)">
           <template #default="{ row }">
             <span class="dot-wrap">
               <i class="dot" :class="row.health === 'PASSED' ? 'dot-on' : 'dot-off'" />
@@ -45,10 +45,10 @@
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="温度" prop="temperature" width="80" class-name="col-p2" label-class-name="col-p2">
+        <el-table-column label="温度" prop="temperature" v-bind="col(80)" v-if="!hideColP2">
           <template #default="{ row }">{{ row.temperature != null ? row.temperature + "°C" : "—" }}</template>
         </el-table-column>
-        <el-table-column label="通电时长" prop="powered_on_hours" width="110" class-name="col-p2" label-class-name="col-p2">
+        <el-table-column label="通电时长" prop="powered_on_hours" v-bind="col(110)" v-if="!hideColP2">
           <template #default="{ row }">{{ row.powered_on_hours != null ? row.powered_on_hours + "h" : "—" }}</template>
         </el-table-column>
       </el-table>
@@ -142,6 +142,7 @@
 </template>
 
 <script setup lang="ts">
+import { col, hideColP2, hideColP3 } from "../composables/useResponsive";
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import http from "../api/http";
 

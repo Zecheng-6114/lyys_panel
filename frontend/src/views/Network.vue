@@ -19,19 +19,19 @@
       class="ntable"
       height="var(--panel-table-height)"
     >
-      <el-table-column label="接口" prop="ifname" width="140" />
-      <el-table-column label="状态" width="100">
+      <el-table-column label="接口" prop="ifname" v-bind="col(140)" />
+      <el-table-column label="状态" v-bind="col(100)">
         <template #default="{ row }">
           <span class="dot" :class="row.operstate === 'UP' ? 'dot-on' : 'dot-off'"></span>
           {{ row.operstate }}
         </template>
       </el-table-column>
-      <el-table-column label="MTU" prop="mtu" width="90" class-name="col-p3" label-class-name="col-p3" />
-      <el-table-column label="类型" prop="link_type" width="120" class-name="col-p2" label-class-name="col-p2" />
-      <el-table-column label="MAC" width="180" class-name="col-p3" label-class-name="col-p3">
+      <el-table-column label="MTU" prop="mtu" v-bind="col(90)" v-if="!hideColP3" />
+      <el-table-column label="类型" prop="link_type" v-bind="col(120)" v-if="!hideColP2" />
+      <el-table-column label="MAC" v-bind="col(180)" v-if="!hideColP3">
         <template #default="{ row }">{{ row.address || "-" }}</template>
       </el-table-column>
-      <el-table-column label="IP 地址" min-width="280">
+      <el-table-column label="IP 地址" v-bind="col(280, true)">
         <template #default="{ row }">
           <div v-for="(a, i) in row.addr_info || []" :key="i">
             {{ a.local }}/{{ a.prefixlen }}
@@ -50,13 +50,13 @@
       class="ntable"
       height="var(--panel-table-height)"
     >
-      <el-table-column label="状态" prop="state" width="130" />
-      <el-table-column label="本地地址" prop="local" min-width="200" />
-      <el-table-column label="对端地址" prop="peer" min-width="200" class-name="col-p2" label-class-name="col-p2" />
-      <el-table-column label="队列(R/S)" width="110" class-name="col-p3" label-class-name="col-p3">
+      <el-table-column label="状态" prop="state" v-bind="col(130)" />
+      <el-table-column label="本地地址" prop="local" v-bind="col(200, true)" />
+      <el-table-column label="对端地址" prop="peer" v-bind="col(200, true)" v-if="!hideColP2" />
+      <el-table-column label="队列(R/S)" v-bind="col(110)" v-if="!hideColP3">
         <template #default="{ row }">{{ row.recv_q }} / {{ row.send_q }}</template>
       </el-table-column>
-      <el-table-column label="进程" min-width="220">
+      <el-table-column label="进程" v-bind="col(220, true)">
         <template #default="{ row }">{{ row.process || "-" }}</template>
       </el-table-column>
     </el-table>
@@ -69,15 +69,15 @@
       class="ntable"
       height="var(--panel-table-height)"
     >
-      <el-table-column label="目的" min-width="200">
+      <el-table-column label="目的" v-bind="col(200, true)">
         <template #default="{ row }">{{ row.dst || "default" }}</template>
       </el-table-column>
-      <el-table-column label="网关" width="180">
+      <el-table-column label="网关" v-bind="col(180)">
         <template #default="{ row }">{{ row.gateway || "-" }}</template>
       </el-table-column>
-      <el-table-column label="接口" prop="dev" width="140" />
-      <el-table-column label="协议" prop="protocol" width="110" class-name="col-p2" label-class-name="col-p2" />
-      <el-table-column label="scope" prop="scope" width="110" class-name="col-p3" label-class-name="col-p3" />
+      <el-table-column label="接口" prop="dev" v-bind="col(140)" />
+      <el-table-column label="协议" prop="protocol" v-bind="col(110)" v-if="!hideColP2" />
+      <el-table-column label="scope" prop="scope" v-bind="col(110)" v-if="!hideColP3" />
     </el-table>
 
     <div v-else class="dnsbox">
@@ -88,6 +88,7 @@
 </template>
 
 <script setup lang="ts">
+import { col, hideColP2, hideColP3 } from "../composables/useResponsive";
 import { onMounted, ref } from "vue";
 import http from "../api/http";
 

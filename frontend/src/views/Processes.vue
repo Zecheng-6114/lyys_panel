@@ -15,31 +15,30 @@
     </div>
 
     <el-table :data="filtered" height="var(--panel-table-height)" size="small">
-      <el-table-column label="PID" width="90">
+      <el-table-column label="PID" v-bind="col(90)">
         <template #default="{ row }"><span class="mono">{{ row.pid }}</span></template>
       </el-table-column>
-      <el-table-column prop="name" label="名称" min-width="140" />
+      <el-table-column prop="name" label="名称" v-bind="col(140, true)" />
       <el-table-column
         label="可执行路径"
-        min-width="240"
+        v-bind="col(240, true)"
         show-overflow-tooltip
-        class-name="col-p2"
-        label-class-name="col-p2"
+        v-if="!hideColP2"
       >
         <template #default="{ row }">
           <span v-if="row.exe" class="mono">{{ row.exe }}</span>
           <span v-else class="dim">（内核线程）</span>
         </template>
       </el-table-column>
-      <el-table-column label="CPU" width="90">
+      <el-table-column label="CPU" v-bind="col(90)">
         <template #default="{ row }"><span class="mono">{{ row.cpu.toFixed(1) }}%</span></template>
       </el-table-column>
-      <el-table-column label="内存" width="100">
+      <el-table-column label="内存" v-bind="col(100)">
         <template #default="{ row }"><span class="mono">{{ fmtBytes(row.mem) }}</span></template>
       </el-table-column>
-      <el-table-column prop="user" label="用户" width="110" class-name="col-p2" label-class-name="col-p2" />
-      <el-table-column prop="status" label="状态" width="90" class-name="col-p3" label-class-name="col-p3" />
-      <el-table-column label="操作" width="100">
+      <el-table-column prop="user" label="用户" v-bind="col(110)" v-if="!hideColP2" />
+      <el-table-column prop="status" label="状态" v-bind="col(90)" v-if="!hideColP3" />
+      <el-table-column label="操作" v-bind="col(100)">
         <template #default="{ row }">
           <el-button link size="small" @click="kill(row.pid)">结束</el-button>
         </template>
@@ -49,6 +48,7 @@
 </template>
 
 <script setup lang="ts">
+import { col, hideColP2, hideColP3 } from "../composables/useResponsive";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import http from "../api/http";

@@ -613,12 +613,6 @@ async function logout() {
   .side-menu :deep(.el-menu-item) {
     margin: 1px 0;
   }
-  .content {
-    padding: var(--sp-3);
-    /* 内凹圆角是为「侧边栏右边界 × 顶栏下沿」设计的。窄屏侧边栏不再常驻，
-       交汇点不存在，留着会在左上角留下一个无来由的缺口。 */
-    border-top-left-radius: 0;
-  }
 }
 .main {
   flex: 1;
@@ -645,6 +639,17 @@ async function logout() {
   gap: var(--sp-2);
   min-width: 0;
 }
+/* 窄屏顶栏宽度紧张：分组标签与标题的间距收到标尺最窄的 4，省下的这几像素
+   刚好让「系统设置」这类四字标题不被省略号截掉（320 宽下实测：分组标签
+   因 letter-spacing 实占 39px，标题只剩 63px、需要 64px，差的就是这一档）。
+   🔴 这条必须写在这里，不能并进上面那个 @media (max-width: 768px) 块 ——
+   那个块在文件里位于 .page-head 之前，而媒体查询不提升特异性，同特异性下
+   按源顺序取胜，写在前面的 gap 会被上面这行原样盖掉。 */
+@media (max-width: 768px) {
+  .page-head {
+    gap: var(--sp-1);
+  }
+}
 /* 分组标识：与侧栏同一份数据源，形成「侧栏在哪一组 → 顶栏再确认一次」的闭环 */
 .page-group {
   flex: none;
@@ -657,14 +662,24 @@ async function logout() {
   color: var(--el-text-color-secondary);
   background: var(--el-fill-color-light);
   border-radius: var(--radius);
+  /* 窄屏顶栏宽度紧张时，这两字标签宁可被挤掉的应是标题，而不是自己断成两行 */
+  white-space: nowrap;
 }
 .page-title {
   font-size: 16px;
   font-weight: 500;
+  /* 顶栏是横向 flex，宽度不够时默认会把文字折行 —— 标题会当场断成「系统设/置」
+     两行、把顶栏撑高。改成整行不换行、超出用省略号：收缩的压力落在标题自己
+     身上（.page-head 已有 min-width:0），右侧按钮保持完整。 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .top-actions {
   display: flex;
   gap: var(--sp-2);
+  /* 按钮不参与收缩：宁可标题被省略号截短，也不要「改密」「退出」被压到断行 */
+  flex: none;
 }
 .content {
   flex: 1;
@@ -686,5 +701,22 @@ async function logout() {
      不需要额外控件、渐变、伪元素或 SVG。 */
   border-top-left-radius: var(--radius);
   background-color: var(--el-bg-color-page);
+}
+
+/* 手机档内容区四周从 16 缩到标尺的 8。表格列宽是按容器算的，省下的这 8×2
+   像素直接变成列宽：360 视口下包管理页原本要横拖 14px 才看得全，收窄内距后
+   正好落进容器。
+   🔴 这段（含圆角）必须写在 .content 之后 —— 媒体查询不提升特异性，同特异性下
+   按源顺序取胜，写在前面的 @media 块里的声明会被 .content 基础规则原样盖掉
+   （顶栏 gap 踩过同样的坑）。文件上面那个 @media 块里原本也挂着一份
+   `.content{padding: --sp-3; border-top-left-radius: 0}`，因为写在基础规则之前，
+   内距从来没生效过、圆角也从来没归零 —— 两处意图一并收到这里，才真正落地。 */
+@media (max-width: 768px) {
+  .content {
+    padding: var(--sp-2);
+    /* 内凹圆角是为「侧边栏右边界 × 顶栏下沿」设计的。窄屏侧边栏不再常驻，
+       交汇点不存在，留着会在左上角留下一个无来由的缺口。 */
+    border-top-left-radius: 0;
+  }
 }
 </style>

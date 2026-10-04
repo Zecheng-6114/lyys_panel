@@ -8,8 +8,9 @@ import "element-plus/es/components/notification/style/css";
 import App from "./App.vue";
 import router from "./router";
 import "./styles/theme.css";
-// 4.1 移动端适配：表格列优先级折叠等断点样式
-import "./styles/responsive.css";
+// 移动端表格列折叠没有全局样式文件可引：断点状态在 composables/useResponsive.ts
+// （原 styles/responsive.css 的 display:none 折叠方案已废弃 —— Element Plus 用
+// colgroup 的 width 属性定列宽，藏 td/th 一点宽度都不释放）
 
 const app = createApp(App);
 app.use(createPinia());

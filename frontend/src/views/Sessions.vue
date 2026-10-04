@@ -12,19 +12,19 @@
       size="small"
       height="var(--panel-table-height)"
     >
-      <el-table-column label="用户" prop="username" width="120" />
-      <el-table-column label="会话" prop="jti_prefix" width="110" class-name="mono col-p3" label-class-name="col-p3" />
-      <el-table-column label="来源 IP" prop="ip" width="140" class-name="mono" />
-      <el-table-column label="客户端" min-width="220" show-overflow-tooltip>
+      <el-table-column label="用户" prop="username" v-bind="col(120)" />
+      <el-table-column label="会话" prop="jti_prefix" v-bind="col(110)" class-name="mono" v-if="!hideColP3" />
+      <el-table-column label="来源 IP" prop="ip" v-bind="col(140)" class-name="mono" />
+      <el-table-column label="客户端" v-bind="col(220, true)" show-overflow-tooltip>
         <template #default="{ row }">{{ row.ua || "-" }}</template>
       </el-table-column>
-      <el-table-column label="签发时间" width="170" class-name="col-p3" label-class-name="col-p3">
+      <el-table-column label="签发时间" v-bind="col(170)" v-if="!hideColP3">
         <template #default="{ row }">{{ fmt(row.iat) }}</template>
       </el-table-column>
-      <el-table-column label="过期时间" width="170" class-name="col-p2" label-class-name="col-p2">
+      <el-table-column label="过期时间" v-bind="col(170)" v-if="!hideColP2">
         <template #default="{ row }">{{ fmt(row.exp) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="140" align="right">
+      <el-table-column label="操作" v-bind="col(140)" align="right">
         <template #default="{ row }">
           <el-tag v-if="row.current" size="small" type="info">当前</el-tag>
           <el-button
@@ -42,6 +42,7 @@
 </template>
 
 <script setup lang="ts">
+import { col, hideColP2, hideColP3 } from "../composables/useResponsive";
 import { onMounted, ref } from "vue";
 import http from "../api/http";
 import { useAuthStore } from "../stores/auth";

@@ -11,16 +11,16 @@
     <div class="block block-rules">
       <div class="section-title">告警规则</div>
       <el-table v-loading="loading" :data="rules" size="small">
-        <el-table-column label="指标" width="120">
+        <el-table-column label="指标" v-bind="col(120)">
           <template #default="{ row }">{{ metricLabel(row.metric) }}</template>
         </el-table-column>
-        <el-table-column label="阈值" width="100">
+        <el-table-column label="阈值" v-bind="col(100)">
           <template #default="{ row }">{{ row.threshold }}%</template>
         </el-table-column>
-        <el-table-column label="恢复通知" width="100">
+        <el-table-column label="恢复通知" v-bind="col(100)">
           <template #default="{ row }">{{ row.notify_resolve ? "是" : "否" }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="120" align="right">
+        <el-table-column label="操作" v-bind="col(120)" align="right">
           <template #default="{ $index }">
             <el-button link size="small" @click="openEdit($index)">编辑</el-button>
             <el-button link size="small" @click="removeRule($index)">删除</el-button>
@@ -43,17 +43,17 @@
     <div class="block block-events">
       <div class="section-title">最近告警事件</div>
       <el-table v-loading="eventsLoading" :data="events" size="small">
-        <el-table-column label="时间" width="180">
+        <el-table-column label="时间" v-bind="col(180)">
           <template #default="{ row }">{{ fmtTime(row.ts) }}</template>
         </el-table-column>
-        <el-table-column label="指标" width="100" prop="metric" />
-        <el-table-column label="当前值" width="100">
+        <el-table-column label="指标" v-bind="col(100)" prop="metric" />
+        <el-table-column label="当前值" v-bind="col(100)">
           <template #default="{ row }">{{ row.value.toFixed(1) }}%</template>
         </el-table-column>
-        <el-table-column label="阈值" width="100" class-name="col-p3" label-class-name="col-p3">
+        <el-table-column label="阈值" v-bind="col(100)" v-if="!hideColP3">
           <template #default="{ row }">{{ row.threshold.toFixed(0) }}%</template>
         </el-table-column>
-        <el-table-column label="状态" min-width="120">
+        <el-table-column label="状态" v-bind="col(120, true)">
           <template #default="{ row }">
             <span class="dot-wrap">
               <i class="dot" :class="row.state === 'firing' ? 'dot-on' : 'dot-off'" />
@@ -89,6 +89,7 @@
 </template>
 
 <script setup lang="ts">
+import { col, hideColP3 } from "../composables/useResponsive";
 import { onMounted, reactive, ref } from "vue";
 import http from "../api/http";
 

@@ -50,22 +50,22 @@
       :row-class-name="rowClassName"
       @row-click="onRowClick"
     >
-      <el-table-column label="名称" min-width="260">
+      <el-table-column label="名称" v-bind="col(260, true)">
         <template #default="{ row }">
           <span :class="row.is_dir ? 'dirname' : ''">{{ row.name }}</span>
           <span v-if="row.is_symlink" class="linkmark">@</span>
         </template>
       </el-table-column>
-      <el-table-column label="大小" width="110" align="right">
+      <el-table-column label="大小" v-bind="col(110)" align="right">
         <template #default="{ row }">{{ row.is_dir ? "-" : fmtSize(row.size) }}</template>
       </el-table-column>
-      <el-table-column label="权限" width="90" class-name="col-p3" label-class-name="col-p3">
+      <el-table-column label="权限" v-bind="col(90)" v-if="!hideColP3">
         <template #default="{ row }">{{ row.mode }}</template>
       </el-table-column>
-      <el-table-column label="修改时间" width="170" class-name="col-p2" label-class-name="col-p2">
+      <el-table-column label="修改时间" v-bind="col(170)" v-if="!hideColP2">
         <template #default="{ row }">{{ fmtTime(row.mtime) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="230" align="right">
+      <el-table-column label="操作" v-bind="col(230)" align="right">
         <template #default="{ row }">
           <el-button v-if="!row.is_dir" link size="small" @click="editFile(row)">
             {{ isContainer ? "查看" : "编辑" }}
@@ -121,6 +121,7 @@
 </template>
 
 <script setup lang="ts">
+import { col, hideColP2, hideColP3 } from "../composables/useResponsive";
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import http from "../api/http";

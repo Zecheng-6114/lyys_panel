@@ -16,28 +16,28 @@
       size="small"
       height="var(--panel-table-height)"
     >
-      <el-table-column label="类型" width="130">
+      <el-table-column label="类型" v-bind="col(130)">
         <template #default="{ row }">{{ kindLabel(row.kind) }}</template>
       </el-table-column>
-      <el-table-column label="参数" min-width="220" show-overflow-tooltip>
+      <el-table-column label="参数" v-bind="col(220, true)" show-overflow-tooltip>
         <template #default="{ row }">
           <span class="mono">{{ summary(row) }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="状态" width="100">
+      <el-table-column label="状态" v-bind="col(100)">
         <template #default="{ row }">
           <el-tag :type="statusMeta(row.status).type" size="small" effect="plain">
             {{ statusMeta(row.status).label }}
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="耗时" width="110">
+      <el-table-column label="耗时" v-bind="col(110)" v-if="!hideColP2">
         <template #default="{ row }">{{ elapsed(row) }}</template>
       </el-table-column>
-      <el-table-column label="提交时间" width="180">
+      <el-table-column label="提交时间" v-bind="col(180)" v-if="!hideColP2">
         <template #default="{ row }">{{ fmtTime(row.created_at) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="150" align="right">
+      <el-table-column label="操作" v-bind="col(150)" align="right">
         <template #default="{ row }">
           <el-button link size="small" @click="openDetail(row.id)">查看输出</el-button>
           <el-button
@@ -75,6 +75,7 @@
 </template>
 
 <script setup lang="ts">
+import { col, hideColP2 } from "../composables/useResponsive";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { ElMessage } from "element-plus";
 import {

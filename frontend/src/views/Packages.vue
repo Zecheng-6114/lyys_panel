@@ -79,8 +79,8 @@
       @selection-change="(v: Pkg[]) => (selected = v)"
     >
       <el-table-column v-if="selectable" type="selection" width="36" reserve-selection />
-      <el-table-column label="包名" prop="name" min-width="200" />
-      <el-table-column label="版本" width="250" class-name="col-p2" label-class-name="col-p2">
+      <el-table-column label="包名" prop="name" v-bind="col(200, true)" />
+      <el-table-column label="版本" v-bind="col(250)" v-if="!hideColP2">
         <template #default="{ row }">
           <template v-if="row.version.includes(' -> ')">
             <span class="mono ver-old">{{ row.version.split(" -> ")[0] }}</span>
@@ -91,14 +91,12 @@
         </template>
       </el-table-column>
       <el-table-column
-        v-if="hasRepo"
+        v-if="hasRepo && !hideColP3"
         label="仓库"
         prop="repo"
-        width="120"
-        class-name="col-p3"
-        label-class-name="col-p3"
+        v-bind="col(120)"
       />
-      <el-table-column v-if="mode === 'search'" label="状态" width="190">
+      <el-table-column v-if="mode === 'search'" label="状态" v-bind="col(190)">
         <template #default="{ row }">
           <template v-if="row.installed">
             <span class="mono ver-old">{{ row.installed }}</span>
@@ -108,14 +106,12 @@
         </template>
       </el-table-column>
       <el-table-column
-        v-if="hasArch"
+        v-if="hasArch && !hideColP3"
         label="架构"
         prop="arch"
-        width="100"
-        class-name="col-p3"
-        label-class-name="col-p3"
+        v-bind="col(100)"
       />
-      <el-table-column label="描述" prop="description" min-width="300" show-overflow-tooltip />
+      <el-table-column label="描述" prop="description" v-bind="col(300, true)" show-overflow-tooltip />
     </el-table>
 
     <!-- 分页：表格组件不做虚拟滚动，一次渲染两千行必然卡；分页让渲染量恒定 -->
@@ -134,6 +130,7 @@
 </template>
 
 <script setup lang="ts">
+import { col, hideColP2, hideColP3 } from "../composables/useResponsive";
 import { computed, onMounted, ref, watch } from "vue";
 import http from "../api/http";
 import { pkgMetaSafe, type PkgMeta } from "../api/meta";
