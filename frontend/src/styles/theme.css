@@ -337,7 +337,9 @@ body {
    滚动条走的就是这一段，不存在「单独设圆角」的额外需求（3px 圆角已在上面给了）。 */
 
 /* 全局工具类：页面内容区背景（主题定制可注入 --panel-bg-image 铺背景图；
-   AppLayout 的 scoped 规则只改底色，图片/尺寸/定位由这里统一给） */
+   AppLayout 的 scoped 规则在这之上只设 background-color 改底色，图片/尺寸/定位
+   统一由这里给。⚠️ 那边的底色一度写成 background 简写，会把 background-image
+   一并重置为 none，背景图因此始终不显示 —— 只能用 background-color。） */
 .content {
   background-image: var(--panel-bg-image, none);
   background-size: cover;

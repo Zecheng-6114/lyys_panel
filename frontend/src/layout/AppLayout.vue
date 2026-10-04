@@ -685,6 +685,6 @@ async function logout() {
      （.layout 背景 / .sidebar），交汇处自然沿圆弧内凹。
      不需要额外控件、渐变、伪元素或 SVG。 */
   border-top-left-radius: var(--radius);
-  background: var(--el-bg-color-page);
+  background-color: var(--el-bg-color-page);
 }
 </style>
