@@ -3,6 +3,14 @@
 本文件记录 LYYS Panel 的显著变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循语义化版本（[SemVer](https://semver.org/lang/zh-CN/)）。
 
+## [1.9.1] - 2026-10-04
+
+### 修复
+- 界面设置里的背景图始终不显示：内容区的 scoped 规则用了 `background` 简写，
+  它把 `background-image` 一并重置为 `none`，而该规则带作用域属性、特异性高于
+  `theme.css` 里绘制 `--panel-bg-image` 的全局规则，图片注入成功却没人消费；
+  改用 `background-color` 只改底色 (cc42108)
+
 ## [1.9.0] - 2026-10-04
 
 ### 新增
