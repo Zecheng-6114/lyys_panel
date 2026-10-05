@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # LYYS Panel 卸载脚本。反向执行 install.sh：停止并禁用服务、删除
-# systemd 单元、二进制与配置；默认保留数据目录与系统用户。
+# systemd 单元、二进制、管理命令与配置；默认保留数据目录与系统用户。
 #
 # 用法：
 #   sudo bash uninstall.sh [选项]
@@ -11,20 +11,40 @@
 #                与系统用户一起删除，请谨慎使用
 #   --keep-conf  保留 /etc/lyys-panel 配置目录（默认会删除）
 #   -h | --help  显示本帮助
+#
+# 目录变量可用环境变量覆盖，取值口径与 install.sh 一致：
+#   PANEL_INSTALL_DIR / PANEL_CONF_DIR / PANEL_DATA_DIR
 set -euo pipefail
 
-INSTALL_DIR="/opt/lyys-panel"
-CONF_DIR="/etc/lyys-panel"
-DATA_DIR="/var/lib/lyys-panel"
+INSTALL_DIR="${PANEL_INSTALL_DIR:-/opt/lyys-panel}"
+CONF_DIR="${PANEL_CONF_DIR:-/etc/lyys-panel}"
+DATA_DIR="${PANEL_DATA_DIR:-/var/lib/lyys-panel}"
 SERVICE_NAME="lyys-panel"
 SERVICE_USER="lyys-panel"
+CTL_PATH="/usr/local/bin/lyys-panel-ctl"
 
 PURGE=0
 KEEP_CONF=0
 
 log() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 
-usage() { sed -n '2,14p' "$0"; exit 0; }
+usage() {
+  cat <<'USAGE'
+LYYS Panel 卸载脚本
+
+用法：
+  sudo bash uninstall.sh [选项]
+
+选项：
+  --purge      连同数据目录（含数据库 / 自签证书 / 备份）与系统用户一起删除
+  --keep-conf  保留 /etc/lyys-panel 配置目录（默认会删除）
+  -h | --help  显示本帮助
+
+说明：
+  默认保留数据目录与系统用户，便于重装后接着用；确认不再需要时加 --purge。
+USAGE
+  exit 0
+}
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -47,6 +67,9 @@ systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true
 
 log "删除程序目录 ${INSTALL_DIR}"
 rm -rf "$INSTALL_DIR"
+
+log "删除管理命令 ${CTL_PATH}"
+rm -f "$CTL_PATH"
 
 if [ "$KEEP_CONF" -eq 1 ]; then
   log "按要求保留配置目录 ${CONF_DIR}"

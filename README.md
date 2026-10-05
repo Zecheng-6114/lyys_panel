@@ -75,8 +75,8 @@ LYYS Panel 面向单台 Linux 服务器的日常运维，把系统监控、进�
 ### 一键安装（服务器部署，推荐）
 
 在目标服务器上以 root 执行，脚本会自动识别 x86_64 / aarch64 并下载对应架构的
-release 二进制，创建系统用户与目录、生成 env 模板（默认 HTTPS 自签证书）和
-systemd 单元并启动服务：
+release 二进制（默认用 release 附带的 `.sha256` 校验），创建系统用户与目录、
+生成 env 模板（默认 HTTPS 自签证书）和 systemd 单元、安装管理命令并启动服务：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Zecheng-6114/lyys_panel/main/scripts/install.sh \
@@ -86,16 +86,43 @@ curl -fsSL https://raw.githubusercontent.com/Zecheng-6114/lyys_panel/main/script
 常用选项（也可先下载脚本再执行 `sudo bash install.sh --help`）：
 
 ```bash
-sudo bash install.sh --version v1.7.0      # 指定 release 标签（默认查最新）
-sudo bash install.sh --addr 0.0.0.0:3789   # 监听地址（脚本默认 0.0.0.0:3789）
-sudo bash install.sh --no-tls              # 关闭 HTTPS，纯 HTTP
-sudo bash install.sh -h                    # 查看全部选项
-sudo bash uninstall.sh                     # 卸载：删配置目录，保留数据与系统用户
+sudo bash install.sh --version v1.10.0      # 指定 release 标签（默认查最新）
+sudo bash install.sh --addr 0.0.0.0:3789    # 监听地址（脚本默认 0.0.0.0:3789）
+sudo bash install.sh --port 9443            # 只改端口，等价 --addr 0.0.0.0:9443
+sudo bash install.sh --no-tls               # 关闭 HTTPS，纯 HTTP
+sudo bash install.sh --admin-password 'xxx' # 首次安装时直接设定管理员密码
+sudo bash install.sh --package ./lyys-panel # 离线安装：用本地二进制，不联网
+sudo bash install.sh --no-checksum          # 跳过 sha256 校验（不推荐）
+sudo bash install.sh -h                     # 查看全部选项
+```
+
+同名环境变量可替代对应选项，便于非交互批量部署：`PANEL_VERSION` / `PANEL_ADDR` /
+`PANEL_TLS` / `PANEL_ADMIN_PASSWORD` / `PANEL_INSTALL_DIR` / `PANEL_CONF_DIR` /
+`PANEL_DATA_DIR` / `PANEL_PACKAGE`。
+
+重复执行 install.sh 即为升级（覆盖二进制与 systemd 单元，不改动已有配置与数据）。
+
+### 服务管理命令
+
+安装脚本会同时装上 `lyys-panel-ctl`，日常运维不必再记 systemd 与配置文件路径：
+
+```bash
+lyys-panel-ctl status      # 服务状态与最近日志
+lyys-panel-ctl restart     # 重启服务（start / stop 同理）
+lyys-panel-ctl logs -f     # 跟随输出服务日志
+lyys-panel-ctl user-info   # 访问地址、账号与初始密码文件位置
+lyys-panel-ctl config      # 当前环境配置（密码字段打码）
+lyys-panel-ctl help        # 全部命令
+```
+
+### 卸载
+
+```bash
+sudo bash uninstall.sh                     # 删配置目录与管理命令，保留数据与系统用户
 sudo bash uninstall.sh --purge             # 连数据目录（数据库 / 证书 / 备份）与系统用户一起删
 sudo bash uninstall.sh --keep-conf         # 保留 /etc/lyys-panel 配置目录
 ```
 
-重复执行 install.sh 即为升级（覆盖二进制与 systemd 单元，不改动已有配置与数据）。
 初始密码获取、证书警告等常见问题见下文 FAQ。
 
 ### 前置要求（从源码构建）
@@ -237,7 +264,8 @@ sudo systemctl enable --now lyys-panel
 
 **初始 admin 密码在哪？**
 
-未设置 `PANEL_ADMIN_PASSWORD` 时，首次启动会生成随机密码写入数据目录下的
+安装时用 `--admin-password` 指定过的话，直接用它登录即可。未设置
+`PANEL_ADMIN_PASSWORD` 时，首次启动会生成随机密码写入数据目录下的
 `initial_admin_password.txt`（权限 0600，**不打印到日志**），首次登录成功后
 该文件自动删除。通过 install.sh 安装时位于 `/var/lib/lyys-panel/`：
 
@@ -245,7 +273,8 @@ sudo systemctl enable --now lyys-panel
 cat /var/lib/lyys-panel/initial_admin_password.txt
 ```
 
-首次登录会强制改密。
+懒得记路径可以用 `sudo lyys-panel-ctl user-info`，它会直接给出访问地址与该文件
+位置。首次登录会强制改密。
 
 **忘记密码怎么办？**
 
@@ -261,7 +290,20 @@ admin 可在「账号管理」页重置任意用户的密码；admin 自己的�
 **如何修改端口 / 只监听本机？**
 
 编辑 `/etc/lyys-panel/panel.env` 中的 `PANEL_ADDR`（如 `127.0.0.1:3789`），
-然后 `sudo systemctl restart lyys-panel`。
+然后 `sudo lyys-panel-ctl restart`（等价于 `systemctl restart lyys-panel`）。
+首次安装时也可以直接 `--addr 127.0.0.1:3789` 或 `--port 9443` 一步到位。
+
+**服务器在内网 / 无法访问 GitHub 怎么装？**
+
+在能联网的机器上下载 release 资产（`lyys-panel` 或 `lyys-panel-aarch64`），
+连同 `scripts/install.sh` 一起拷进内网，然后：
+
+```bash
+sudo bash install.sh --package ./lyys-panel
+```
+
+`--package` 会跳过下载与校验直接安装本地文件。注意内置的「在线自更新」依赖
+GitHub，内网环境升级请走「面板更新」页的手动上传通道。
 
 **aarch64 机器能用吗？**
 
