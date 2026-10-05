@@ -23,6 +23,7 @@ mod packages;
 mod rprocess;
 mod tls;
 mod update;
+mod websearch; // AI 助手联网：搜索多通道 + 网页正文抓取（含 SSRF 闸门）
 
 use std::path::PathBuf;
 use std::sync::Arc;

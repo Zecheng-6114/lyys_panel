@@ -78,6 +78,8 @@ pub struct AiMsgRow {
     pub id: i64,
     pub role: String,
     pub content: String,
+    /// 有序轨迹（思考/工具/正文）的 JSON 文本；用户消息与老数据为空串
+    pub parts: String,
     pub ts: i64,
 }
 
@@ -202,6 +204,11 @@ impl Db {
             12,
             "0012_jobs.sql",
             include_str!("../migrations/0012_jobs.sql"),
+        ),
+        (
+            13,
+            "0013_ai_trace.sql",
+            include_str!("../migrations/0013_ai_trace.sql"),
         ),
     ];
 
@@ -820,12 +827,20 @@ impl Db {
 
     // ---------- AI 助手（4.5 悬浮球，按用户持久化） ----------
 
-    /// 写入一条助手消息，返回 id
-    pub fn ai_msg_add(&self, user_id: i64, role: &str, content: &str, ts: i64) -> Result<i64> {
+    /// 写入一条助手消息，返回 id。`parts` 为有序轨迹 JSON（可为空串）
+    pub fn ai_msg_add(
+        &self,
+        user_id: i64,
+        role: &str,
+        content: &str,
+        parts: &str,
+        ts: i64,
+    ) -> Result<i64> {
         let conn = self.pool.get().context("获取数据库连接失败")?;
         conn.execute(
-            "INSERT INTO ai_messages (user_id, role, content, ts) VALUES (?1, ?2, ?3, ?4)",
-            (user_id, role, content, ts),
+            "INSERT INTO ai_messages (user_id, role, content, parts, ts) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            (user_id, role, content, parts, ts),
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -834,7 +849,7 @@ impl Db {
     pub fn ai_msg_list(&self, user_id: i64, limit: i64) -> Result<Vec<AiMsgRow>> {
         let conn = self.pool.get().context("获取数据库连接失败")?;
         let mut stmt = conn.prepare(
-            "SELECT id, role, content, ts FROM ai_messages \
+            "SELECT id, role, content, parts, ts FROM ai_messages \
              WHERE user_id = ?1 ORDER BY id DESC LIMIT ?2",
         )?;
         let mut rows = stmt
@@ -843,7 +858,8 @@ impl Db {
                     id: row.get(0)?,
                     role: row.get(1)?,
                     content: row.get(2)?,
-                    ts: row.get(3)?,
+                    parts: row.get(3)?,
+                    ts: row.get(4)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1353,10 +1369,11 @@ impl Db {
         user_id: i64,
         role: String,
         content: String,
+        parts: String,
         ts: i64,
     ) -> Result<i64> {
         let db = self.clone();
-        blocking(move || db.ai_msg_add(user_id, &role, &content, ts)).await
+        blocking(move || db.ai_msg_add(user_id, &role, &content, &parts, ts)).await
     }
 
     pub async fn ai_msg_list_async(&self, user_id: i64, limit: i64) -> Result<Vec<AiMsgRow>> {
@@ -1504,14 +1521,27 @@ mod tests {
         assert!(!table_exists(&db, "ai_rooms"), "旧会话表应被删除");
         assert!(!table_exists(&db, "ai_members"), "旧成员表应被删除");
         assert!(!table_exists(&db, "ai_room_users"), "受邀表应被删除");
-        // 新表结构：按用户写入/读取/清空
-        db.ai_msg_add(7, "user", "你好", 1).unwrap();
-        db.ai_msg_add(7, "assistant", "你好！", 2).unwrap();
-        db.ai_msg_add(8, "user", "别的用户", 3).unwrap();
+        // 新表结构：按用户写入/读取/清空（含 0013 加的 parts 轨迹列）
+        db.ai_msg_add(7, "user", "你好", "", 1).unwrap();
+        db.ai_msg_add(
+            7,
+            "assistant",
+            "你好！",
+            r#"[{"kind":"content","text":"你好！"}]"#,
+            2,
+        )
+        .unwrap();
+        db.ai_msg_add(8, "user", "别的用户", "", 3).unwrap();
         let msgs = db.ai_msg_list(7, 64).unwrap();
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, "user");
         assert_eq!(msgs[1].content, "你好！");
+        assert_eq!(msgs[0].parts, "", "用户消息没有轨迹");
+        assert!(
+            msgs[1].parts.contains(r#""kind":"content""#),
+            "助手消息应带回轨迹：{}",
+            msgs[1].parts
+        );
         assert_eq!(db.ai_msg_clear(7).unwrap(), 2);
         assert!(db.ai_msg_list(7, 64).unwrap().is_empty());
         assert_eq!(db.ai_msg_list(8, 64).unwrap().len(), 1, "其他用户不受影响");

@@ -1765,7 +1765,13 @@ fn mask_key(key: &str) -> String {
 
 /// 保存前校验（独立成函数以便单元测试）：长度上限 + 地址协议白名单。
 /// 密钥内容不校验格式（各家供应商前缀不一），只限制长度。
-fn validate_ai_config(base: &str, key: &str, model: &str) -> Result<(), String> {
+/// `search_base` 允许为空（空 = 用内置搜索通道），非空时同样要求 http(s)。
+fn validate_ai_config(
+    base: &str,
+    key: &str,
+    model: &str,
+    search_base: &str,
+) -> Result<(), String> {
     if base.len() > AI_BASE_MAX_LEN {
         return Err("上游 API 地址过长".into());
     }
@@ -1777,6 +1783,15 @@ fn validate_ai_config(base: &str, key: &str, model: &str) -> Result<(), String> 
     }
     if model.len() > AI_MODEL_MAX_LEN {
         return Err("模型名过长".into());
+    }
+    if search_base.len() > AI_BASE_MAX_LEN {
+        return Err("联网搜索地址过长".into());
+    }
+    if !search_base.is_empty()
+        && !search_base.starts_with("http://")
+        && !search_base.starts_with("https://")
+    {
+        return Err("联网搜索地址必须以 http(s):// 开头".into());
     }
     Ok(())
 }
@@ -1814,6 +1829,8 @@ async fn ai_config_get(
             "configured": key_set || env_key,
             "persona": stored.persona,
             "skills": stored.skills,
+            // 生效的联网搜索地址（可能来自环境变量）；空串表示走内置 Bing/DuckDuckGo 通道
+            "search_base": crate::ai::resolve_search_base(&stored).unwrap_or_default(),
         }
     })))
 }
@@ -1839,6 +1856,7 @@ async fn ai_config_set(
         model: Option<String>,
         persona: Option<String>,
         skills: Option<String>,
+        search_base: Option<String>,
     }
     let req: Req =
         serde_json::from_str(&text).map_err(|_| ApiError::bad("AI 配置 JSON 无法解析"))?;
@@ -1860,7 +1878,11 @@ async fn ai_config_set(
     if let Some(v) = req.skills {
         stored.skills = v;
     }
-    validate_ai_config(&stored.base, &stored.key, &stored.model).map_err(ApiError::bad)?;
+    if let Some(v) = req.search_base {
+        stored.search_base = v.trim().to_string();
+    }
+    validate_ai_config(&stored.base, &stored.key, &stored.model, &stored.search_base)
+        .map_err(ApiError::bad)?;
     let json = serde_json::to_string(&stored)
         .map_err(|_| ApiError::bad("AI 配置序列化失败"))?;
     state.db.set_setting_async(AI_CONFIG_KEY, &json).await?;
@@ -2870,34 +2892,52 @@ mod tests {
 
     // ---------- AI API 配置校验（设置页） ----------
 
-    /// 三项全空 = 全部回退环境变量/默认值，必须放行
+    /// 四项全空 = 全部回退环境变量/默认值，必须放行
     #[test]
     fn ai_config_empty_passes() {
-        assert!(validate_ai_config("", "", "").is_ok());
+        assert!(validate_ai_config("", "", "", "").is_ok());
     }
 
-    /// 地址：只接受 http(s):// 开头，其余一律拒绝
+    /// 地址：只接受 http(s):// 开头，其余一律拒绝（上游地址与联网搜索地址同规则）
     #[test]
     fn ai_config_base_validation() {
         for b in ["https://api.openai.com/v1", "http://127.0.0.1:8000/v1"] {
-            assert!(validate_ai_config(b, "", "").is_ok(), "应接受合法地址：{b}");
+            assert!(
+                validate_ai_config(b, "", "", "").is_ok(),
+                "应接受合法地址：{b}"
+            );
         }
         for b in ["ftp://evil", "api.example.com/v1", "javascript:alert(1)", "//x"] {
-            assert!(validate_ai_config(b, "", "").is_err(), "应拒绝非法地址：{b:?}");
+            assert!(
+                validate_ai_config(b, "", "", "").is_err(),
+                "应拒绝非法地址：{b:?}"
+            );
+            // 联网搜索地址走同一套校验
+            assert!(
+                validate_ai_config("", "", "", b).is_err(),
+                "应拒绝非法搜索地址：{b:?}"
+            );
         }
+        // 空搜索地址合法（表示使用内置通道）
+        assert!(validate_ai_config("", "", "", "").is_ok());
+        assert!(validate_ai_config("", "", "", "http://10.0.0.1:8888").is_ok());
     }
 
     /// 长度上限：超限拒绝，上限值本身放行
     #[test]
     fn ai_config_length_limits() {
         let base_ok = format!("https://a{}", "b".repeat(AI_BASE_MAX_LEN - 10));
-        assert!(validate_ai_config(&base_ok, "", "").is_ok());
+        assert!(validate_ai_config(&base_ok, "", "", "").is_ok());
         let base_bad = format!("https://{}", "a".repeat(AI_BASE_MAX_LEN));
-        assert!(validate_ai_config(&base_bad, "", "").is_err());
-        assert!(validate_ai_config("", &"k".repeat(AI_KEY_MAX_LEN), "").is_ok());
-        assert!(validate_ai_config("", &"k".repeat(AI_KEY_MAX_LEN + 1), "").is_err());
-        assert!(validate_ai_config("", "", &"m".repeat(AI_MODEL_MAX_LEN)).is_ok());
-        assert!(validate_ai_config("", "", &"m".repeat(AI_MODEL_MAX_LEN + 1)).is_err());
+        assert!(validate_ai_config(&base_bad, "", "", "").is_err());
+        assert!(validate_ai_config("", &"k".repeat(AI_KEY_MAX_LEN), "", "").is_ok());
+        assert!(validate_ai_config("", &"k".repeat(AI_KEY_MAX_LEN + 1), "", "").is_err());
+        assert!(validate_ai_config("", "", &"m".repeat(AI_MODEL_MAX_LEN), "").is_ok());
+        assert!(validate_ai_config("", "", &"m".repeat(AI_MODEL_MAX_LEN + 1), "").is_err());
+        let search_ok = format!("https://s{}", "c".repeat(AI_BASE_MAX_LEN - 10));
+        assert!(validate_ai_config("", "", "", &search_ok).is_ok());
+        let search_bad = format!("https://{}", "s".repeat(AI_BASE_MAX_LEN));
+        assert!(validate_ai_config("", "", "", &search_bad).is_err());
     }
 
     /// 密钥脱敏：长密钥保留末 4 位，短密钥全遮，绝不出现完整明文

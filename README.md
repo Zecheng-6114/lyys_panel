@@ -34,7 +34,7 @@ LYYS Panel 面向单台 Linux 服务器的日常运维，把系统监控、进�
 | 任务 | 后台作业队列：安装 / 更新等长操作转后台执行，可离开页面，列表回看进度与输出尾部（每个作业保留最近 200 行），支持取消 |
 | 在线会话 | 已登录用户的会话列表，可按会话强制下线 |
 | Docker | 容器列表与启动 / 停止 / 重启 / 删除、容器日志、镜像拉取与删除、Compose 项目启停；未安装时页面上可直接安装 |
-| AI 助手 | 流式对话（OpenAI 兼容上游，支持 Ollama 等本地模型，含工具调用），配置可在设置页在线修改 |
+| AI 助手 | 流式对话（OpenAI 兼容上游，支持 Ollama 等本地模型），思考过程与工具调用按时间顺序呈现；内置面板只读工具与联网检索，配置可在设置页在线修改 |
 | 备份 | 数据库快照列表 / 立即备份 / 下载 / 删除 / 恢复（重启生效），每日自动备份保留 7 份 |
 | 面板更新 | 检查 GitHub Release、在线下载替换二进制、内网手动上传旁路 |
 | 告警 | CPU / 内存 / 磁盘阈值规则（滞回防抖）、事件历史、可选 webhook 通知 |
@@ -186,6 +186,7 @@ cd frontend && npm run dev
 | `AI_API_BASE` | `https://api.openai.com/v1` | AI 上游地址（OpenAI 兼容，Ollama 为 `http://<host>:11434/v1`）。设置页配置优先于环境变量 |
 | `AI_API_KEY` | 无 | AI 上游密钥；未配置时 AI 功能拒绝请求。设置页配置优先 |
 | `AI_MODEL` | `gpt-4o-mini` | AI 对话模型名。设置页配置优先 |
+| `AI_SEARCH_BASE` | 无 | AI 联网搜索地址（自建 SearxNG 等，需开启 JSON 输出）。留空时走内置的 Bing / DuckDuckGo 通道。设置页配置优先 |
 
 未设置 `PANEL_ADMIN_PASSWORD` 时会生成随机密码，写入数据目录下的
 `initial_admin_password.txt`（权限 0600，明文**不打印到日志**），首次登录成功后自动删除（详见下方 FAQ）。
@@ -332,6 +333,7 @@ lyys_panel/
 │   │   ├── backup.rs       数据库备份 / 恢复（VACUUM INTO + 标记重启生效）
 │   │   ├── update.rs       自更新（GitHub Release 检查 / 下载 / 校验 / 原子替换）
 │   │   ├── ai.rs / ai_tools.rs  AI 流式对话代理（OpenAI 兼容上游，SSE 透传）+ 工具模式
+│   │   ├── websearch.rs    AI 联网：多通道网页搜索与正文抓取（SSRF 闸门 + 体积上限）
 │   │   ├── files.rs        文件浏览 / 读写 / 上传下载
 │   │   ├── container_files.rs  容器内文件浏览 / 读写（复用 files.rs 的口径）
 │   │   ├── distro.rs       发行版检测（仅支持 Debian / Arch 系，不支持则退出）

@@ -56,6 +56,10 @@ pub(super) struct StoredAiConfig {
     pub persona: String,
     #[serde(default)]
     pub skills: String,
+    /// 联网搜索地址（可选）：自建 SearxNG 等兼容实例，需开启 JSON 输出。
+    /// 留空则用内置通道（Bing → DuckDuckGo）。
+    #[serde(default)]
+    pub search_base: String,
 }
 
 /// 从 settings 表原始值解析配置；缺失/损坏一律按未配置处理（回退环境变量），
@@ -65,10 +69,30 @@ pub(super) fn parse_stored(raw: Option<String>) -> StoredAiConfig {
         .unwrap_or_default()
 }
 
+/// 联网搜索地址（设置页 > 环境变量 AI_SEARCH_BASE）。空 = 用内置通道。
+/// 独立成纯函数便于单测（与 [`resolve`] 同理，环境变量是进程级的）。
+pub(super) fn resolve_search_base(stored: &StoredAiConfig) -> Option<String> {
+    let s = stored.search_base.trim();
+    if !s.is_empty() {
+        return Some(s.trim_end_matches('/').to_string());
+    }
+    env_var("AI_SEARCH_BASE").map(|v| v.trim_end_matches('/').to_string())
+}
+
+/// 供 ai_tools 在执行联网工具时取搜索地址：每次现读，设置页保存即生效。
+pub(super) async fn search_base(db: &Db) -> Option<String> {
+    let raw = db.get_setting_async(AI_CONFIG_KEY).await.ok().flatten();
+    resolve_search_base(&parse_stored(raw))
+}
+
 /// 默认人格：设置页留空时使用。
+/// 明确写清「先查再答」与「外部信息要给链接」，否则模型容易凭训练记忆编造
+/// 面板里不存在的路径、版本号与命令输出。
 const DEFAULT_PERSONA: &str =
     "你是 LYYS 服务器运维面板内置的 AI 助手，运行在服务器管理场景下。回答简洁直接，\
-     优先使用面板工具查询真实数据后再下结论；不确定的事明确说不确定，不要编造。";
+     优先使用面板工具查询真实数据后再下结论；涉及面板之外的信息（软件文档、报错含义、\
+     版本变更）用联网工具查证，并在回答里给出链接来源；\
+     不确定的事明确说不确定，不要编造数据、路径或命令输出。";
 
 /// 组装 system prompt：人格提示词（留空用默认）+ 技能说明（可选段）。
 /// 独立成纯函数便于单测。
@@ -276,6 +300,14 @@ async fn stream_completion(
     Ok(resp)
 }
 
+/// 单轮内允许的最大工具往返次数。给足多步诊断（查状态 → 读日志 → 搜文档 → 下结论）
+/// 的空间；每次往返都有上游 token 成本，故仍设上限防止失控循环。
+const MAX_TOOL_ROUNDS: usize = 6;
+
+/// 回传给前端的工具结果预览长度（字符）。完整结果只喂给模型：工具结果可达 8KB，
+/// 整段经 SSE 外发既拖慢渲染也没必要。
+const TOOL_PREVIEW_CHARS: usize = 400;
+
 /// 工具循环引擎：
 /// - [`TurnEvent`]：引擎向调用方发出的事件流（正文/思维链增量、工具状态）；
 ///   调用方翻译成 SSE chunk（`{"tool":{...}}` 合成 chunk 显示状态行）。
@@ -284,17 +316,90 @@ async fn stream_completion(
 ///   [`MAX_TOOL_ROUNDS`]；上游以 4xx 拒绝 tools 时自动去掉 tools 重试一次
 ///   （兼容不支持 function calling 的上游）。
 /// - 工具消息只存在于本次引擎调用的临时上下文，不持久化、不回传前端历史。
-const MAX_TOOL_ROUNDS: usize = 4;
-
 pub(super) enum TurnEvent {
     /// 增量：kind = "content" | "reasoning"
     Delta { kind: &'static str, text: String },
-    /// 工具状态：state = "start" | "done"
-    Tool { name: String, state: &'static str },
+    /// 工具状态。start 只带 id/name/args；done 补齐 ok/bytes/preview。
+    Tool {
+        id: String,
+        name: String,
+        state: &'static str,
+        args: Option<String>,
+        ok: Option<bool>,
+        bytes: Option<usize>,
+        preview: Option<String>,
+    },
+}
+
+/// 一轮对话按时间顺序产生的片段。前端据此**交错**渲染
+/// （思考 → 工具 → 思考 → 正文…），而不是把所有内容压成「思考 / 工具 / 正文」三段
+/// —— 压缩会丢掉顺序，看起来就像工具调用跑到了思考框外面。
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(super) enum TracePart {
+    Reasoning {
+        text: String,
+    },
+    Tool {
+        name: String,
+        args: String,
+        ok: bool,
+        bytes: usize,
+        preview: String,
+    },
+    Content {
+        text: String,
+    },
+}
+
+/// 把增量文本并入轨迹：与上一片段同类型就续写，否则新起一段。
+/// 上游的分帧边界与显示段落无关，合并必须在这里做。
+fn push_text(parts: &mut Vec<TracePart>, kind: &str, text: &str) {
+    let extend = matches!(
+        (parts.last(), kind),
+        (Some(TracePart::Reasoning { .. }), "reasoning")
+            | (Some(TracePart::Content { .. }), "content")
+    );
+    if extend
+        && let Some(TracePart::Reasoning { text: t } | TracePart::Content { text: t }) =
+            parts.last_mut()
+    {
+        t.push_str(text);
+        return;
+    }
+    if kind == "reasoning" {
+        parts.push(TracePart::Reasoning {
+            text: text.to_string(),
+        });
+    } else {
+        parts.push(TracePart::Content {
+            text: text.to_string(),
+        });
+    }
+}
+
+/// 轨迹里所有正文片段拼成的完整回答（落库到 content 列，供下一轮上下文使用）
+fn trace_content(parts: &[TracePart]) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for p in parts {
+        if let TracePart::Content { text } = p {
+            out.push(text);
+        }
+    }
+    out.join("\n\n")
+}
+
+/// 结果预览：按字符截断（中文按字节截会少掉大半内容）
+fn preview_of(text: &str) -> String {
+    if text.chars().count() <= TOOL_PREVIEW_CHARS {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(TOOL_PREVIEW_CHARS).collect();
+    format!("{cut}…")
 }
 
 pub(super) struct TurnResult {
-    pub content: String,
+    pub parts: Vec<TracePart>,
 }
 
 /// 流式 tool_calls 分片聚合：OpenAI 协议里 id/name/arguments 都可能拆成多帧，
@@ -354,6 +459,10 @@ async fn run_turn(
     mut tools: Option<serde_json::Value>,
     tx: &mpsc::Sender<TurnEvent>,
 ) -> Result<TurnResult, AiError> {
+    // 有序轨迹：跨轮累积，最终既回给前端（落库为 parts）也据此拼出 content
+    let mut trace: Vec<TracePart> = Vec::new();
+    // 工具调用的显示 id：不直接用上游给的 id——部分上游会省略或重号
+    let mut seq: usize = 0;
     for _round in 0..MAX_TOOL_ROUNDS {
         // 发起请求；上游带 tools 时 4xx 拒绝 → 去掉 tools 立即重试一次
         let resp = loop {
@@ -407,6 +516,7 @@ async fn run_turn(
                             .or_else(|| delta.get("reasoning"))
                             .and_then(|c| c.as_str())
                             && !t.is_empty() {
+                                push_text(&mut trace, "reasoning", t);
                                 let _ = tx
                                     .send(TurnEvent::Delta {
                                         kind: "reasoning",
@@ -417,6 +527,7 @@ async fn run_turn(
                         if let Some(d) = delta.get("content").and_then(|c| c.as_str())
                             && !d.is_empty() {
                                 content.push_str(d);
+                                push_text(&mut trace, "content", d);
                                 // 接收端被丢弃 = 前端断开，中止本轮
                                 if tx
                                     .send(TurnEvent::Delta {
@@ -437,7 +548,7 @@ async fn run_turn(
         }
 
         if calls.is_empty() {
-            return Ok(TurnResult { content });
+            return Ok(TurnResult { parts: trace });
         }
 
         // 有工具调用：assistant 消息（含 tool_calls）+ 逐个执行回灌
@@ -461,36 +572,58 @@ async fn run_turn(
             tool_call_id: None,
         });
         for c in calls.values() {
+            let call_id = format!("t{seq}");
+            seq += 1;
+            let args = if c.args.is_empty() {
+                "{}".to_string()
+            } else {
+                c.args.clone()
+            };
             let _ = tx
                 .send(TurnEvent::Tool {
+                    id: call_id.clone(),
                     name: c.name.clone(),
                     state: "start",
+                    args: Some(args.clone()),
+                    ok: None,
+                    bytes: None,
+                    preview: None,
                 })
                 .await;
             let parsed: serde_json::Value =
-                serde_json::from_str(if c.args.is_empty() { "{}" } else { &c.args })
-                    .unwrap_or_else(|_| serde_json::json!({}));
-            let result = crate::ai_tools::execute(state, &c.name, &parsed, role).await;
+                serde_json::from_str(&args).unwrap_or_else(|_| serde_json::json!({}));
+            let outcome = crate::ai_tools::execute(state, &c.name, &parsed, role).await;
+            let preview = preview_of(&outcome.text);
             messages.push(ChatMsg {
                 role: "tool".into(),
-                content: result,
+                content: outcome.text.clone(),
                 tool_calls: None,
                 tool_call_id: Some(c.id.clone()),
             });
+            trace.push(TracePart::Tool {
+                name: c.name.clone(),
+                args: args.clone(),
+                ok: outcome.ok,
+                bytes: outcome.text.len(),
+                preview: preview.clone(),
+            });
             let _ = tx
                 .send(TurnEvent::Tool {
+                    id: call_id,
                     name: c.name.clone(),
                     state: "done",
+                    args: None,
+                    ok: Some(outcome.ok),
+                    bytes: Some(outcome.text.len()),
+                    preview: Some(preview),
                 })
                 .await;
         }
         // 下一轮：带着工具结果重新请求
     }
 
-    // 轮数耗尽仍未产出正文：返回空正文
-    Ok(TurnResult {
-        content: String::new(),
-    })
+    // 轮数耗尽仍未产出正文：把已有轨迹原样返回（前端仍能看到工具链）
+    Ok(TurnResult { parts: trace })
 }
 
 fn now_ts() -> i64 {
@@ -535,7 +668,13 @@ pub(super) async fn ai_chat(
     // 用户消息先落库，历史窗口自动包含本轮（写失败即请求失败，避免丢消息）
     state
         .db
-        .ai_msg_add_async(user.id, "user".into(), content.to_string(), now_ts())
+        .ai_msg_add_async(
+            user.id,
+            "user".into(),
+            content.to_string(),
+            String::new(),
+            now_ts(),
+        )
         .await
         .map_err(|e| AiError::internal(format!("保存消息失败：{e}")))?;
     let hist = state
@@ -585,9 +724,33 @@ pub(super) async fn ai_chat(
                         serde_json::json!({"reasoning_content": text})
                     }}]
                 }),
-                TurnEvent::Tool { name, state } => serde_json::json!({
-                    "tool": {"name": name, "state": state}
-                }),
+                TurnEvent::Tool {
+                    id,
+                    name,
+                    state,
+                    args,
+                    ok,
+                    bytes,
+                    preview,
+                } => {
+                    // 只带非空字段：start 帧不含结果，done 帧不含参数（前端已缓存）
+                    let mut t = serde_json::json!({
+                        "id": id, "name": name, "state": state
+                    });
+                    if let Some(v) = args {
+                        t["args"] = serde_json::Value::String(v);
+                    }
+                    if let Some(v) = ok {
+                        t["ok"] = serde_json::Value::Bool(v);
+                    }
+                    if let Some(v) = bytes {
+                        t["bytes"] = serde_json::Value::from(v);
+                    }
+                    if let Some(v) = preview {
+                        t["preview"] = serde_json::Value::String(v);
+                    }
+                    serde_json::json!({ "tool": t })
+                }
             };
             let line = format!("data: {}\n\n", chunk);
             if out_tx.send(Ok(Bytes::from(line))).await.is_err() {
@@ -597,14 +760,17 @@ pub(super) async fn ai_chat(
         }
         match engine.await {
             Ok(Ok(res)) => {
-                // 正文非空才落库（工具轮耗尽/客户端断开不产生半截 assistant 消息）
-                if !res.content.trim().is_empty()
-                    && let Err(e) =
-                        db.ai_msg_add_async(uid, "assistant".into(), res.content, now_ts())
-                            .await
+                // 有轨迹才落库（工具轮耗尽/客户端断开可能只剩半截）
+                let content = trace_content(&res.parts);
+                if !res.parts.is_empty() {
+                    let parts = serde_json::to_string(&res.parts).unwrap_or_default();
+                    if let Err(e) = db
+                        .ai_msg_add_async(uid, "assistant".into(), content, parts, now_ts())
+                        .await
                     {
                         tracing::warn!("保存助手回复失败：{e}");
                     }
+                }
                 let _ = out_tx.send(Ok(Bytes::from("data: [DONE]\n\n"))).await;
             }
             Ok(Err(e)) => {
@@ -625,7 +791,9 @@ pub(super) async fn ai_chat(
         .map_err(|_| AiError::upstream("构造流式响应失败"))
 }
 
-/// GET /api/ai/history（需登录）：当前用户最近对话历史（悬浮球打开时拉取）
+/// GET /api/ai/history（需登录）：当前用户最近对话历史（悬浮球打开时拉取）。
+/// 助手消息一并返回 `parts`（思考/工具/正文的有序轨迹），前端据此还原
+/// 完整过程；老数据没有 parts，前端回退到只渲染 content。
 pub(super) async fn ai_history(
     State(state): State<AppState>,
     user: AuthUser,
@@ -635,7 +803,24 @@ pub(super) async fn ai_history(
         .ai_msg_list_async(user.id, MAX_HISTORY)
         .await
         .map_err(|e| AiError::internal(format!("读取历史失败：{e}")))?;
-    Ok(Json(serde_json::json!({ "messages": rows })))
+    let messages: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|r| {
+            // 坏 parts 视为没有：宁可退化成纯文本，也不能让历史整页打不开
+            let parts: Option<serde_json::Value> =
+                serde_json::from_str::<serde_json::Value>(&r.parts)
+                    .ok()
+                    .filter(|v| v.as_array().is_some_and(|a| !a.is_empty()));
+            serde_json::json!({
+                "id": r.id,
+                "role": r.role,
+                "content": r.content,
+                "ts": r.ts,
+                "parts": parts,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "messages": messages })))
 }
 
 /// POST /api/ai/history/clear（需登录）：清空当前用户对话历史
@@ -738,6 +923,72 @@ mod tests {
         assert_eq!(stored.model, "");
         assert_eq!(stored.persona, "");
         assert_eq!(stored.skills, "");
+        assert_eq!(stored.search_base, "");
+    }
+
+    #[test]
+    fn trace_merges_consecutive_and_keeps_order() {
+        // 交错顺序是这次改造的核心：思考 → 工具 → 思考 → 正文
+        let mut parts: Vec<TracePart> = Vec::new();
+        push_text(&mut parts, "reasoning", "先看");
+        push_text(&mut parts, "reasoning", "状态");
+        parts.push(TracePart::Tool {
+            name: "get_system_state".into(),
+            args: "{}".into(),
+            ok: true,
+            bytes: 12,
+            preview: "cpu=1".into(),
+        });
+        push_text(&mut parts, "reasoning", "再查日志");
+        push_text(&mut parts, "content", "结论：正常");
+        assert_eq!(parts.len(), 4, "相邻同类片段必须合并");
+        let kinds: Vec<&str> = parts
+            .iter()
+            .map(|p| match p {
+                TracePart::Reasoning { .. } => "reasoning",
+                TracePart::Tool { .. } => "tool",
+                TracePart::Content { .. } => "content",
+            })
+            .collect();
+        assert_eq!(kinds, vec!["reasoning", "tool", "reasoning", "content"]);
+        match &parts[0] {
+            TracePart::Reasoning { text } => assert_eq!(text, "先看状态"),
+            _ => panic!("首个片段应为思考"),
+        }
+        // content 列由正文片段拼出，思考与工具不进正文
+        assert_eq!(trace_content(&parts), "结论：正常");
+        assert_eq!(trace_content(&[]), "");
+    }
+
+    #[test]
+    fn tool_preview_is_char_capped() {
+        let long = "中".repeat(TOOL_PREVIEW_CHARS + 50);
+        let p = preview_of(&long);
+        assert_eq!(p.chars().count(), TOOL_PREVIEW_CHARS + 1);
+        assert!(p.ends_with('…'));
+        assert_eq!(preview_of("短结果"), "短结果");
+    }
+
+    #[test]
+    fn search_base_falls_back_to_env() {
+        let stored = StoredAiConfig {
+            search_base: " https://searx.example.com/ ".into(),
+            ..Default::default()
+        };
+        // 设置页有值：去掉首尾空白与尾部斜杠
+        assert_eq!(
+            resolve_search_base(&stored).as_deref(),
+            Some("https://searx.example.com")
+        );
+        // 设置页为空：回退环境变量
+        clear_env("AI_SEARCH_BASE");
+        assert_eq!(resolve_search_base(&StoredAiConfig::default()), None);
+        set_env("AI_SEARCH_BASE", "http://127.0.0.1:8888/");
+        assert_eq!(
+            resolve_search_base(&StoredAiConfig::default()).as_deref(),
+            Some("http://127.0.0.1:8888")
+        );
+        clear_env("AI_SEARCH_BASE");
     }
 
     #[test]

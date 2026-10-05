@@ -55,6 +55,17 @@
                 placeholder="可选。追加在人格后的技能描述，如擅长回答的问题范围、操作规范等"
               />
             </el-form-item>
+            <el-form-item label="联网搜索地址（可选）">
+              <el-input
+                v-model="form.searchBase"
+                placeholder="留空使用内置通道；也可填自建 SearxNG 地址"
+                clearable
+              />
+              <div class="key-hint">
+                助手回答软件文档、报错含义一类问题时用它检索。留空走内置的 Bing /
+                DuckDuckGo 通道；填 SearxNG 需实例已开启 JSON 输出（format=json）。
+              </div>
+            </el-form-item>
             <el-form-item>
               <el-button type="primary" :loading="saving" @click="save">保存配置</el-button>
             </el-form-item>
@@ -192,6 +203,7 @@ interface AiConfigResp {
   configured: boolean;
   persona: string;
   skills: string;
+  search_base: string;
 }
 
 // 生效配置（后端已做 settings → env → 默认值合并）
@@ -205,7 +217,14 @@ const config = reactive({
 });
 
 // 表单：key 不回显明文，仅输入新密钥时提交
-const form = reactive({ base: "", key: "", model: "", persona: "", skills: "" });
+const form = reactive({
+  base: "",
+  key: "",
+  model: "",
+  persona: "",
+  skills: "",
+  searchBase: "",
+});
 const saving = ref(false);
 
 const keyPlaceholder = computed(() =>
@@ -227,11 +246,16 @@ async function load() {
   form.key = "";
   form.persona = c.persona;
   form.skills = c.skills;
+  form.searchBase = c.search_base || "";
 }
 
 async function save() {
   if (form.base.trim() && !/^https?:\/\//.test(form.base.trim())) {
     ElMessage.warning("上游 API 地址必须以 http(s):// 开头");
+    return;
+  }
+  if (form.searchBase.trim() && !/^https?:\/\//.test(form.searchBase.trim())) {
+    ElMessage.warning("联网搜索地址必须以 http(s):// 开头");
     return;
   }
   saving.value = true;
@@ -244,6 +268,8 @@ async function save() {
       // persona/skills 传值即覆盖，空串=清除回退默认人格
       persona: form.persona,
       skills: form.skills,
+      // 空串 = 清除自定义搜索地址，回退内置通道
+      search_base: form.searchBase.trim(),
     });
     ElMessage.success("AI API 配置已保存，对话即时生效");
     form.key = "";
@@ -264,6 +290,7 @@ async function clearKey() {
       key: "",
       persona: form.persona,
       skills: form.skills,
+      search_base: form.searchBase.trim(),
     });
     ElMessage.success("已清除设置页密钥（如配置了环境变量将回退）");
     await load();
