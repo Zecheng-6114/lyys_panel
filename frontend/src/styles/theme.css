@@ -644,6 +644,16 @@ body {
 .el-switch.is-checked .el-switch__action {
   background-color: var(--el-bg-color);
 }
+/* 开关的滑块圆点（.el-switch__action）与本体那枚胶囊（.el-switch__core）同属
+   「有底色的实体块」，一起补贴面档投影。
+   🔴 本体尤其需要：关闭态的轨道色走 --el-switch-off-color = --el-border-color
+   = transparent，整条轨道本来不可见，没有这层影开关的轮廓就立不住。
+   两处都不带 overflow（EP 的 overflow 只在 .el-switch__inner / __inner-wrapper 上），
+   投影不会被祖先裁掉。 */
+.el-switch__action,
+.el-switch__core {
+  box-shadow: var(--panel-shadow-1);
+}
 
 /* ---------- 表单与对话框：留白对齐到内容区 ----------
    这两块的 EP 默认内距（16/20、表单项 18）用在设置页、账号管理这种十几项
