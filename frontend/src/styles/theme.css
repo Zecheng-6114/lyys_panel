@@ -434,19 +434,6 @@ body {
 .el-tabs__content {
   overflow: visible;
 }
-/* 标签页（实例 / 系统设置顶部页签）：EP 用一条 2px 的 --el-color-primary 下划线指示当前页，
- * 那就是一条「线」，与全站无边框约定冲突。而本主题的主色与文本主色同值，把线抹掉后当前页
- * 就再没有任何标记了（两项都变成同一个颜色），所以改用页面里别处已成立的「底色块」表达：
- * 当前项给一层 --el-fill-color 底，其余项保持透明 —— 与分段按钮、表头、hover 行同一套语言。
- * 页签带本身那条底线（.el-tabs__nav-wrap::after 走 --el-border-color-light）已随全局置空，
- * 收掉主动条之后整条页签带没有一根线。 */
-.el-tabs__active-bar {
-  display: none;
-}
-.el-tabs__item.is-active {
-  background-color: var(--el-fill-color);
-  border-radius: var(--radius);
-}
 /* 加载遮罩（v-loading）：半透明直角块盖在圆角容器上 */
 .el-loading-mask {
   border-radius: var(--radius);
