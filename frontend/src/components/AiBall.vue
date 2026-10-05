@@ -689,6 +689,9 @@ function applyTool(m: Msg, t: any) {
   border: none;
   background: var(--el-color-primary);
   color: var(--el-bg-color);
+  /* 它浮在所有内容之上（可拖拽、随时可点），用浮层档 —— 不加影时这颗实心
+   * 圆球贴在页面上，看不出是「浮着的一层」，与 .panel 的浮层语言也不连贯。 */
+  box-shadow: var(--panel-shadow-2);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -713,7 +716,10 @@ function applyTool(m: Msg, t: any) {
   opacity: 0.5;
 }
 
-/* 面板：不画描边（全站约定），层次靠底色深浅 + 一层投影 + 留白 */
+/* 面板：不画描边（全站约定），层次靠底色深浅 + 投影 + 留白。
+ * 它是浮层 —— 浮在页面任意位置、下面没有遮罩托底 —— 所以用浮层档，
+ * 比面板内部的贴面块（工具卡 / 思考块 / 代码块）重一档；
+ * 两者用同一档时，面板边界与里面的小卡片分不出高低。 */
 .panel {
   position: absolute;
   right: 0;
@@ -726,7 +732,7 @@ function applyTool(m: Msg, t: any) {
   flex-direction: column;
   background: var(--el-bg-color-overlay);
   border-radius: var(--radius);
-  box-shadow: var(--panel-card-shadow);
+  box-shadow: var(--panel-shadow-2);
   overflow: hidden;
 }
 /* 贴左边缘时改从球的右侧展开，贴顶时改朝下开 —— 否则面板会被视口裁掉 */
@@ -1135,7 +1141,8 @@ function applyTool(m: Msg, t: any) {
   font-size: 11px;
   padding: var(--sp-1) var(--sp-3);
   border-radius: var(--radius);
-  box-shadow: var(--panel-card-shadow);
+  /* 浮在消息区之上的按钮，用浮层档（同一个面板里，芯片等贴面块才用 1 档） */
+  box-shadow: var(--panel-shadow-2);
   cursor: pointer;
 }
 

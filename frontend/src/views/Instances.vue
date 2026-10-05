@@ -466,6 +466,8 @@ onMounted(async () => {
   border: 1px solid var(--el-border-color-lighter);
   border-radius: var(--radius);
   background: var(--el-bg-color);
+  /* 与其他卡片同档投影：实例卡也是「浮在底色上的白块」 */
+  box-shadow: var(--panel-shadow-1);
 }
 .inst-head {
   display: flex;

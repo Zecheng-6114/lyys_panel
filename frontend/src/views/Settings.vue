@@ -113,10 +113,12 @@
 
             <div class="row">
               <label>阴影</label>
-              <el-checkbox v-model="draft.shadow">卡片与面板使用投影</el-checkbox>
+              <el-checkbox v-model="draft.shadow">卡片使用投影</el-checkbox>
             </div>
             <div class="hint">
-              面板只用一层浅投影区分层次，没有描边；关掉后卡片与页面底色直接相接。
+              面板没有描边，靠底色差与投影分层。这一项只管卡片、内容块这类贴面元素：
+              关掉后它们与页面底色直接相接；对话框、抽屉、下拉菜单等浮层仍保留投影
+              —— 少了它，浮层与背景的边界在无描边界面里说不清。
             </div>
 
             <div class="group">颜色</div>
@@ -619,6 +621,8 @@ onMounted(() => {
   background: var(--el-bg-color);
   border-radius: var(--radius, 8px);
   padding: var(--sp-4) var(--sp-5);
+  /* 与仪表盘卡片同一档：全站「白块浮在底色上」的语言只此一套 */
+  box-shadow: var(--panel-shadow-1);
 }
 .card-title {
   font-size: 15px;

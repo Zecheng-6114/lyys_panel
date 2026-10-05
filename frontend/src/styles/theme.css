@@ -163,11 +163,78 @@
   --el-dialog-border-radius: var(--radius);
   --el-checkbox-border-radius: var(--radius);
 
-  /* 去除阴影 */
-  --el-box-shadow-light: none;
-  --el-box-shadow: none;
-  --el-box-shadow-lighter: none;
-  --el-box-shadow-dark: none;
+  /* ---------- 阴影：按使用场景分档，不是全站一个值 ----------
+     面板无边框，层次只能靠底色差 + 投影。但两类构件要的强度不同：
+     贴面卡只需从底色上「轻轻托起」，浮层必须说清「我浮在上面」——
+     无描边的界面上，浮层若只配贴面那一档，几乎看不出它脱离了页面。
+       1 贴面：流内的卡片与块（el-card、仪表盘卡片、登录卡、AI 面板内的工具卡/代码块…）
+       2 浮层：下拉、气泡、选择面板、顶部消息、通知、AI 悬浮球面板
+       3 模态：对话框、抽屉、确认框
+     🔴 强度随明暗切换：深色底上黑投影对比很弱，要整体加浓，
+     由 stores/theme.ts 的 buildThemeCss() 按卡片底色判定后重新输出这三个变量。
+     页面里一律引用变量，不要写 box-shadow 字面量。 */
+  --panel-shadow-1: 0 1px 2px rgb(0 0 0 / 6%);
+  --panel-shadow-2: 0 4px 12px rgb(0 0 0 / 10%);
+  --panel-shadow-3: 0 12px 32px rgb(0 0 0 / 18%);
+  /* 历史别名：早期引用点写的是这个名字，等价于贴面那一档 */
+  --panel-card-shadow: var(--panel-shadow-1);
+
+  /* 接缝影（贴面档的近亲，全站只用在一处：面板外框 ↔ 内容区的那条 L 形交界）：
+     顶栏下沿与侧栏右沿本来是两条硬色阶（面板色 ↔ 页面色），无边框设计下
+     眼睛会把这种等宽直边读成「在这里画了一条线」。往内容区**内侧**压两道
+     柔影把色阶接起来 —— 接缝于是从一条线变成一段过渡。
+     🔴 画在内容区（接缝的接收面）上，而不是给顶栏/侧栏加外投影：
+     外投影会被后绘制的 .content 背景整条盖住（得再补 position/z-index 才生效），
+     并且会连带落到侧栏与顶栏之间那条本来就看不见的缝上，凭空多出两条影子。
+     🔴 拆成两个各自完整的令牌（而不是一个 --seam-top 与一个 --seam-left 并列使用）：
+     box-shadow 是逗号列表，两段同时取到 none 时会拼出非法的 `none, none`，
+     整条声明被丢弃 —— 现在两个令牌无论开关都各自合法。
+     🔴 写法是「偏移 = 负 spread = 12px，blur 10px」这一组固定搭配，别随手简化：
+     inset 影的柔化会顺着四周一起渗，直接写 `inset 0 1px 6px` 的话，内容区的
+     右沿与下沿会各自多出 4~10 级的暗带（实测 245 → 235，与原来那条缝一样显眼），
+     等于把「多出来的一条线」从左上角搬到右下角。把轮廓按 -12px 撑开、同时把
+     偏移设成同样的 12px，轮廓的起边就正好落在内容区的边线上，另外三条边被推出
+     可视区 → 只剩这一条边有影。边界处的强度是 alpha 的一半（轮廓边线正好压在边线上），
+     所以这里取贴面档的两倍（浅 12% / 深 60%），落出来与贴面档同浓。
+     blur 10px 决定过渡宽度：实测从缝线到完全消失约 8px。
+     🔴 窄屏侧栏是抽屉、交汇点不存在，那时只用 --panel-shadow-seam-top 那一横。
+     明暗由 stores/theme.ts 的 buildThemeCss() 重新输出，
+     并随「阴影」开关一起关 —— 它说的就是「面板贴在页面上」。 */
+  --panel-shadow-seam: inset 0 12px 10px -12px rgb(0 0 0 / 12%),
+    inset 12px 0 10px -12px rgb(0 0 0 / 12%);
+  --panel-shadow-seam-top: inset 0 12px 10px -12px rgb(0 0 0 / 12%);
+
+  /* 文字托底影（第 4 类层次）：块用上面三档投影立边界，文字用一条柔影托底 ——
+     直接压在花色底 / 壁纸上的文字，底一花就分不清字形边界。
+     浅色主题是「暗字落浅底」，影一浓就发脏，只留最淡的一层保持语言一致；
+     深色主题是「亮字落深底」，托一层更深的柔影把字形衬出来 ——
+     由 stores/theme.ts 的 buildThemeCss() 按明暗重新输出这个变量。
+     作用域见下面的 #app 规则：只给应用挂，不给 body，避开 teleport 出来的浮层。 */
+  --panel-text-shadow: 0 1px 1px rgb(0 0 0 / 8%);
+
+  /* Element Plus 的四个投影变量按场景回填。原先整体置 none，
+     那等于把对话框、抽屉、下拉这些真正需要「浮起来」的层一并压平了，
+     而留在内容流里的卡片反倒有投影 —— 层次是反的。
+       light   → 浮层：下拉、气泡、选择面板、日期面板、卡片兜底
+                 （全站引用最多的一个，47 处）
+     ⚠️ 顶部消息 el-message 不吃这四个变量里的任何一个（EP 只给它 1px 描边、
+     没有投影），它的浮层影在下面单独给 —— 别以为改了 light 就管到它了。
+       默认档  → 模态：el-dialog 与 el-message-box 直接吃它
+       dark    → 模态：el-drawer 吃它
+       lighter → 浮层：唯一使用者是 el-backtop（浮在右下角的按钮）。
+                 名字叫「更轻」，但按场景它就是浮层，与 light 同档。 */
+  --el-box-shadow-light: var(--panel-shadow-2);
+  --el-box-shadow: var(--panel-shadow-3);
+  --el-box-shadow-dark: var(--panel-shadow-3);
+  --el-box-shadow-lighter: var(--panel-shadow-2);
+
+  /* 组件专属的投影变量（EP 用它们给单个组件换档）：同样按场景归位 */
+  --el-dialog-box-shadow: var(--panel-shadow-3);
+  --el-messagebox-box-shadow: var(--panel-shadow-3);
+  --el-drawer-box-shadow: var(--panel-shadow-3);
+  --el-notification-shadow: var(--panel-shadow-2);
+  --el-dropdown-menu-box-shadow: var(--panel-shadow-2);
+  --el-cascader-menu-shadow: var(--panel-shadow-2);
 
   /* ---------- 面板自定义变量 ---------- */
 
@@ -187,15 +254,9 @@
      而表格高度的定义在全局样式里，读不到 AppLayout scoped 块里的局部变量。 */
   --panel-topbar-h: 52px;
 
-  /* 全站唯一的卡片投影。EP 的 --el-box-shadow-* 在这套主题里被整体置为 none
-     （「无阴影」指的不画描边，卡片仍需要一层极淡投影把从页面底色上立起来），
-     所以卡片只能自己用这一个对象。四处用到它的地方 —— .el-card（EP 卡片）、
-     Dashboard 的 .card 与登录页的 .login-card（都是原生 div，吃不到 EP 变量）、
-     还有作业完成通知 .el-notification（浮层，下面没有遮罩托底，全靠这层投影立起来）——
-     全部写 var(--panel-card-shadow)：历史上那三处各抄一遍同一串字面量，改一处漏两处
-     就出现「有的卡片浮起来、有的没有」。
-     只给「1px 扩散 2px 的 6% 黑」这一档：比这重就成描边了，比这轻等于没有。 */
-  --panel-card-shadow: 0 1px 2px rgb(0 0 0 / 6%);
+  /* 贴面卡的投影就是上面的 --panel-shadow-1；--panel-card-shadow 是它的
+     历史别名（.el-card / Dashboard 的 .card / 登录卡 / AI 面板内各处写的是这个名字）。
+     浮层与模态请改用 --panel-shadow-2 / -3。 */
 
   /* 机器数据字体：统一用鸿蒙字体 + 表格数字（tnum）。经实测该字体
      0-9 字身宽全部一致（570 单位）且带 tnum 特性，数字列天然对齐，
@@ -283,6 +344,13 @@ body {
   background: var(--el-bg-color-page);
   color: var(--el-text-color-primary);
 }
+/* 文字托底影：块用三档投影立边界，文字用一条柔影托底（见 --panel-text-shadow）。
+   挂在 #app 而不是 body —— Element Plus 的下拉 / 对话框 / 消息等浮层都 teleport
+   到 body 下、在 #app 之外，这些层自带不透明底、不需要托底影，挂在 body 会把它们
+   一并罩住。 */
+#app {
+  text-shadow: var(--panel-text-shadow);
+}
 
 /* 滚动条：细（6px）+ 静止时全透明，指针停在该滚动条上才显形。
    沿用侧栏那套（4px 透明、hover 显形）的思路，理由是这个面板的布局：
@@ -352,10 +420,32 @@ body {
   border-radius: var(--radius);
 }
 
-/* 输入框数字步进器：增减按钮贴边有背景，会溢出外层圆角 */
+/* 输入框数字步进器：增减按钮贴边有背景，会溢出外层圆角。
+ * 🔴 投影必须画在 .el-input-number 这一层：内层 .el-input__wrapper 虽然带着同一档投影，
+ * 但会被这里的 overflow: hidden 整块裁掉（两者同尺寸，影子全落在外层之外）——只补内层是看不见的。 */
 .el-input-number {
   border-radius: var(--radius);
   overflow: hidden;
+  box-shadow: var(--panel-shadow-1);
+}
+/* 标签页内容区：EP 默认给它 overflow: hidden，会把页签内所有子元素的投影整块裁掉
+ * （设置页的 .card、实例页的 .inst-card / 按钮 / 输入框都中招，投影加了却看不见）。
+ * 内容区与外层同尺寸，没有半分落影的余地；放开后实测布局零位移、无横向溢出、切页签正常。 */
+.el-tabs__content {
+  overflow: visible;
+}
+/* 标签页（实例 / 系统设置顶部页签）：EP 用一条 2px 的 --el-color-primary 下划线指示当前页，
+ * 那就是一条「线」，与全站无边框约定冲突。而本主题的主色与文本主色同值，把线抹掉后当前页
+ * 就再没有任何标记了（两项都变成同一个颜色），所以改用页面里别处已成立的「底色块」表达：
+ * 当前项给一层 --el-fill-color 底，其余项保持透明 —— 与分段按钮、表头、hover 行同一套语言。
+ * 页签带本身那条底线（.el-tabs__nav-wrap::after 走 --el-border-color-light）已随全局置空，
+ * 收掉主动条之后整条页签带没有一根线。 */
+.el-tabs__active-bar {
+  display: none;
+}
+.el-tabs__item.is-active {
+  background-color: var(--el-fill-color);
+  border-radius: var(--radius);
 }
 /* 加载遮罩（v-loading）：半透明直角块盖在圆角容器上 */
 .el-loading-mask {
@@ -387,19 +477,44 @@ body {
 }
 
 /* 无边框设计：靠背景色/阴影表达层次 */
-/* 输入框：用浅灰背景替代边框 */
+/* 输入框：用浅灰背景替代边框，并吃与卡片 / 表格 / 按钮同一档的贴面投影 ——
+ * 它同样是「有底色的实体块」，同一张表单里不该只有它贴着底色。
+ * 🔴 这里的 !important 必须留着：EP 用 box-shadow 画聚焦环与错误环
+ * （`.el-input__wrapper.is-focus` / `.is-error` 等），不用 !important 压不住，
+ * 聚焦时这条投影会被换成 EP 自己的 inset 环 —— 又回到描边那套口径去了。 */
 .el-input__wrapper,
 .el-textarea__inner {
   background-color: var(--el-fill-color-light);
-  box-shadow: none !important;
+  box-shadow: var(--panel-shadow-1) !important;
 }
 .el-input__wrapper.is-focus,
 .el-textarea__inner:focus {
   background-color: var(--el-fill-color);
 }
-/* 默认按钮：浅灰背景，无边框 */
+/* 下拉选择器 / 日期选择器：与输入框是同一类控件块，投影必须同档，
+ * 否则同一张表单里输入框浮着、下拉贴着。 */
+.el-select__wrapper {
+  box-shadow: var(--panel-shadow-1) !important;
+}
+/* 默认按钮：浅灰背景，无边框。
+ * 🔴 各状态的边框变量要一起置空，只写 border-color 不够：EP 把 border-color 声明在
+ * `.el-button` 上，而把各状态的取值挂在 --el-button-*-border-color 上，`.el-button:hover`
+ * 这类带伪类的选择器特异性高于上面那条 `.el-button` —— 指针一碰上去就补回一圈 1px 的
+ * --el-color-primary-light-7 描边（深色主题下实测 #464646 落在 #171717 底上，明暗差 47 级，
+ * 比按钮自己的投影还抢眼；浅色下是 #b8b8b8 落在 #e7e7e7 上，同样看得见）。
+ * 变量置空后 hover / active / disabled 所有状态恒为透明。 */
 .el-button {
   border-color: transparent;
+  --el-button-border-color: transparent;
+  --el-button-hover-border-color: transparent;
+  --el-button-active-border-color: transparent;
+  --el-button-disabled-border-color: transparent;
+}
+/* 按钮与卡片共用同一套「浮起」语言：凡是有底色的实体块（卡片 / 表格 / 按钮）
+ * 都带贴面档投影 —— 否则同一个页面上有的浮着、有的贴着，层次不成体系。
+ * 排除 link / text：这两类没有底色，投影会变成文字下面漂着的一团脏影。 */
+.el-button:not(.is-link):not(.is-text) {
+  box-shadow: var(--panel-shadow-1);
 }
 .el-button--default {
   background-color: var(--el-fill-color-light);
@@ -407,19 +522,47 @@ body {
 .el-button--default:hover {
   background-color: var(--el-fill-color);
 }
-/* 卡片：无边框，靠白底与页面底色对比 + 一档极淡投影区分层次。
+/* 分段单选按钮组（日志 / 软件 / 网络页的模式切换）：与按钮同属「有底色的控件」，
+ * 用同一档投影。影只加在组容器上一次 —— 逐段加会在段与段之间叠出阶梯状的影。 */
+.el-radio-group {
+  border-radius: var(--radius);
+  box-shadow: var(--panel-shadow-1);
+}
+/* 卡片：无边框，靠白底与页面底色对比 + 贴面档投影区分层次。
  * 只有底色差（#fff vs #f5f5f5，约 3% 明度）时，页面上卡片一连片，
- * 往下滚就分不清哪块是哪块；补一层 1px/2px 的 6% 黑投影把边界交代清楚，
- * 同时不碰「无边框、无彩色」的约定。深色主题下这层投影等于不可见，
- * 那边靠 #1d1d1d 与 #141414 的底色差分层，本来就够。 */
+ * 往下滚就分不清哪块是哪块；补一层贴面档投影把边界交代清楚，
+ * 同时不碰「无边框、无彩色」的约定。 */
 .el-card {
   border-color: transparent;
-  box-shadow: var(--panel-card-shadow);
+  box-shadow: var(--panel-shadow-1);
 }
-/* 作业完成通知是浮层，跟卡片吃同一档投影：无边框的前提下，浮层背景
- * 与页面底色只差 4% 明度，不补这层就分不出它的边界在哪。 */
+/* 列表页的表格是页面上最大的一块白：不加影就整片贴在底色上，
+ * 与旁边浮着的卡片不是一套语言。用同一档贴面投影把整块从底色上托起，
+ * 行与行的区隔仍由表头底色 + hover 底色承担，两者分工不重叠。 */
+.el-table {
+  box-shadow: var(--panel-shadow-1);
+}
+/* 作业完成通知是浮层，用浮层档而不是贴面档：它下面没有遮罩托底，
+ * 与页面底色的明度差又只有 4%，投影轻了分不出边界在哪。 */
 .el-notification {
-  box-shadow: var(--panel-card-shadow);
+  box-shadow: var(--panel-shadow-2);
+}
+/* 顶部消息（el-message）与作业通知同属浮层：同样从页面上方浮出、下面没有遮罩托底。
+ * 🔴 EP 给它的边界是「1px 描边 + 零投影」，而这条描边**不取自 --el-border-color** ——
+ * 它走 --el-message-border-color = --el-color-<type>-light-8，所以全局把 --el-border-color*
+ * 统统置空根本管不到它（实测仍在：浅色 #cccccc 落在 #ebebeb 上、深色 #2e2e2e 落在 #171717 上，
+ * 都是一圈看得见的线）。无边框约定下在这里单独收掉，只留「不透明底 + 浮层档投影」，
+ * 与作业通知同一套交代方式。用 border-color 而不是 border:none，保留 1px 盒以免尺寸跳变。
+ * 它也不吃 --el-box-shadow* 那四个变量（别以为改了 light 就管到它），投影同样在这里单独给。 */
+.el-message {
+  box-shadow: var(--panel-shadow-2);
+  border-color: transparent;
+}
+/* 提示横幅（el-alert）：留在内容流里的实心块，与卡片同属贴面档。
+ * 它只在出错 / 不可用时出现（SMART 不可用、unit 读取失败、任务报错），
+ * 属于页面里最大的一块浅色底，没有影就与页面底色糊在一起。 */
+.el-alert {
+  box-shadow: var(--panel-shadow-1);
 }
 /* 表格统一：白底块 + 表头浅灰底 + hover 浅灰（所有列表页同款）。
  *
@@ -569,6 +712,8 @@ body {
   border-radius: var(--radius);
   padding: var(--sp-1) var(--sp-3);
   cursor: pointer;
+  /* 与 .el-button 同档：同为有底色的实体块，投影语言要一致 */
+  box-shadow: var(--panel-shadow-1);
   /* 按钮文案一律单行：窄屏父容器变窄时，默认会把两字按钮断成上下两行 */
   white-space: nowrap;
 }

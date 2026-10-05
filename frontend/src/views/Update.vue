@@ -173,6 +173,8 @@ async function upload() {
 .status-block {
   background: var(--el-bg-color);
   border-radius: var(--radius);
+  /* 白底实心块，与卡片 / 表格同档（不加影就整片贴在页面底色上） */
+  box-shadow: var(--panel-shadow-1);
   padding: 16px;
   display: flex;
   flex-direction: column;

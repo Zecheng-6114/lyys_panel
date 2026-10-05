@@ -1486,7 +1486,8 @@ const THEME_MAX_BYTES: usize = 3 * 1024 * 1024;
 /// - 允许字段：version / name / radius / shadow / colors{primary,bg_page,bg_card,text} / bg_image
 /// - 颜色：必须为 `#rrggbb`（6 位十六进制，带 #）
 /// - radius：数值 0..=64
-/// - shadow：布尔，false = 关闭卡片投影（缺省视为 true）
+/// - shadow：布尔，false = 关闭贴面卡片/内容块的投影（缺省视为 true）；
+///   只作用于贴面那一档，对话框与下拉菜单等浮层的投影不受它控制
 /// - bg_image：必须以 `data:image/` 开头，且不含引号/括号/反斜杠/控制字符
 ///   （这些字符可闭合 CSS 的 `url("...")` 字符串，构成样式注入逃逸）
 fn validate_theme(cfg: &serde_json::Value) -> Result<(), String> {

@@ -293,6 +293,8 @@ onBeforeUnmount(() => {
 .panel {
   background: var(--el-bg-color);
   border-radius: var(--radius);
+  /* 与卡片 / 表格同档：三块面板都是白底实心块，不加影就整片贴在页面底色上 */
+  box-shadow: var(--panel-shadow-1);
   padding: 16px;
 }
 .panel-head {
@@ -346,6 +348,8 @@ onBeforeUnmount(() => {
   padding: 12px;
   background: var(--el-fill-color-lighter);
   border-radius: var(--radius);
+  /* 与 .log-pane 同款：白 panel 内的浅灰输出块，靠同一档投影与父块分层 */
+  box-shadow: var(--panel-shadow-1);
   font-size: 12px;
   line-height: 1.6;
   overflow: auto;
@@ -360,6 +364,8 @@ onBeforeUnmount(() => {
   overflow: auto;
   background: var(--el-fill-color-lighter);
   border-radius: var(--radius);
+  /* 与 .unit-pre 同款：白 panel 内的浅灰输出块，靠同一档投影与父块分层 */
+  box-shadow: var(--panel-shadow-1);
   font-size: 12px;
   line-height: 1.6;
 }

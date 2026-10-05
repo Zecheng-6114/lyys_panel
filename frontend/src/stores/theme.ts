@@ -124,11 +124,6 @@ export function buildThemeCss(cfg: ThemeConfig): string {
   if (radius !== null) {
     lines.push(`--radius: ${radius}px;`);
   }
-  // 只在显式关闭时输出：true / 未提供都不生成这条，沿用 theme.css 的默认投影，
-  // 老主题包（没这个字段）行为不变。
-  if (cfg.shadow === false) {
-    lines.push("--panel-card-shadow: none;");
-  }
   const c = cfg.colors ?? {};
   const primary = isHexColor(c.primary) ? c.primary : null;
   const bgCard = isHexColor(c.bg_card) ? c.bg_card : null;
@@ -137,6 +132,38 @@ export function buildThemeCss(cfg: ThemeConfig): string {
   // 主题明暗由卡片底色判断：决定所有派生色的淡出方向
   const isDark = isDarkTheme(bgCard);
   const fade = isDark ? "#000000" : "#ffffff";
+
+  // 阴影按同一套三档层级输出，但深色下整体加浓：黑投影落在深色底上对比极弱，
+  // 照浅色那套画等于没画，而浮层与模态恰恰最依赖这层投影交代边界
+  // （面板无描边，浮层下面又常常没有遮罩）。三档的含义见 theme.css。
+  const shadows = isDark
+    ? ["0 1px 2px rgb(0 0 0 / 30%)", "0 6px 16px rgb(0 0 0 / 45%)", "0 16px 40px rgb(0 0 0 / 60%)"]
+    : ["0 1px 2px rgb(0 0 0 / 6%)", "0 4px 12px rgb(0 0 0 / 10%)", "0 12px 32px rgb(0 0 0 / 18%)"];
+  // shadow === false 只关掉贴面那一档 —— 卡片与页面齐平。浮层和模态的投影
+  // 是功能性的：少了它，对话框、下拉菜单与背景的边界在无描边界面里说不清。
+  lines.push(`--panel-shadow-1: ${cfg.shadow === false ? "none" : shadows[0]};`);
+  lines.push(`--panel-shadow-2: ${shadows[1]};`);
+  lines.push(`--panel-shadow-3: ${shadows[2]};`);
+
+  // 接缝影：面板外框（顶栏下沿 / 侧栏右沿）与内容区之间那两条硬色阶。
+  // 浓度与贴面档一致、也随同一个「阴影」开关关闭 —— 它表达的就是
+  // 「面板贴在页面上」这件事。12px 偏移 / -12px spread / 10px blur 这组搭配
+  // 与浅深两档为什么是这个百分数，见 theme.css 的 --panel-shadow-seam*。
+  const seamAlpha = isDark ? "60%" : "12%";
+  const seamTop = `inset 0 12px 10px -12px rgb(0 0 0 / ${seamAlpha})`;
+  const seamLeft = `inset 12px 0 10px -12px rgb(0 0 0 / ${seamAlpha})`;
+  const seamOff = cfg.shadow === false ? "none" : null;
+  // 两个令牌各自都是合法值（开关关闭时都是 none，不会被拼成非法的 `none, none`）
+  lines.push(`--panel-shadow-seam: ${seamOff ?? `${seamTop}, ${seamLeft}`};`);
+  lines.push(`--panel-shadow-seam-top: ${seamOff ?? seamTop};`);
+
+  // 文字托底影（第 4 类层次，与上面三档独立）：深色主题下亮字落在深底上，
+  // 托一层更深的柔影把字形衬出来；浅色主题是暗字落浅底，影一浓就发脏，
+  // 只留最淡的一层保持「文字有托底」的语言一致。它不受「阴影」开关控制 ——
+  // 那个开关只管贴面卡，文字这一层是功能性的（花色底上分不清字形就失去可读性）。
+  lines.push(
+    `--panel-text-shadow: ${isDark ? "0 1px 2px rgb(0 0 0 / 45%)" : "0 1px 1px rgb(0 0 0 / 8%)"};`,
+  );
 
   if (bgCard) {
     lines.push(`--el-bg-color: ${bgCard};`);

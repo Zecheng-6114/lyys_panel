@@ -707,6 +707,9 @@ async function logout() {
      不需要额外控件、渐变、伪元素或 SVG。 */
   border-top-left-radius: var(--radius);
   background-color: var(--el-bg-color-page);
+  /* 顶栏下沿与侧栏右沿的接缝影。内容区正是这两条缝共同的接收面，所以压在
+     自己的内侧；给顶栏/侧栏加外投影反而会被这里的背景盖掉（见 theme.css）。 */
+  box-shadow: var(--panel-shadow-seam);
 }
 
 /* 手机档内容区四周从 16 缩到标尺的 8。表格列宽是按容器算的，省下的这 8×2
@@ -723,6 +726,8 @@ async function logout() {
     /* 内凹圆角是为「侧边栏右边界 × 顶栏下沿」设计的。窄屏侧边栏不再常驻，
        交汇点不存在，留着会在左上角留下一个无来由的缺口。 */
     border-top-left-radius: 0;
+    /* 同理：竖的那条缝（侧栏右沿）不存在了，只留顶栏下沿那一横 */
+    box-shadow: var(--panel-shadow-seam-top);
   }
 }
 </style>

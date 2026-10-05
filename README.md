@@ -377,8 +377,43 @@ lyys_panel/
 
 ## 开发者约定
 
-- **无边框设计**：所有 `--el-border-color*` 均为 `transparent`，层次只靠背景色差与一层极淡投影表达，不要给卡片加实色边框。
-  卡片一律用 `--panel-card-shadow`（`theme.css` 中的极淡一层）立边界，不要另写硬编码 `box-shadow`。
+- **无边框设计**：所有 `--el-border-color*` 均为 `transparent`，层次只靠背景色差与投影表达，不要给卡片加实色边框。
+  ⚠️ 但**全局置空这两个变量不等于全站没有描边** —— 有两类描边会绕开它们，`theme.css` 里已逐个单独收掉，
+  新加组件时按同样方式自查：① **根本不取自 `--el-border-color` 的边框** —— `el-message` 的边界走
+  `--el-message-border-color`（= `--el-color-<type>-light-8`），全局置空对它无效，得直接写 `border-color: transparent`；
+  ② **特异性高于全局规则的 EP 状态样式** —— EP 把 `border-color` 声明在 `.el-button` 上、把各状态的取值挂在
+  `--el-button-*-border-color` 上，而 `.el-button:hover` 比 `.el-button` 更具体，只写 `border-color: transparent`
+  的话指针一碰上去就补回一圈 1px 描边（浅色 #b8b8b8 / 深色 #464646），必须把变量连同 hover / active / disabled
+  各状态一起置空。同类的还有 `el-tabs` 的当前页标记：EP 画的是 2px `--el-color-primary` 下划线，而本主题主色与
+  文本主色同值（抹掉线就没了标记），已改为给当前项一层 `--el-fill-color` 底色块。
+  自查方法：逐元素取 computed style 扫「可见边框」（含 `::before/::after`，以及用 1~4px 背景色画的假边框），
+  **悬停态与浮层必须单独跑** —— 浮层要先点开对话框 / 抽屉 / 下拉才存在于 DOM 里。
+  投影按使用场景分三档（`theme.css` 的 `--panel-shadow-1/2/3`）：贴面卡用 1，下拉 / 气泡 / 通知 / 悬浮面板等浮层用 2，
+  对话框与抽屉等模态用 3；Element Plus 的 `--el-box-shadow*` 已按场景回填到这三档，页面里一律引用变量，
+  不要另写硬编码 `box-shadow`。深色主题下三档由 `buildThemeCss` 自动加浓（黑投影落在深色底上对比很弱）。
+  判据是「**有底色的实体块一律带贴面档**」：卡片、**表格、按钮（link / text 除外）、`.mini-btn`、
+  输入框 / 文本域 / 下拉选择器 / 数字步进器、分段单选按钮组 `.el-radio-group`、提示横幅 `.el-alert`**，
+  以及各页面自建的实心块（日志页 `.logbox`、深度运维页 `.panel / .log-pane / .unit-pre`、
+  面板更新页 `.status-block`）**同一档，同一个页面上不允许有的浮着、有的贴着。
+  **只有透明排版容器与页根容器不加**（`.toolbar`、`.spacer`、表单行没有底色，投影无从依附；
+  `.layout / .sidebar / .topbar / .content` 是应用外壳，不加贴面档，靠底色差分层）。
+  外壳与页面之间只有一条 L 形交界要交代：顶栏下沿 + 侧栏右沿。这两条等宽直边原本只是硬色阶，
+  无边框设计下眼睛会把它读成「在这里画了一条线」，改用接缝影 `--panel-shadow-seam`
+  （inset 画在 `.content` 内侧 —— 它正是这两条缝共同的接收面；给顶栏/侧栏加外投影会被后面的
+  内容区背景整条盖住，还会连带落到侧栏与顶栏之间那条看不见的缝上）。接缝影同属贴面档、
+  随「阴影」开关一起关；窄屏侧栏变抽屉、L 的交汇点不存在，只留 `--panel-shadow-seam-top` 那一横。
+  浮层档给「浮在页面上、下面没有遮罩托底」的构件：`.el-notification`、**顶部消息 `.el-message`**、
+  **AI 悬浮球 `.ball`**、AI 面板、下拉 / 气泡等；其中 `.el-message` 不吃 `--el-box-shadow*`，须单独给。
+  ⚠️ 投影要画在**不会裁切自己的那一层**（`overflow: hidden` 的祖先会把子元素的投影整块裁掉，加了等于没加）：
+  数字步进器的投影写在外层 `.el-input-number` 上（它自己带 `overflow: hidden` 收贴边的增减按钮，
+  内层 wrapper 的投影会被裁掉）；`.el-tabs__content` 的 `overflow` 已放开，否则标签页里的卡片与按钮投影全被裁。
+  改动投影相关样式后，用「遍历所有带 `box-shadow` 的元素、向上找第一个 `overflow != visible` 且与自身同尺寸的祖先」
+  的办法扫一遍，能把这类"加了却看不见"的地方一次找全。
+  ⚠️ 输入框那几条**必须带 `!important`**：EP 用 `box-shadow` 画聚焦环与错误环，不压会被换成它自己的
+  inset 环；聚焦反馈仍只靠底色加深（`--el-fill-color-light` → `--el-fill-color`）。
+  文字另有一条托底柔影 `--panel-text-shadow`（作用在 `#app`）：块用投影立边界、文字用柔影托底，深色下由
+  `buildThemeCss` 自动加浓；它独立于「阴影」开关（那个只管贴面卡），挂在 `#app` 而非 `body`，
+  是为了避开 teleport 到 body 的 Element Plus 浮层。
 - **圆角基准**：`theme.css` 中 `--radius` 默认 6px，全站圆角（含 Element Plus 各圆角变量与侧边栏内凹）都引用它；主题配置可自带 `radius` 覆盖（高对比预设就是 0），设置页也能单独调。新增组件一律引用该变量，不要写死数值。
 - **主题定制**：`themes/presets.ts` 内置浅色 / 深色 / 柔和纸色 / 高对比 4 套预设，设置页可切换预设并自定义主色、页面底色、卡片底色、文字色、圆角、阴影开关与背景图（配置存服务端，对所有设备生效）；自定义后层次表达同上，仍靠背景色差而非彩色描边。注意浏览器自动填充的输入框底色由浏览器绘制（暗色下是一层暗黄），不受面板变量控制。
 - **字体**：全站统一 HarmonyOS Sans SC（`--el-font-family` 与 `body` 均引用）；数据展示区（`.mono`、日志、路径栏等）用同一字体并加 `font-variant-numeric: tabular-nums` 保证数字列对齐。字体文件必须**原样分发**（Huawei 协议禁止修改/转格式），新增字重或裁剪均不允许。
