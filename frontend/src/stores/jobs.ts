@@ -109,9 +109,10 @@ export const useJobsStore = defineStore("jobs", () => {
       title: `${name} · ${meta.label}`,
       message: parts.join(" · "),
       type: NOTIFY_TYPE[row.status] ?? "info",
-      // 不自动消失：这条提示的意义就是「你没盯着它也知道跑完了」，
-      // 4.5 秒后自己溜走的话，人一离开屏幕回来照样不知道。
-      duration: 0,
+      // 自动消失：常驻通知不会自己收走，跑几个作业就在右上角叠成一列，
+      // 把后面的页面一直挡着，只能挨个点 ×。给足 8 秒让人从别处扫到一眼，
+      // 之后自己退场（想提前关点 × 即可）。
+      duration: 8000,
     });
   }
 
