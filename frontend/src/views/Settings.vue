@@ -111,6 +111,14 @@
               <el-slider v-model="draft.radius" :min="0" :max="16" :step="1" />
             </div>
 
+            <div class="row">
+              <label>阴影</label>
+              <el-checkbox v-model="draft.shadow">卡片与面板使用投影</el-checkbox>
+            </div>
+            <div class="hint">
+              面板只用一层浅投影区分层次，没有描边；关掉后卡片与页面底色直接相接。
+            </div>
+
             <div class="group">颜色</div>
             <div class="row">
               <label>主色</label>
@@ -326,6 +334,7 @@ interface DraftColors {
 interface Draft {
   name: string;
   radius: number;
+  shadow: boolean;
   colors: DraftColors;
   bg_image: string | null;
 }
@@ -334,6 +343,7 @@ function emptyDraft(): Draft {
   return {
     name: "自定义主题",
     radius: 6,
+    shadow: true,
     colors: { primary: null, bg_page: null, bg_card: null, text: null },
     bg_image: null,
   };
@@ -353,6 +363,8 @@ function fromConfig(cfg: ThemeConfig | null, keepRadius = false) {
   if (cfg) {
     if (cfg.name) d.name = cfg.name;
     if (typeof cfg.radius === "number") d.radius = cfg.radius;
+    // 缺省视为开：老主题包没有这个字段，行为应与从前（有投影）一致
+    if (typeof cfg.shadow === "boolean") d.shadow = cfg.shadow;
     if (cfg.colors) Object.assign(d.colors, pickColors(cfg.colors));
     if (cfg.bg_image) d.bg_image = cfg.bg_image;
   }
@@ -372,6 +384,7 @@ function pickColors(c: ThemeColors): DraftColors {
 function toConfig(): ThemeConfig {
   const cfg: ThemeConfig = { version: 1, name: draft.name.trim() || "自定义主题" };
   cfg.radius = draft.radius;
+  cfg.shadow = draft.shadow;
   const colors = compact(draft.colors);
   if (Object.keys(colors).length) cfg.colors = colors;
   if (draft.bg_image) cfg.bg_image = draft.bg_image;
@@ -389,8 +402,12 @@ watch(() => theme.config, (cfg) => fromConfig(cfg), { immediate: true });
 
 function applyPreset(id: string) {
   const p = PRESETS.find((x) => x.id === id);
+  if (!p) return;
+  const shadow = draft.shadow;
   // 预设显式给了 radius（如高对比=0）则用预设值，否则保留用户现值
-  if (p) fromConfig(p.config, p.config.radius === undefined);
+  fromConfig(p.config, p.config.radius === undefined);
+  // 投影开关不属于配色，选预设不改动它
+  if (p.config.shadow === undefined) draft.shadow = shadow;
 }
 
 function pickImport() {
@@ -645,7 +662,8 @@ onMounted(() => {
 }
 .settings .form .row > .el-slider,
 .settings .form .row > .el-input,
-.settings .form .row > .el-select {
+.settings .form .row > .el-select,
+.settings .form .row > .el-checkbox {
   flex: 1;
 }
 .btns {

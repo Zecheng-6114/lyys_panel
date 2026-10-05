@@ -9,6 +9,9 @@ export interface ThemeConfig {
   name?: string;
   /// 全局圆角（px）。theme.css 里所有圆角都引用 --radius，改这里全站生效。
   radius?: number;
+  /// 卡片/面板投影开关。缺省（含未提供）= true，沿用 theme.css 的默认投影；
+  /// false 时把全站唯一投影变量 --panel-card-shadow 归零。
+  shadow?: boolean;
   /// 颜色覆盖
   colors?: ThemeColors;
   /// 背景图（data URL，内嵌在配置里，不落盘）
@@ -120,6 +123,11 @@ export function buildThemeCss(cfg: ThemeConfig): string {
   const radius = safeRadius(cfg.radius);
   if (radius !== null) {
     lines.push(`--radius: ${radius}px;`);
+  }
+  // 只在显式关闭时输出：true / 未提供都不生成这条，沿用 theme.css 的默认投影，
+  // 老主题包（没这个字段）行为不变。
+  if (cfg.shadow === false) {
+    lines.push("--panel-card-shadow: none;");
   }
   const c = cfg.colors ?? {};
   const primary = isHexColor(c.primary) ? c.primary : null;

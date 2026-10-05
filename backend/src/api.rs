@@ -1483,9 +1483,10 @@ const THEME_MAX_BYTES: usize = 3 * 1024 * 1024;
 /// 主题字段白名单校验（P1-2）：前端会在应用前再校验一次，这里做服务端闸门，
 /// 防止把恶意值存进库后经主题 CSS 注入攻击浏览器。
 ///
-/// - 允许字段：version / name / radius / colors{primary,bg_page,bg_card,text} / bg_image
+/// - 允许字段：version / name / radius / shadow / colors{primary,bg_page,bg_card,text} / bg_image
 /// - 颜色：必须为 `#rrggbb`（6 位十六进制，带 #）
 /// - radius：数值 0..=64
+/// - shadow：布尔，false = 关闭卡片投影（缺省视为 true）
 /// - bg_image：必须以 `data:image/` 开头，且不含引号/括号/反斜杠/控制字符
 ///   （这些字符可闭合 CSS 的 `url("...")` 字符串，构成样式注入逃逸）
 fn validate_theme(cfg: &serde_json::Value) -> Result<(), String> {
@@ -1509,6 +1510,11 @@ fn validate_theme(cfg: &serde_json::Value) -> Result<(), String> {
                 let r = v.as_f64().ok_or("radius 必须是数字")?;
                 if !(0.0..=64.0).contains(&r) {
                     return Err("radius 必须在 0..64 之间".into());
+                }
+            }
+            "shadow" => {
+                if v.as_bool().is_none() {
+                    return Err("shadow 必须是布尔值".into());
                 }
             }
             "colors" => {
@@ -2772,6 +2778,7 @@ mod tests {
             "version": 1,
             "name": "我的主题",
             "radius": 8,
+            "shadow": false,
             "colors": {
                 "primary": "#409eff",
                 "bg_page": "#141414",
@@ -2888,6 +2895,11 @@ mod tests {
         // version：必须是数字
         assert!(validate_theme(&json!({ "version": "1" })).is_err());
         assert!(validate_theme(&json!({ "version": 2 })).is_ok());
+        // shadow：仅布尔；数字/字符串虽是真值也不当开关用（类型必须对）
+        assert!(validate_theme(&json!({ "shadow": true })).is_ok());
+        assert!(validate_theme(&json!({ "shadow": false })).is_ok());
+        assert!(validate_theme(&json!({ "shadow": 1 })).is_err());
+        assert!(validate_theme(&json!({ "shadow": "true" })).is_err());
     }
 
     // ---------- AI API 配置校验（设置页） ----------
