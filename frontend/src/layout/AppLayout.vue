@@ -70,7 +70,7 @@
               </el-dropdown-menu>
             </template>
           </el-dropdown>
-          <button class="mini-btn" type="button" @click="openPwdDialog">改密</button>
+          <!-- 改密入口在「账号管理」页（改自己的人也是在那里改），顶栏只留退出 -->
           <button class="mini-btn" type="button" @click="logout">退出</button>
         </div>
       </header>
@@ -79,7 +79,7 @@
       </section>
     </div>
 
-    <!-- 2.2 修改密码：首登强制改密（不可关闭）或用户主动改密 -->
+    <!-- 2.2 修改密码：仅首登强制改密（不可关闭）。主动改密在「账号管理」页 -->
     <el-dialog
       v-model="pwdOpen"
       :title="auth.mustChange ? '修改初始密码' : '修改密码'"
@@ -160,15 +160,11 @@ onMounted(async () => {
   if (auth.mustChange) pwdOpen.value = true;
 });
 
-// 首登强制改密（2.2）；顶栏「改密」按钮也复用此弹窗
+// 首登强制改密（2.2）：登录后 mustChange 为真时立刻弹出，不可关闭、不可跳过。
+// 用户自发的改密走「账号管理」页，不再挤在顶栏。
 const pwdOpen = ref(false);
 const pwdLoading = ref(false);
 const pwdForm = reactive({ old: "", new1: "", new2: "" });
-
-function openPwdDialog() {
-  pwdForm.old = pwdForm.new1 = pwdForm.new2 = "";
-  pwdOpen.value = true;
-}
 
 async function submitPwd() {
   if (pwdForm.new1.length < 8) {
@@ -678,7 +674,7 @@ async function logout() {
 .top-actions {
   display: flex;
   gap: var(--sp-2);
-  /* 按钮不参与收缩：宁可标题被省略号截短，也不要「改密」「退出」被压到断行 */
+  /* 按钮不参与收缩：宁可标题被省略号截短，也不要「退出」被压到断行 */
   flex: none;
 }
 .content {

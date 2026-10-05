@@ -3,6 +3,7 @@
     <div class="toolbar">
       <el-button @click="load">刷新</el-button>
       <el-button @click="openCreate">新增用户</el-button>
+      <el-button @click="openPwd">修改我的密码</el-button>
       <span class="spacer" />
       <span class="hint">viewer 只读 · operator 可执行操作 · admin 全权</span>
     </div>
@@ -62,6 +63,41 @@
         <el-button @click="save">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- 修改当前登录账号自己的密码：原来挂在顶栏，属账号管理范畴，移到本页 -->
+    <el-dialog v-model="showPwd" title="修改我的密码" width="440px">
+      <el-form label-width="72px" size="small">
+        <el-form-item label="旧密码">
+          <el-input
+            v-model="pwdForm.old"
+            type="password"
+            show-password
+            autocomplete="current-password"
+          />
+        </el-form-item>
+        <el-form-item label="新密码">
+          <el-input
+            v-model="pwdForm.new1"
+            type="password"
+            show-password
+            autocomplete="new-password"
+            placeholder="至少 8 位"
+          />
+        </el-form-item>
+        <el-form-item label="确认密码">
+          <el-input
+            v-model="pwdForm.new2"
+            type="password"
+            show-password
+            autocomplete="new-password"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showPwd = false">取消</el-button>
+        <el-button :loading="pwdLoading" @click="savePwd">确认修改</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -69,6 +105,9 @@
 import { col, hideColP2, hideColP3 } from "../composables/useResponsive";
 import { onMounted, reactive, ref } from "vue";
 import http from "../api/http";
+import { useAuthStore } from "../stores/auth";
+
+const auth = useAuthStore();
 
 interface UserRow {
   id: number;
@@ -171,6 +210,44 @@ async function remove(row: UserRow) {
     load();
   } catch (e: any) {
     ElMessage.error(e.response?.data?.error ?? "删除失败");
+  }
+}
+
+/* ---------------- 修改我的密码 ---------------- */
+
+const showPwd = ref(false);
+const pwdLoading = ref(false);
+const pwdForm = reactive({ old: "", new1: "", new2: "" });
+
+function openPwd() {
+  pwdForm.old = pwdForm.new1 = pwdForm.new2 = "";
+  showPwd.value = true;
+}
+
+async function savePwd() {
+  if (pwdForm.new1.length < 8) {
+    ElMessage.warning("新密码至少 8 位");
+    return;
+  }
+  if (pwdForm.new1 !== pwdForm.new2) {
+    ElMessage.warning("两次输入的新密码不一致");
+    return;
+  }
+  pwdLoading.value = true;
+  try {
+    await http.post("/account/password", {
+      old_password: pwdForm.old,
+      new_password: pwdForm.new1,
+    });
+    ElMessage.success("密码已修改");
+    showPwd.value = false;
+    pwdForm.old = pwdForm.new1 = pwdForm.new2 = "";
+    // 刷新账号信息：首登强制改密的标记会被服务端清掉
+    auth.load().catch(() => {});
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error ?? "修改失败");
+  } finally {
+    pwdLoading.value = false;
   }
 }
 

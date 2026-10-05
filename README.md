@@ -279,7 +279,7 @@ cat /var/lib/lyys-panel/initial_admin_password.txt
 
 **忘记密码怎么办？**
 
-admin 可在「账号管理」页重置任意用户的密码；admin 自己的密码走顶栏「改密」。
+admin 可在「账号管理」页重置任意用户的密码；修改自己的密码走该页工具栏的「修改我的密码」。
 若唯一的 admin 密码遗失且没有其他 admin 账号，只能停止服务后删除数据库文件
 重建（**会丢失全部数据**）——建议平时在「备份管理」页保持定期备份。
 
@@ -353,7 +353,7 @@ lyys_panel/
 │   ├── tsconfig.json
 │   ├── vite.config.ts
 │   └── src/
-│       ├── layout/AppLayout.vue   侧边栏 + 顶栏（电源 / 改密 / 设置）+ 内容区骨架
+│       ├── layout/AppLayout.vue   侧边栏 + 顶栏（电源 / 退出）+ 内容区骨架
 │       ├── views/                 各功能页面（Dashboard / Processes / Services / Logs /
 │       │                           Files / Packages / Tasks / Instances / Network /
 │       │                           Ops / Cron / Sessions / Users / Backups /
@@ -420,7 +420,7 @@ lyys_panel/
 - ~~登录接口无失败限流~~ → 已实现指数退避（`auth::LoginThrottle`）
 - ~~面板默认明文 HTTP~~ → 已默认 HTTPS（自签证书，支持挂正式证书与 HTTP 跳转）
 - ~~前后端均无自动化测试；无 CI~~ → 后端核心路径集成测试 + GitHub Actions CI（PR 检查、tag 多平台发布）
-- ~~缺少「修改管理员密码」界面~~ → 多用户 RBAC + 账号管理页（admin 可重置密码）+ 顶栏改密
+- ~~缺少「修改管理员密码」界面~~ → 多用户 RBAC + 账号管理页（admin 可重置任意用户密码，自己也在这里改）
 - ~~外部命令无超时、包管理器无并发锁~~ → `cmd.rs` 统一执行器：按类别超时预算、分组互斥、输出上限
 
 ## License
