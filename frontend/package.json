@@ -11,6 +11,7 @@
     "format": "prettier --write \"src/**/*.{vue,ts,tsx,css}\""
   },
   "dependencies": {
+    "@material/material-color-utilities": "^0.3.0",
     "axios": "^1.7.7",
     "echarts": "^6.1.0",
     "element-plus": "^2.8.4",

@@ -56,6 +56,12 @@ export default defineConfig({
           if (id.includes("node_modules/element-plus")) {
             return "element-plus";
           }
+          // 取色算法（量化器 + HCT）只在设置页点「从背景图取色」时才用得上，
+          // 单独成块才能真的按需加载 —— 并进 vendor 的话，它会跟着入口的静态
+          // 依赖一起进首屏，dynamic import 就白写了。
+          if (id.includes("node_modules/@material/material-color-utilities")) {
+            return "monet";
+          }
           if (id.includes("node_modules")) {
             return "vendor";
           }

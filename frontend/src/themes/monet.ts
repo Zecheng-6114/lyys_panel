@@ -1,0 +1,129 @@
+/// 莫奈取色（Material You / Monet）：从一张图里提炼出整套面板配色。
+///
+/// 三步，全部由 Google 的 material-color-utilities 完成：
+///   1. 量化 —— 图片缩到 128px 后用 Celebi 量化器（Wu 聚类 + 均值漂移）聚成
+///      128 个代表色；
+///   2. 打分 —— Score 按「相邻 30° 色相区间的像素占比 × 彩度」排序，挑出最
+///      适合当主题源色的那一个：占比大但几乎无彩度的灰、以及只占几个像素的
+///      高饱和杂点，都会被它筛掉；
+///   3. 展开 —— 源色送进 HCT 色彩空间（CAM16 色相/彩度 + L* 明度）生成色调盘，
+///      也就是同色相同彩度、只差明度的一串颜色，再按面板四个色位各取一档。
+///
+/// 🔴 明度档位照着面板内置预设的观感定，不是照抄 Material 的角色表：
+///   - 卡片始终比页面亮一档（浅色 #f5f5f5→#ffffff，深色 #141414→#1d1d1d），
+///     这是面板「无边框，层次只用底色深浅表达」的前提；
+///   - 深色档的主色取**亮**档（tone 80）——面板的主按钮是反色块，
+///     文字用的是底色 `--el-bg-color`，亮主色配深字才读得出来（见 theme.css
+///     的「反色选中块」一节）。
+
+export interface MonetPalette {
+  primary: string;
+  bg_page: string;
+  bg_card: string;
+  text: string;
+}
+
+export interface MonetResult {
+  colors: MonetPalette;
+  /// 图里没有够彩的颜色（黑白照片、灰度壁纸），配色退回中性色
+  achromatic: boolean;
+}
+
+/// 取色前的采样边长。量化开销与像素数成正比，原图最长边可达 2560（约 650 万
+/// 像素），直接喂进去要跑上百万次聚类；缩到 128 后色调统计不变，量化从秒级降到
+/// 毫秒级。这个值也是 material-color-utilities 自带示例用的值。
+const SAMPLE_EDGE = 128;
+
+/// Sentry for "image has no usable accent color".
+///
+/// Score 在**所有**颜色都被筛掉时会退回它内置的兜底色（Google Blue）——对着
+/// 一张黑白壁纸给出一个蓝色主色是错的，所以传一个自己认得出来的哨兵色进去，
+/// 用它来识别这种情况。#010203 是量化器不可能输出的值（它只会输出图片里真实
+/// 出现过的颜色，且这三分量都取到 1/255 量级的概率约等于零）。
+const ACHROMATIC_SENTINEL = 0xff010203;
+
+export async function monetFromImage(dataUrl: string, dark: boolean): Promise<MonetResult> {
+  // 动态引入：这套算法（量化器 + HCT + 几个 scheme）只在点取色时才用得上，
+  // 不该压在首屏体积里；manualChunks 里给它单独分了 monet chunk。
+  const { CorePalette, QuantizerCelebi, Score, argbFromRgb, hexFromArgb } = await import(
+    "@material/material-color-utilities"
+  );
+
+  const data = await samplePixels(dataUrl);
+  const pixels: number[] = [];
+  for (let i = 0; i < data.length; i += 4) {
+    // 半透明像素不参与：量化出来的是它与下层底色混合之后的颜色，不是图本身的色
+    if (data[i + 3] < 255) continue;
+    pixels.push(argbFromRgb(data[i], data[i + 1], data[i + 2]));
+  }
+  if (!pixels.length) throw new Error("这张图没有可用的像素");
+
+  const ranked = Score.score(QuantizerCelebi.quantize(pixels, 128), {
+    fallbackColorARGB: ACHROMATIC_SENTINEL,
+  });
+  const source = ranked[0];
+  const achromatic = source === ACHROMATIC_SENTINEL;
+  const palette = CorePalette.of(source);
+  const hex = (argb: number) => hexFromArgb(argb).toLowerCase();
+
+  // 中性色盘：与源色同色相、彩度压到 4 的一支，用它铺页面/卡片/正文，
+  // 整体会带上图片的色调又不会喧宾夺主（这就是「莫奈」的观感来源）。
+  const n = palette.n1;
+
+  if (achromatic) {
+    // 灰度图没有能当主色的颜色。主色退回面板自己的黑白灰口径（浅色近黑、
+    // 深色近白），另外三色仍按这张图的灰度展开 —— 得到一套干净的中性主题，
+    // 而不是凭空冒出来的蓝色。
+    return {
+      achromatic: true,
+      colors: {
+        primary: hex(n.tone(dark ? 90 : 10)),
+        bg_page: hex(n.tone(dark ? 6 : 95)),
+        bg_card: hex(n.tone(dark ? 12 : 99)),
+        text: hex(n.tone(dark ? 90 : 10)),
+      },
+    };
+  }
+
+  return {
+    achromatic: false,
+    colors: {
+      // 主色取 Material 的常规档位：浅色 40（够深，反色块上的浅字压得住）、
+      // 深色 80（够亮，深字压得住）
+      primary: hex(palette.a1.tone(dark ? 80 : 40)),
+      bg_page: hex(n.tone(dark ? 6 : 95)),
+      bg_card: hex(n.tone(dark ? 12 : 99)),
+      text: hex(n.tone(dark ? 90 : 10)),
+    },
+  };
+}
+
+/// 把图缩到 SAMPLE_EDGE 再读出像素。
+///
+/// 用 canvas 缩放而不是直接量化原图：`getImageData` 的返回体积、量化器的
+/// 输入规模都跟像素数走，缩一次把两个都降到可忽略。imageSmoothingQuality
+/// 拉满，避免最近邻缩图把高频噪点当成长尾颜色留下来。
+async function samplePixels(dataUrl: string): Promise<Uint8ClampedArray> {
+  const img = await loadImage(dataUrl);
+  const w = img.naturalWidth;
+  const h = img.naturalHeight;
+  if (!w || !h) throw new Error("图片无法解码");
+  const scale = Math.min(1, SAMPLE_EDGE / Math.max(w, h));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(w * scale));
+  canvas.height = Math.max(1, Math.round(h * scale));
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) throw new Error("当前浏览器不支持取色");
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  return ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+}
+
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("图片无法解码"));
+    img.src = src;
+  });
+}

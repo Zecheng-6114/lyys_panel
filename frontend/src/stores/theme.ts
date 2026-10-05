@@ -59,6 +59,13 @@ function luminance(hex: string): number {
   return rgb ? 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2] : 128;
 }
 
+/// 主题是深色还是浅色：由卡片底色判断。这个判断同时决定了两件事 ——
+/// 所有派生色往哪个方向淡出（这里），以及莫奈取色该展开成深色档还是
+/// 浅色档（设置页）。规则只有一处，所以导出给设置页复用。
+export function isDarkTheme(bgCard: string | null | undefined): boolean {
+  return !!bgCard && luminance(bgCard) < 128;
+}
+
 /// EP 主色变体的混合比例（与 Element Plus 官方算法一致）
 const LIGHT_RATIOS: [string, number][] = [
   ["light-3", 0.3],
@@ -120,7 +127,7 @@ export function buildThemeCss(cfg: ThemeConfig): string {
   const bgPage = isHexColor(c.bg_page) ? c.bg_page : null;
   const text = isHexColor(c.text) ? c.text : null;
   // 主题明暗由卡片底色判断：决定所有派生色的淡出方向
-  const isDark = !!bgCard && luminance(bgCard) < 128;
+  const isDark = isDarkTheme(bgCard);
   const fade = isDark ? "#000000" : "#ffffff";
 
   if (bgCard) {

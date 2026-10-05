@@ -117,6 +117,23 @@
               <label>文本色</label>
               <el-color-picker v-model="draft.colors.text" />
             </div>
+            <div class="row">
+              <label>自动配色</label>
+              <div class="btns">
+                <el-button
+                  size="small"
+                  :disabled="!draft.bg_image"
+                  :loading="monetizing"
+                  @click="monetize"
+                >
+                  从背景图取色
+                </el-button>
+              </div>
+            </div>
+            <div class="hint">
+              莫奈取色：从背景图里挑出最代表这张图的颜色，再按明暗展开成上面四色。
+              先设置背景图才可用；深浅档跟随当前卡片底色的明暗。
+            </div>
 
             <div class="group">背景图</div>
             <div class="row">
@@ -136,6 +153,9 @@
               </div>
             </div>
             <div v-if="draft.bg_image" class="hint">已设置背景图（铺满内容区，随页面固定）</div>
+            <div v-else class="hint">
+              常见格式均可，大图会自动压缩到最长边 2560 再保存
+            </div>
 
             <div class="row">
               <label></label>
@@ -155,8 +175,9 @@
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import http from "../api/http";
-import { useThemeStore, type ThemeColors, type ThemeConfig } from "../stores/theme";
+import { isDarkTheme, useThemeStore, type ThemeColors, type ThemeConfig } from "../stores/theme";
 import { PRESETS } from "../themes/presets";
+import { monetFromImage } from "../themes/monet";
 
 const tab = ref("system");
 
@@ -257,8 +278,16 @@ async function clearKey() {
 
 const theme = useThemeStore();
 
-/// 背景图原始文件大小上限（base64 后约 ×1.34，仍低于后端 3MB 限制）
-const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
+/// 背景图原始文件上限。只防误传超大文件（如 RAW/PSD 改名成 .jpg），
+/// 正常的手机原图（3~8MB）在这里一律放行 —— 真正决定能否入库的不是它。
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+/// 入库预算：data URL 的字符数上限。后端 /theme 请求体上限 3MB，主题 JSON
+/// 自身只占几十字节，这里按 2.6MB 卡住，留出包装余量。base64 约为原图的
+/// 1.37 倍，即约合 1.9MB 的图片体积。
+const MAX_DATA_URL_BYTES = 2_600_000;
+/// 压缩目标最长边（像素）。背景图是 cover 铺满内容区，再高的分辨率在屏幕上
+/// 也看不出差别，超出的部分纯属白占体积。
+const MAX_EDGE = 2560;
 
 interface DraftColors {
   primary: string | null;
@@ -379,10 +408,14 @@ async function onImageFile(e: Event) {
   input.value = "";
   if (!file) return;
   if (file.size > MAX_IMAGE_BYTES) {
-    ElMessage.error("背景图不能超过 2MB");
+    ElMessage.error(`背景图不能超过 ${MAX_IMAGE_BYTES / 1024 / 1024}MB`);
     return;
   }
-  draft.bg_image = await toDataURL(file);
+  try {
+    draft.bg_image = await toBgDataUrl(file);
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : "背景图读取失败");
+  }
 }
 
 function toDataURL(file: File): Promise<string> {
@@ -392,6 +425,116 @@ function toDataURL(file: File): Promise<string> {
     reader.onerror = () => reject(reader.error);
     reader.readAsDataURL(file);
   });
+}
+
+/// 文件 → 可入库的 data URL。
+///
+/// 背景图以 data URL 内嵌在主题 JSON 里存进 settings 表，所以体积受后端
+/// 请求体上限约束；直接卡原图大小的话，手机随手拍一张就超，得用户自己去
+/// 缩图。这里改成浏览器端压：原图本来就在预算内就原样用（不重编码、零画质
+/// 损失），超了才用 canvas 重编码，逐轮缩边降质直到落进预算。
+async function toBgDataUrl(file: File): Promise<string> {
+  if (!file.type.startsWith("image/")) throw new Error("只能选择图片文件");
+  // 原图转成 base64 后本来就装得下 → 原样内联，不重编码（零画质损失）。
+  // 0.72 = 1 / 1.37，1.37 是 base64 相对原字节的膨胀系数，再让一点余量。
+  if (file.size <= MAX_DATA_URL_BYTES * 0.72) return toDataURL(file);
+  const img = await decodeImage(file);
+  let edge = MAX_EDGE;
+  let quality = 0.9;
+  // 4 轮足够：体积与「边长² × 质量」同阶，第 1 轮通常就落到预算内
+  for (let i = 0; i < 4; i++) {
+    const out = encodeImage(img, edge, quality);
+    if (out.length <= MAX_DATA_URL_BYTES) return out;
+    edge = Math.round(edge * 0.75);
+    quality = Math.max(0.6, quality - 0.1);
+  }
+  throw new Error("图片压缩后仍然过大，请换一张");
+}
+
+/// 待压缩的图 → 可绘制的解码结果。
+///
+/// 🔴 不能用 `URL.createObjectURL(file)` 解码：面板的 CSP 是
+/// `img-src 'self' data:`，不含 blob:，blob URL 会被直接拦掉
+/// （浏览器 DevTools 里能看到 `img-src ← blob` 违规，<img> 收到 error）。
+/// createImageBitmap 直接吃 File，不走资源加载，因此不受 img-src 约束。
+///
+/// imageOrientation: "from-image" 必须显式给 —— <img> 会自动按 EXIF 旋转，
+/// createImageBitmap 默认**不**旋转，手机竖拍的照片会被摆成横的。
+async function decodeImage(file: File): Promise<ImageBitmap | HTMLImageElement> {
+  try {
+    return await createImageBitmap(file, { imageOrientation: "from-image" });
+  } catch {
+    // 浏览器没有 createImageBitmap，或它解不了这个格式 → 退回 <img> + data URL
+    return loadImage(await toDataURL(file));
+  }
+}
+
+/// 取解码结果的像素尺寸：ImageBitmap 用 width/height，<img> 用 natural*
+function imageSize(img: ImageBitmap | HTMLImageElement): [number, number] {
+  return img instanceof HTMLImageElement
+    ? [img.naturalWidth, img.naturalHeight]
+    : [img.width, img.height];
+}
+
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("图片无法解码"));
+    img.src = src;
+  });
+}
+
+/// canvas 重编码：按最长边等比缩放后导出。优先 webp（同画质体积约为
+/// jpeg 的七成，且保留透明通道），浏览器不支持时会退化成 png，此时改用
+/// jpeg 兜底 —— 代价是带透明像素的图会填成黑色，但这条路径只在不支持
+/// webp 的老浏览器上走到，换来的体积优势更大。
+/// 动图（gif）经此只留首帧 —— 会走到这里说明它已超过预算，静帧是合理取舍。
+function encodeImage(img: ImageBitmap | HTMLImageElement, edge: number, quality: number): string {
+  const [sw, sh] = imageSize(img);
+  const longest = Math.max(sw, sh) || 1;
+  const scale = Math.min(1, edge / longest);
+  const w = Math.max(1, Math.round(sw * scale));
+  const h = Math.max(1, Math.round(sh * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("当前浏览器不支持图片压缩");
+  ctx.drawImage(img, 0, 0, w, h);
+  const webp = canvas.toDataURL("image/webp", quality);
+  if (webp.startsWith("data:image/webp")) return webp;
+  return canvas.toDataURL("image/jpeg", quality);
+}
+
+/* ---------------- 莫奈取色 ---------------- */
+
+const monetizing = ref(false);
+
+/// 按背景图重新生成四个色位（详见 themes/monet.ts）。
+///
+/// 深浅档跟随**当前编辑态的卡片底色**，不跟随图片本身：图拍得暗不代表主题要
+/// 跟着变暗，面板的明暗是用户选预设定的。卡片底色解析不出来时按浅色处理，
+/// 与主题 store 判明暗的口径一致（isDarkTheme）。
+async function monetize() {
+  if (!draft.bg_image) return;
+  monetizing.value = true;
+  try {
+    const { colors, achromatic } = await monetFromImage(
+      draft.bg_image,
+      isDarkTheme(draft.colors.bg_card),
+    );
+    Object.assign(draft.colors, colors);
+    // 配色已经不是任何内置预设了，下拉框跟着清空（与导入主题包一致）
+    presetId.value = "";
+    ElMessage.success(
+      achromatic ? "这张图没有明显色彩，已按灰度配色" : "已按背景图取色，保存后生效",
+    );
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : "取色失败");
+  } finally {
+    monetizing.value = false;
+  }
 }
 
 async function saveTheme() {
