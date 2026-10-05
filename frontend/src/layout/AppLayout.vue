@@ -337,6 +337,16 @@ async function onPower(cmd: "panel-restart" | "reboot" | "shutdown") {
 }
 
 async function logout() {
+  // 二次确认：退出会丢掉当前 token，误触后要重新走一遍登录
+  try {
+    await ElMessageBox.confirm("退出后需要重新输入账号与密码才能进入面板。确定退出？", "退出确认", {
+      type: "warning",
+      confirmButtonText: "退出",
+      cancelButtonText: "取消",
+    });
+  } catch {
+    return;
+  }
   const token = localStorage.getItem("panel_token");
   if (token) {
     try {
