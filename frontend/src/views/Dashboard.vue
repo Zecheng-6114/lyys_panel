@@ -669,8 +669,14 @@ function renderChart() {
     tooltip: {
       trigger: "axis",
       backgroundColor: v("--el-bg-color-overlay") || cardBg,
-      borderColor: grid,
+      // ECharts 6 的 borderWidth 默认值是 1（见 TooltipModel.js），配上 borderColor
+      // 就是一圈可见描边，与全站「不画可见描边」的约定冲突 —— 显式归零。
+      borderWidth: 0,
       textStyle: { color: line },
+      // 用全站统一的浮层档投影，替代 ECharts 自带的 shadowBlur / shadowColor
+      // （默认 10px 与 20% 黑），否则会和 --panel-shadow-2 叠成两层影。
+      extraCssText: "box-shadow: var(--panel-shadow-2);",
+      shadowBlur: 0,
     },
     // ECharts 6 起 legend 的默认位置由顶部改成了贴底（LegendModel.defaultOption
     // 里 top 被注释、改设 bottom），于是图例会压在 x 轴标签上。这里显式钉回顶部，
