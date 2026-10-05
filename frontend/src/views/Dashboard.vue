@@ -90,7 +90,7 @@
               @update:model-value="(v: string) => setSize(i, v)"
             >
               <el-option
-                v-for="s in CARD_SIZES"
+                v-for="s in sizesFor(c.id)"
                 :key="s.key"
                 :label="s.label"
                 :value="s.key"
@@ -148,7 +148,8 @@ import {
   ROW_H,
   GAP,
   MAX_CARD_W,
-  MAX_CARD_H,
+  maxH,
+  sizesFor,
   defaultSize,
   type CardConfig,
   type DashCard,
@@ -575,10 +576,10 @@ function onPointerMove(e: PointerEvent) {
   if (resize.id !== null) {
     const dw = Math.round((e.clientX - resize.x) / (colWidth() + GAP));
     const dh = Math.round((e.clientY - resize.y) / (ROW_H + GAP));
-    // 上限与后端校验同源：宽度是栅格列数，高度 3 行防滥用；
-    // 窄屏列数更少，宽度上限跟着列数收
+    // 上限与后端校验同源：宽度是栅格列数，高度按卡片类型给
+    // （趋势图 6 行、其余 3 行，见 maxH）；窄屏列数更少，宽度上限跟着列数收
     resize.curW = clamp(resize.w + dw, 1, Math.min(MAX_CARD_W, cols.value));
-    resize.curH = clamp(resize.h + dh, 1, MAX_CARD_H);
+    resize.curH = clamp(resize.h + dh, 1, maxH(resize.id));
   }
 }
 

@@ -40,13 +40,17 @@ export const CARD_LABELS: Record<DashCard, string> = {
 };
 
 /// 可选尺寸档位（自定义弹窗里的选项，数组顺序即展示顺序）。
-/// 前几档给数值卡，后两档是整宽 —— 趋势图这类横向内容需要。
+/// 前三档给数值卡，整宽那几档是横向内容（趋势图）需要的。
+/// 最后三档只有趋势图够得着 —— 弹窗按卡片的高度上限过滤（见 sizesFor）。
 export const CARD_SIZES = [
   { key: "1x1", label: "小", w: 1, h: 1 },
   { key: "2x1", label: "宽", w: 2, h: 1 },
   { key: "2x2", label: "大", w: 2, h: 2 },
   { key: "4x1", label: "整宽", w: 4, h: 1 },
   { key: "4x2", label: "通栏", w: 4, h: 2 },
+  { key: "4x3", label: "通栏高", w: 4, h: 3 },
+  { key: "4x4", label: "通栏加高", w: 4, h: 4 },
+  { key: "4x6", label: "通栏满高", w: 4, h: 6 },
 ] as const;
 
 /// 栅格常量：行高与间距必须和 .cards 的 CSS 保持一致 ——
@@ -57,7 +61,25 @@ export const CARD_SIZES = [
 export const ROW_H = 88;
 export const GAP = 12;
 export const MAX_CARD_W = 4;
+/// 数值卡的高度上限：3 行（约 288px）。再高只是把一块空白拉长 ——
+/// 卡里就标签 + 数值 + 进度条，内容并不跟着长。
 export const MAX_CARD_H = 3;
+/// 趋势图卡单独放宽的高度上限：折线图越高越好读，3 行太局促。
+/// 宽度不用单独放宽 —— 4 列就是栅格整宽。
+/// 🔴 与后端 api.rs 的 MAX_CARD_H_CHART 同源，改一处必须改另一处。
+export const MAX_CARD_H_CHART = 6;
+
+/// 某张卡的高度上限：趋势图放得开，其余沿用数值卡的 3 行
+export function maxH(id: DashCard | string): number {
+  return id === "chart" ? MAX_CARD_H_CHART : MAX_CARD_H;
+}
+
+/// 弹窗里某张卡可选的尺寸档位：按该卡的高度上限过滤 ——
+/// 趋势图能看到整栏 3 / 4 / 6 行，数值卡仍到 3 行为止
+export function sizesFor(id: DashCard | string) {
+  const limit = maxH(id);
+  return CARD_SIZES.filter((s) => s.h <= limit);
+}
 
 /// 一张卡片的配置：显示与否、排在第几、占多大
 export interface CardConfig {
@@ -110,7 +132,9 @@ export const useDashboardStore = defineStore("dashboard", () => {
         const o = raw as Record<string, unknown>;
         id = o.id;
         w = span(o.w, MAX_CARD_W);
-        h = span(o.h, MAX_CARD_H);
+        // 上限按卡片类型给：此刻 id 还没过白名单，先看它是不是字符串。
+        // 非法 id 会在下面被挡掉，这里的取值只影响钳制结果
+        h = span(o.h, typeof id === "string" ? maxH(id) : MAX_CARD_H);
       } else {
         continue;
       }

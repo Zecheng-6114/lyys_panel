@@ -1623,10 +1623,14 @@ const DASHBOARD_CARDS: [&str; 13] = [
 /// 卡片可跨的最大列数 / 行数。
 ///
 /// 列上限是栅格整宽（4 列）—— 趋势图这类需要横向空间的卡片要占满一行；
-/// 行上限 3：行高固定 92px，3 行近 300px，再多出来的只是空白。
+/// 行上限 3：行高固定 88px，3 行约 288px，数值卡再多出来的只是空白。
 /// 🔴 必须与前端 `stores/dashboard.ts` 的栅格常量保持一致。
 const MAX_CARD_W: u64 = 4;
 const MAX_CARD_H: u64 = 3;
+
+/// 趋势图卡单独放宽的高度上限（行）：折线图越高越好读，3 行太局促。
+/// 🔴 与前端 `stores/dashboard.ts` 的 `MAX_CARD_H_CHART` 同源。
+const MAX_CARD_H_CHART: u64 = 6;
 
 /// 仪表盘配置校验（复用 P1-2 主题校验思路：白名单 + 类型 + 长度）：
 /// - 只允许一个顶层字段 cards；
@@ -1685,8 +1689,14 @@ fn validate_dashboard_config(cfg: &serde_json::Value) -> Result<(), String> {
                 if !(1..=MAX_CARD_W).contains(&w) {
                     return Err(format!("卡片宽度超出范围（1–{MAX_CARD_W}）：{id}"));
                 }
-                if !(1..=MAX_CARD_H).contains(&h) {
-                    return Err(format!("卡片高度超出范围（1–{MAX_CARD_H}）：{id}"));
+                // 高度上限按卡片类型给：趋势图能占更多行
+                let max_h = if id == "chart" {
+                    MAX_CARD_H_CHART
+                } else {
+                    MAX_CARD_H
+                };
+                if !(1..=max_h).contains(&h) {
+                    return Err(format!("卡片高度超出范围（1–{max_h}）：{id}"));
                 }
                 id
             }
@@ -2733,8 +2743,12 @@ mod tests {
             validate_dashboard_config(&json!({ "cards": [{ "id": "chart", "w": 4, "h": 2 }] }))
                 .is_ok()
         );
-        // 高度到 3 行也合法
+        // 高度到 3 行也合法；趋势图卡另有更高的上限（6 行）
         assert!(validate_dashboard_config(&json!({ "cards": [{ "id": "cpu", "h": 3 }] })).is_ok());
+        assert!(
+            validate_dashboard_config(&json!({ "cards": [{ "id": "chart", "w": 4, "h": 6 }] }))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2751,9 +2765,12 @@ mod tests {
         assert!(validate_dashboard_config(&json!({ "cards": ["cpu"], "evil": 1 })).is_err());
         // 尺寸相关：超范围 / 类型错 / 缺 id / 对象里有未知字段。
         // 宽度上限 4 —— 这不是人为限制，是栅格本身只有 4 列，跨 5 列会溢出；
-        // 高度上限 3：行高固定 92px，再多只是空白
+        // 高度上限按卡片类型：数值卡 3 行、趋势图卡 6 行
         assert!(validate_dashboard_config(&json!({ "cards": [{ "id": "cpu", "w": 5 }] })).is_err());
         assert!(validate_dashboard_config(&json!({ "cards": [{ "id": "cpu", "h": 4 }] })).is_err());
+        assert!(
+            validate_dashboard_config(&json!({ "cards": [{ "id": "chart", "h": 7 }] })).is_err()
+        );
         assert!(validate_dashboard_config(&json!({ "cards": [{ "id": "cpu", "w": 0 }] })).is_err());
         assert!(validate_dashboard_config(&json!({ "cards": [{ "id": "cpu", "w": "2" }] })).is_err());
         assert!(validate_dashboard_config(&json!({ "cards": [{ "w": 2 }] })).is_err());
