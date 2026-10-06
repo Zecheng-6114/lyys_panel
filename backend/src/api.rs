@@ -1096,6 +1096,68 @@ async fn files_rename(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+async fn files_compress(
+    _: RequireRole<1>,
+    SafeJson(req): SafeJson<PathQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let archive = crate::files::compress(&req.path)
+        .await
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({ "ok": true, "path": archive })))
+}
+
+#[derive(Deserialize)]
+struct ExtractReq {
+    path: String,
+    /// 解压目标目录，缺省为压缩包所在目录
+    dest: Option<String>,
+}
+
+async fn files_extract(
+    _: RequireRole<1>,
+    SafeJson(req): SafeJson<ExtractReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let dir = crate::files::extract(&req.path, req.dest.as_deref())
+        .await
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({ "ok": true, "path": dir })))
+}
+
+#[derive(Deserialize)]
+struct ChmodReq {
+    path: String,
+    mode: String,
+}
+
+async fn files_chmod(
+    _: RequireRole<1>,
+    SafeJson(req): SafeJson<ChmodReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    crate::files::chmod(&req.path, &req.mode)
+        .await
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct ChownReq {
+    path: String,
+    #[serde(default)]
+    owner: String,
+    #[serde(default)]
+    group: String,
+}
+
+async fn files_chown(
+    _: RequireRole<1>,
+    SafeJson(req): SafeJson<ChownReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    crate::files::chown(&req.path, &req.owner, &req.group)
+        .await
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 async fn files_download(_user: AuthUser, Query(q): Query<PathQuery>) -> Result<Response, ApiError> {
     let (name, bytes) = crate::files::download(&q.path)
         .await
@@ -2992,6 +3054,10 @@ pub fn router(state: AppState) -> Router {
         .route("/files/mkdir", post(files_mkdir))
         .route("/files/delete", post(files_delete))
         .route("/files/rename", post(files_rename))
+        .route("/files/compress", post(files_compress))
+        .route("/files/extract", post(files_extract))
+        .route("/files/chmod", post(files_chmod))
+        .route("/files/chown", post(files_chown))
         .route("/files/download", get(files_download))
         .route(
             "/files/upload",

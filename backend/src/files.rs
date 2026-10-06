@@ -4,6 +4,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::UNIX_EPOCH;
+use tokio::process::Command;
+
+use crate::cmd::{self, Budget};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -367,6 +370,191 @@ pub async fn save_upload(dir: &str, filename: &str, bytes: Vec<u8>) -> anyhow::R
     .context("上传任务失败")?
 }
 
+/// 在常见目录里定位命令。面板以 root 运行，服务的 PATH 往往不含 /usr/sbin，
+/// 故不依赖 PATH 直接探测固定位置（与 firewall 模块同口径）。
+fn which(name: &str) -> Option<String> {
+    for dir in [
+        "/usr/sbin",
+        "/sbin",
+        "/usr/local/sbin",
+        "/usr/bin",
+        "/bin",
+        "/usr/local/bin",
+    ] {
+        let p = format!("{dir}/{name}");
+        if Path::new(&p).exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// 压缩包格式，按文件名后缀识别
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Archive {
+    Tar,
+    TarGz,
+    TarBz2,
+    TarXz,
+    Zip,
+}
+
+/// 按后缀识别压缩包格式。长后缀优先匹配，避免 `.tar.gz` 被当成单文件 gzip。
+fn archive_kind(name: &str) -> Option<Archive> {
+    let lower = name.to_ascii_lowercase();
+    for (suffix, kind) in [
+        (".tar.gz", Archive::TarGz),
+        (".tgz", Archive::TarGz),
+        (".tar.bz2", Archive::TarBz2),
+        (".tbz2", Archive::TarBz2),
+        (".tbz", Archive::TarBz2),
+        (".tar.xz", Archive::TarXz),
+        (".txz", Archive::TarXz),
+        (".tar", Archive::Tar),
+        (".zip", Archive::Zip),
+    ] {
+        if lower.ends_with(suffix) {
+            return Some(kind);
+        }
+    }
+    None
+}
+
+/// 解析八进制权限位：1-4 位、每位 0-7（4 位八进制最大即 0o7777，天然不越界）
+fn parse_mode(mode: &str) -> anyhow::Result<u32> {
+    let m = mode.trim();
+    if m.is_empty() || m.len() > 4 || !m.chars().all(|c| ('0'..='7').contains(&c)) {
+        anyhow::bail!("权限格式非法（应为 1-4 位八进制，如 755）");
+    }
+    u32::from_str_radix(m, 8).context("权限解析失败")
+}
+
+/// 属主/属组名称或数字：字母数字与 `. _ -`，长度 ≤32
+fn valid_owner(v: &str) -> bool {
+    v.len() <= 32
+        && v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// 压缩：把选中的文件/目录打包为同目录下的 `<名字>.tar.gz`，返回压缩包路径。
+/// tar 用 `-C 父目录 名字` 的相对写法，避免把绝对路径与受保护目录带进包里。
+pub async fn compress(path: &str) -> anyhow::Result<String> {
+    let src = resolve(path, true)?;
+    let name = src
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .context("无法确定目标名称")?;
+    let parent = src.parent().context("无法确定父目录")?.to_path_buf();
+    let target = parent.join(format!("{name}.tar.gz"));
+    if target.exists() {
+        anyhow::bail!("压缩包已存在：{}", to_string_path(&target));
+    }
+    if is_protected(&target) {
+        anyhow::bail!("目标位置受保护，禁止写入");
+    }
+    let tar = which("tar").context("系统未安装 tar，无法压缩")?;
+    let mut c = Command::new(tar);
+    c.arg("-czf").arg(&target).arg("-C").arg(&parent).arg(&name);
+    let out = cmd::run(&mut c, Budget::query(120)).await?;
+    if !out.success() {
+        anyhow::bail!("压缩失败：{}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(to_string_path(&target))
+}
+
+/// 解压：`dest` 缺省时解到压缩包所在目录，返回实际解压目录。
+/// 支持 tar / tar.gz(tgz) / tar.bz2 / tar.xz / zip。
+pub async fn extract(path: &str, dest: Option<&str>) -> anyhow::Result<String> {
+    let src = resolve(path, true)?;
+    let meta = std::fs::metadata(&src).context("读取压缩包失败")?;
+    if !meta.is_file() {
+        anyhow::bail!("目标不是普通文件");
+    }
+    let name = src
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let kind = archive_kind(&name)
+        .context("不支持的压缩包格式（仅支持 tar / tar.gz / tar.bz2 / tar.xz / zip）")?;
+    let dst = match dest {
+        Some(d) => resolve(d, true)?,
+        None => src.parent().context("无法确定解压目录")?.to_path_buf(),
+    };
+    if !dst.is_dir() {
+        anyhow::bail!("解压目标不是目录");
+    }
+    let out = match kind {
+        Archive::Zip => {
+            let unzip = which("unzip").context("系统未安装 unzip，无法解压 zip")?;
+            let mut c = Command::new(unzip);
+            c.arg("-o").arg("-q").arg(&src).arg("-d").arg(&dst);
+            cmd::run(&mut c, Budget::query(300)).await?
+        }
+        // GNU tar `-xf` 自动识别 gz/bz2/xz，无需分别传 -z/-j/-J
+        _ => {
+            let tar = which("tar").context("系统未安装 tar，无法解压")?;
+            let mut c = Command::new(tar);
+            c.arg("-xf").arg(&src).arg("-C").arg(&dst);
+            cmd::run(&mut c, Budget::query(300)).await?
+        }
+    };
+    if !out.success() {
+        anyhow::bail!("解压失败：{}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(to_string_path(&dst))
+}
+
+/// 修改权限位。`mode` 为八进制字符串（如 "755"、"0644"）。
+pub async fn chmod(path: &str, mode: &str) -> anyhow::Result<()> {
+    let bits = parse_mode(mode)?;
+    let p = resolve(path, true)?;
+    #[cfg(unix)]
+    {
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(bits))
+            .context("修改权限失败")?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (p, bits);
+        anyhow::bail!("当前平台不支持修改权限位")
+    }
+}
+
+/// 修改属主/属组。`owner` / `group` 至少给一个，支持名称或数字 uid/gid。
+pub async fn chown(path: &str, owner: &str, group: &str) -> anyhow::Result<()> {
+    let owner = owner.trim();
+    let group = group.trim();
+    if owner.is_empty() && group.is_empty() {
+        anyhow::bail!("属主与属组至少填一个");
+    }
+    for v in [owner, group] {
+        if !v.is_empty() && !valid_owner(v) {
+            anyhow::bail!("属主/属组格式非法");
+        }
+    }
+    let p = resolve(path, true)?;
+    let spec = if owner.is_empty() {
+        format!(":{group}")
+    } else if group.is_empty() {
+        owner.to_string()
+    } else {
+        format!("{owner}:{group}")
+    };
+    let chown = which("chown").context("系统未安装 chown")?;
+    let mut c = Command::new(chown);
+    // 参数不经 shell，`--` 再兜一层，规避以 `-` 开头的目标被当成选项
+    c.arg(&spec).arg("--").arg(&p);
+    let out = cmd::run(&mut c, Budget::query(15)).await?;
+    if !out.success() {
+        anyhow::bail!(
+            "修改属主失败：{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,5 +719,43 @@ mod tests {
         assert!(is_protected(Path::new("/var/lib/panel/panel.db")));
 
         let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    /// 压缩包后缀识别：长后缀优先，未收录的后缀返回 None
+    #[test]
+    fn archive_kind_matches_by_extension() {
+        assert_eq!(archive_kind("a.tar.gz"), Some(Archive::TarGz));
+        assert_eq!(archive_kind("a.tgz"), Some(Archive::TarGz));
+        assert_eq!(archive_kind("A.TAR.BZ2"), Some(Archive::TarBz2));
+        assert_eq!(archive_kind("a.tar.xz"), Some(Archive::TarXz));
+        assert_eq!(archive_kind("a.tar"), Some(Archive::Tar));
+        assert_eq!(archive_kind("a.zip"), Some(Archive::Zip));
+        // 单文件 gzip 与普通文件不当作压缩包
+        assert_eq!(archive_kind("a.gz"), None);
+        assert_eq!(archive_kind("a.txt"), None);
+    }
+
+    /// 权限位解析：合法八进制放行，非法格式与非八进制字符一律拒绝
+    #[test]
+    fn parses_octal_mode() {
+        assert_eq!(parse_mode("755").unwrap(), 0o755);
+        assert_eq!(parse_mode("0644").unwrap(), 0o644);
+        assert_eq!(parse_mode(" 700 ").unwrap(), 0o700);
+        assert_eq!(parse_mode("7555").unwrap(), 0o7555); // 4 位含 SUID/SGID/Sticky
+        assert!(parse_mode("").is_err());
+        assert!(parse_mode("888").is_err());
+        assert!(parse_mode("u+rwx").is_err());
+        assert!(parse_mode("77777").is_err()); // 超过 4 位
+    }
+
+    /// 属主/属组名称校验：拒绝空以外的非法字符与超长，允许数字与常见符号
+    #[test]
+    fn validates_owner_names() {
+        assert!(valid_owner("root"));
+        assert!(valid_owner("www-data"));
+        assert!(valid_owner("1000"));
+        assert!(!valid_owner("root:x"));
+        assert!(!valid_owner("a b"));
+        assert!(!valid_owner(&"x".repeat(33)));
     }
 }

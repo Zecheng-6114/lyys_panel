@@ -65,13 +65,23 @@
       <el-table-column label="修改时间" v-bind="col(170)" v-if="!hideColP2">
         <template #default="{ row }">{{ fmtTime(row.mtime) }}</template>
       </el-table-column>
-      <el-table-column label="操作" v-bind="col(230)" align="right">
+      <el-table-column label="操作" v-bind="col(300)" align="right">
         <template #default="{ row }">
           <el-button v-if="!row.is_dir" link size="small" @click="editFile(row)">
             {{ isContainer ? "查看" : "编辑" }}
           </el-button>
           <template v-if="!isContainer">
             <el-button v-if="!row.is_dir" link size="small" @click="downloadFile(row)">下载</el-button>
+            <el-dropdown trigger="click" @command="(c: string) => onMore(c, row)">
+              <el-button link size="small">更多</el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="compress">压缩</el-dropdown-item>
+                  <el-dropdown-item v-if="isArchive(row)" command="extract">解压</el-dropdown-item>
+                  <el-dropdown-item command="perm" divided>权限 / 属主</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
             <el-button link size="small" @click="startRename(row)">重命名</el-button>
             <el-button link size="small" @click="removeEntry(row)">删除</el-button>
           </template>
@@ -115,6 +125,25 @@
       <template #footer>
         <el-button @click="showRename = false">取消</el-button>
         <el-button @click="doRename">确定</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="showPerm" :title="`权限与属主 · ${perm.name}`" width="460px">
+      <el-form label-width="72px" size="small">
+        <el-form-item label="权限">
+          <el-input v-model="perm.mode" placeholder="八进制，如 755" />
+        </el-form-item>
+        <el-form-item label="属主">
+          <el-input v-model="perm.owner" placeholder="用户名或 uid，留空不改" />
+        </el-form-item>
+        <el-form-item label="属组">
+          <el-input v-model="perm.group" placeholder="组名或 gid，留空不改" />
+        </el-form-item>
+      </el-form>
+      <div class="perm-hint">留空的项不会被修改；属主与属组至少填一个才会执行改属。</div>
+      <template #footer>
+        <el-button @click="showPerm = false">取消</el-button>
+        <el-button :loading="permSaving" @click="doPerm">保存</el-button>
       </template>
     </el-dialog>
   </div>
@@ -165,6 +194,9 @@ const saving = ref(false);
 const showRename = ref(false);
 const renameFrom = ref("");
 const renameTo = ref("");
+const showPerm = ref(false);
+const permSaving = ref(false);
+const perm = ref({ name: "", path: "", mode: "", owner: "", group: "" });
 const fileInput = ref<HTMLInputElement>();
 
 // 上传进度：按文件数 + 当前文件已上传字节数计算总进度
@@ -337,6 +369,68 @@ async function removeEntry(row: FEntry) {
   }
 }
 
+/** 是否是本面板支持解压的压缩包（与后端 files::archive_kind 的后缀保持一致） */
+const ARCHIVE_SUFFIXES = [".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tbz", ".tar.xz", ".txz", ".tar", ".zip"];
+function isArchive(row: FEntry) {
+  if (row.is_dir) return false;
+  const n = row.name.toLowerCase();
+  return ARCHIVE_SUFFIXES.some((s) => n.endsWith(s));
+}
+
+/** 行内「更多」菜单分发 */
+function onMore(cmd: string, row: FEntry) {
+  if (cmd === "compress") compressEntry(row);
+  else if (cmd === "extract") extractEntry(row);
+  else if (cmd === "perm") {
+    perm.value = { name: row.name, path: row.path, mode: row.mode, owner: "", group: "" };
+    showPerm.value = true;
+  }
+}
+
+async function compressEntry(row: FEntry) {
+  try {
+    const { data } = await http.post("/files/compress", { path: row.path });
+    ElMessage.success(`已生成压缩包：${String(data.path).split("/").pop()}`);
+    load(current.value);
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error ?? "压缩失败");
+  }
+}
+
+async function extractEntry(row: FEntry) {
+  try {
+    await http.post("/files/extract", { path: row.path });
+    ElMessage.success("已解压到当前目录");
+    load(current.value);
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error ?? "解压失败");
+  }
+}
+
+async function doPerm() {
+  const { path, mode, owner, group } = perm.value;
+  const hasMode = mode.trim().length > 0;
+  const hasOwner = owner.trim().length > 0 || group.trim().length > 0;
+  if (!hasMode && !hasOwner) {
+    ElMessage.warning("请填写要修改的权限或属主");
+    return;
+  }
+  permSaving.value = true;
+  try {
+    if (hasMode) await http.post("/files/chmod", { path, mode: mode.trim() });
+    if (hasOwner) {
+      await http.post("/files/chown", { path, owner: owner.trim(), group: group.trim() });
+    }
+    showPerm.value = false;
+    ElMessage.success("已更新");
+    load(current.value);
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error ?? "修改失败");
+  } finally {
+    permSaving.value = false;
+  }
+}
+
 async function downloadFile(row: FEntry) {
   try {
     const resp = await http.get("/files/download", {
@@ -461,5 +555,10 @@ onMounted(() => {
   font-variant-numeric: tabular-nums;
   font-size: 12px;
   line-height: 1.6;
+}
+.perm-hint {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  padding-left: 72px;
 }
 </style>
