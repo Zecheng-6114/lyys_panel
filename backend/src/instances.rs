@@ -173,16 +173,27 @@ async fn containers_cached() -> Result<Vec<crate::docker::ContainerInfo>> {
 /// 页面不该整块容器区消失；只有成功过才会有快照可言。
 pub fn spawn_container_sampler() {
     let handle = tokio::spawn(async {
+        // docker 不可达是长期状态（没装 / daemon 没起），而采样是 2 秒一轮：
+        // 每轮都打一条 warn 会在几分钟内把 journal 灌满，而面板的日志页又读
+        // journal —— 既是噪音，也拖慢那台本就不宽裕的机器。只在状态翻转时说话。
+        let mut failing = false;
         loop {
             match crate::docker::containers().await {
                 Ok(list) => {
+                    if failing {
+                        tracing::info!("Docker 已恢复可用，后台容器采样继续");
+                        failing = false;
+                    }
                     if let Ok(mut g) = container_slot().lock() {
                         *g = Some(list);
                     }
                     CONTAINER_UNAVAILABLE.store(false, Ordering::Relaxed);
                 }
                 Err(e) => {
-                    tracing::warn!("后台采样容器列表失败：{e}");
+                    if !failing {
+                        tracing::warn!("后台采样容器列表失败：{e}（恢复前不再重复告警）");
+                        failing = true;
+                    }
                     CONTAINER_UNAVAILABLE.store(true, Ordering::Relaxed);
                 }
             }
