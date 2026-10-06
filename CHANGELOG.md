@@ -3,6 +3,23 @@
 本文件记录 LYYS Panel 的显著变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循语义化版本（[SemVer](https://semver.org/lang/zh-CN/)）。
 
+## [1.12.0] - 2026-10-06
+
+### 新增
+- 交互式终端：管理员可在面板内直接打开本机 shell，支持多标签并行；后端用
+  `libc::openpty` 起 PTY 并挂到 tokio 反应堆（`AsyncFd` 非阻塞主端），二进制帧
+  传按键与输出、文本帧传窗口尺寸（行列夹紧），单会话上限 4 小时 (5cd36dc)
+
+### 变更
+- 依赖树只保留实际用到的特性：移除 axum `macros`、tower-http `cors` 与 time
+  `formatting`，并清掉一批多余克隆、死代码与过期注释 (4eff3e6)
+
+### 修复
+- HTTP→HTTPS 重定向在 IPv6 字面量下解析主机失败：按首个冒号切分会把
+  `[::1]:3789` 切碎，改用 `rsplit_once` 取最后一段 (4eff3e6)
+- 日志与服务的单元名校验统一走 ops 的同一份实现，三处拷贝不再各自漂移；
+  两条路径同时补上「首字符为点」的拒绝规则 (4eff3e6)
+
 ## [1.11.0] - 2026-10-05
 
 ### 新增

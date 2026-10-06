@@ -87,9 +87,10 @@ Signed-off-by: <Name> <email>
   - `feat` → MINOR（x.Y.z）
   - `BREAKING CHANGE`（任意 type）→ MAJOR（X.y.z）
 - `1.0.0` 起定义面板对外 API（HTTP 路由 + 二进制行为）的稳定基线；当前版本
-  `1.11.0`，破坏性变更一律走 MAJOR。
+  `1.12.0`，破坏性变更一律走 MAJOR。
 - 版本号的实际递增在**发布**时执行（打 `vX.Y.Z` tag + GitHub Release），日常功能
-  提交不改动版本号文件；发布提交用 `chore(release): X.Y.Z` 主题。
+  提交不改动版本号文件；发布提交用 `chore(release): bump version to X.Y.Z` 主题
+  （钩子要求描述以小写字母开头，纯版本号会被拒绝）。
 - 面板自更新模块（`update.rs`）从 GitHub Release 读取最新版本，发布 tag 即更新源。
 
 ## 四、变更日志（Keep a Changelog）
