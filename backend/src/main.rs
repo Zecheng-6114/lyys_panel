@@ -1,3 +1,4 @@
+mod acme; // 3.5 Let's Encrypt 自动证书：ACME v2 客户端（申请 / 续期，http-01）
 mod ai; // 4.5 AI 助手：悬浮球单助手（人格提示词 + 工具调用 + 按用户持久化历史）
 mod ai_tools; // AI 工具调用：面板只读运维查询暴露为 function calling 工具
 mod alerts;
@@ -168,6 +169,8 @@ async fn main() -> anyhow::Result<()> {
     monitor::spawn_sampler(state.clone());
     // 站点可用性探针：独立周期（60s），与 2s 的主机采样互不干扰
     probe::spawn_prober(state.clone());
+    // Let's Encrypt 证书自动续期：每 12h 扫一遍到期站点（首次签发仍走人工）
+    acme::spawn_renewer(state.clone());
     // 容器列表的后台采样：CLI 每次 fork 都要 ~170ms，不能让实例页每请求付一遍
     instances::spawn_container_sampler();
 

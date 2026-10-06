@@ -32,7 +32,7 @@ LYYS Panel 面向单台 Linux 服务器的日常运维，把系统监控、进�
 | 计划任务 | crontab 增删改查；systemd 定时器（OnCalendar 调度、可启停、立即执行、journald 执行日志） |
 | 网络 | 网卡、路由、连接、DNS 查看 |
 | 防火墙 | ufw / firewalld 状态与规则查看、放行 / 拒绝 / 删除规则、启用停用（仅 admin） |
-| 网站 | Nginx 站点管理：静态目录托管与反向代理、监听端口与 server_name、可选 HTTPS（自签或上传证书），保存前 `nginx -t` 校验、通过才重载、失败自动回滚（仅 admin） |
+| 网站 | Nginx 站点管理：静态目录托管与反向代理、监听端口与 server_name、可选 HTTPS（自签、上传证书或 Let's Encrypt 自动签发与续期），保存前 `nginx -t` 校验、通过才重载、失败自动回滚（仅 admin） |
 | 任务 | 后台作业队列：安装 / 更新等长操作转后台执行，可离开页面，列表回看进度与输出尾部（每个作业保留最近 200 行），支持取消 |
 | 在线会话 | 已登录用户的会话列表，可按会话强制下线 |
 | Docker | 容器列表与启动 / 停止 / 重启 / 删除、容器日志、镜像拉取与删除、Compose 项目启停；未安装时页面上可直接安装 |
@@ -344,6 +344,7 @@ lyys_panel/
 │   │   ├── crontab.rs      计划任务（crontab）
 │   │   ├── timers.rs       systemd 定时器（单元生成 + journald 执行日志）
 │   │   ├── websites.rs     Nginx 站点（静态 / 反代 + 可选 HTTPS）：配置生成、`nginx -t` 校验与回滚
+│   │   ├── acme.rs         Let's Encrypt 自动证书（ACME v2 / http-01，ES256 JWS，签发与到期续期）
 │   │   ├── network.rs      网络信息
 │   │   ├── logs.rs         日志查询
 │   │   ├── docker.rs       Docker 容器 / 镜像 / Compose（含一键安装）
@@ -449,7 +450,9 @@ lyys_panel/
 - 网站管理只接管「面板自管」的 Nginx 站点：配置写在 `/etc/nginx/conf.d/lyys-site-*.conf`，
   不解析也不改动系统或用户手写的其他站点；Arch 默认的 `nginx.conf` 不 include 该目录，
   首次启用站点时面板会在 `http {}` 块插入一行带标记的 include（插入前备份 `nginx.conf`）。
-  HTTPS 走自签或上传证书，暂不含 Let's Encrypt 自动签发与续期（PHP-FPM 站点也不在本期范围）；
+  HTTPS 支持自签、上传证书，或经 Let's Encrypt（ACME v2 / http-01）自动签发与续期：首次签发
+  在站点行手动触发，之后证书满 60 天由后台任务自动续期，要求域名已解析到本机且 80 端口可从
+  公网访问；PHP-FPM 站点仍不在本期范围。
   静态根目录不要放在 `/tmp` —— nginx.service 带 `PrivateTmp`，会看不到临时目录
 - 站点探针运行态只存内存（重启后重新探测），命中阈值只经通知渠道外发，不写入「告警事件」表
 - `frontend/package.json` 里 `npm run lint` 用的是 eslint 8 的 `--ext` 参数，而仓库只有 eslint 9 依赖、

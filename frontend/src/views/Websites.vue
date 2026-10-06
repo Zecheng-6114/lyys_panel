@@ -3,6 +3,7 @@
     <div class="toolbar">
       <el-button @click="load">刷新</el-button>
       <el-button :disabled="!st.installed" @click="openNew">新建站点</el-button>
+      <el-button :disabled="!st.installed" @click="openAcme">ACME 设置</el-button>
       <span class="spacer"></span>
       <template v-if="st.installed">
         <span class="backend">nginx {{ st.version || "?" }}</span>
@@ -52,6 +53,12 @@
             <span :class="row.tls ? 'on' : 'off'">{{ row.tls ? "启用" : "关闭" }}</span>
           </template>
         </el-table-column>
+        <el-table-column label="证书" v-bind="col(110)" v-if="!hideColP3">
+          <template #default="{ row }">
+            <el-tag v-if="row.acme" size="small" type="success" effect="plain">Let's Encrypt</el-tag>
+            <span v-else :class="row.tls ? 'on' : 'off'">{{ row.tls ? "自签/上传" : "—" }}</span>
+          </template>
+        </el-table-column>
         <el-table-column label="状态" v-bind="col(88)">
           <template #default="{ row }">
             <el-switch
@@ -61,8 +68,17 @@
             />
           </template>
         </el-table-column>
-        <el-table-column label="操作" v-bind="col(120)" align="right">
+        <el-table-column label="操作" v-bind="col(190)" align="right">
           <template #default="{ row }">
+            <el-button
+              v-if="row.acme"
+              link
+              size="small"
+              :loading="issuing === row.id"
+              @click="issueCert(row)"
+            >
+              签发
+            </el-button>
             <el-button link size="small" @click="openEdit(row)">编辑</el-button>
             <el-button link size="small" @click="remove(row)">删除</el-button>
           </template>
@@ -92,9 +108,13 @@
         </el-form-item>
 
         <el-form-item label="启用 HTTPS">
-          <el-switch v-model="form.tls" />
+          <el-switch v-model="form.tls" :disabled="form.acme" />
         </el-form-item>
-        <template v-if="form.tls">
+        <el-form-item label="自动证书">
+          <el-switch v-model="form.acme" @change="onAcmeChange" />
+          <span class="inline-hint">Let's Encrypt，需域名已解析到本机、80 端口可被外网访问</span>
+        </el-form-item>
+        <template v-if="form.tls && !form.acme">
           <el-form-item label="证书来源">
             <el-radio-group v-model="form.certMode">
               <el-radio-button value="self">自签证书</el-radio-button>
@@ -128,6 +148,27 @@
         <el-button type="primary" :loading="saving" @click="save">保存</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="showAcme" title="Let's Encrypt 设置" width="480px">
+      <el-form label-width="96px" size="small">
+        <el-form-item label="账户邮箱">
+          <el-input v-model="acmeSt.email" placeholder="ops@example.com（可留空）" />
+        </el-form-item>
+        <el-form-item label="测试环境">
+          <el-switch v-model="acmeSt.staging" />
+          <span class="inline-hint">用预发环境签发，不消耗配额，但证书不受浏览器信任</span>
+        </el-form-item>
+      </el-form>
+      <div class="hint">
+        邮箱用于接收证书到期提醒（可留空）。首次签发请在站点行点「签发」；
+        之后证书满 60 天会由后台任务自动续期。此过程要求域名已解析到本机且
+        80 端口可从公网访问（Let's Encrypt 的 http-01 校验走 80 端口）。
+      </div>
+      <template #footer>
+        <el-button @click="showAcme = false">取消</el-button>
+        <el-button type="primary" :loading="acmeSaving" @click="saveAcme">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -146,12 +187,17 @@ interface Site {
   upstream: string;
   listen: number;
   tls: boolean;
+  acme: boolean;
   enabled: boolean;
 }
 interface NginxStatus {
   installed: boolean;
   active: boolean;
   version: string;
+}
+interface AcmeSettings {
+  email: string;
+  staging: boolean;
 }
 
 const jobWatch = useJobsStore();
@@ -161,7 +207,11 @@ const loading = ref(false);
 const saving = ref(false);
 const installing = ref(false);
 const toggling = ref("");
+const issuing = ref("");
 const showEdit = ref(false);
+const showAcme = ref(false);
+const acmeSaving = ref(false);
+const acmeSt = reactive<AcmeSettings>({ email: "", staging: false });
 
 const form = reactive({
   id: "",
@@ -171,6 +221,7 @@ const form = reactive({
   upstream: "",
   listen: 80,
   tls: false,
+  acme: false,
   enabled: true,
   certMode: "self" as "self" | "upload",
   certPem: "",
@@ -212,6 +263,7 @@ function reset() {
   form.upstream = "";
   form.listen = 80;
   form.tls = false;
+  form.acme = false;
   form.enabled = true;
   form.certMode = "self";
   form.certPem = "";
@@ -232,8 +284,52 @@ function openEdit(row: Site) {
   form.upstream = row.upstream;
   form.listen = row.listen;
   form.tls = row.tls;
+  form.acme = row.acme;
   form.enabled = row.enabled;
   showEdit.value = true;
+}
+
+/** 勾选自动证书即隐含启用 HTTPS（后端亦强制，此处同步 UI 以免状态割裂） */
+function onAcmeChange(v: string | number | boolean) {
+  if (v) form.tls = true;
+}
+
+/** 打开 ACME 全局设置弹窗，读取当前账户邮箱 / 测试环境 */
+async function openAcme() {
+  try {
+    const { data } = await http.get("/websites/acme");
+    Object.assign(acmeSt, data);
+    showAcme.value = true;
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error ?? "读取 ACME 设置失败");
+  }
+}
+
+async function saveAcme() {
+  acmeSaving.value = true;
+  try {
+    await http.post("/websites/acme", { email: acmeSt.email, staging: acmeSt.staging });
+    showAcme.value = false;
+    ElMessage.success("已保存 ACME 设置");
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error ?? "保存失败");
+  } finally {
+    acmeSaving.value = false;
+  }
+}
+
+/** 立即为站点申请 / 续期证书；耗时较长（需等 CA 校验与签发），按钮期间转圈 */
+async function issueCert(row: Site) {
+  issuing.value = row.id;
+  try {
+    await http.post("/websites/acme/issue", { id: row.id });
+    ElMessage.success("证书已签发并重载 nginx");
+    load();
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error ?? "签发失败");
+  } finally {
+    issuing.value = "";
+  }
 }
 
 async function save() {
@@ -259,6 +355,7 @@ async function save() {
       upstream: form.upstream,
       listen: form.listen,
       tls: form.tls,
+      acme: form.acme,
       enabled: form.enabled,
       // 仅「上传证书」时带上 PEM；自签则留空，由后端生成或沿用已存证书
       cert_pem: form.tls && form.certMode === "upload" ? form.certPem : "",
@@ -358,5 +455,10 @@ onMounted(load);
   background: var(--el-fill-color-light);
   padding: 1px 5px;
   border-radius: 4px;
+}
+.inline-hint {
+  margin-left: 10px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 </style>

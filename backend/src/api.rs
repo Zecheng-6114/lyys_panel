@@ -1507,6 +1507,9 @@ struct SiteReq {
     listen: u16,
     #[serde(default)]
     tls: bool,
+    /// 启用 Let's Encrypt 自动证书（隐含 tls=true）
+    #[serde(default)]
+    acme: bool,
     #[serde(default)]
     enabled: bool,
     /// 本次上传的证书 PEM（留空 = 沿用已存文件；TLS 且无文件时自动生成自签证书）
@@ -1530,7 +1533,9 @@ async fn websites_save(
         root: req.root,
         upstream: req.upstream,
         listen: req.listen,
-        tls: req.tls,
+        // 自动证书必须有 HTTPS 承载，勾选即隐含开启 TLS
+        tls: req.tls || req.acme,
+        acme: req.acme,
         enabled: req.enabled,
     };
     let is_new = site.id.is_empty();
@@ -1566,6 +1571,70 @@ async fn websites_delete(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let data_dir = state.data_dir.clone();
     crate::websites::delete(&data_dir, &req.id)
+        .await
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ---------- Let's Encrypt 自动证书（ACME，admin 专属） ----------
+
+async fn acme_settings_get(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+) -> Result<Json<crate::acme::AcmeSettings>, ApiError> {
+    let db = state.db.clone();
+    let s = tokio::task::spawn_blocking(move || crate::acme::load_settings(&db))
+        .await
+        .map_err(|_| ApiError::internal())?;
+    Ok(Json(s))
+}
+
+async fn acme_settings_set(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+    SafeJson(req): SafeJson<crate::acme::AcmeSettings>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let email = req.email.trim().to_string();
+    // 留空表示不提交 contact；填了就必须是邮箱形态，否则 CA 会拒单
+    if !email.is_empty()
+        && (!email.contains('@') || email.chars().any(char::is_whitespace) || email.len() > 254)
+    {
+        return Err(ApiError::bad("邮箱格式不正确"));
+    }
+    let settings = crate::acme::AcmeSettings {
+        email,
+        staging: req.staging,
+    };
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || crate::acme::save_settings(&db, &settings))
+        .await
+        .map_err(|_| ApiError::internal())?
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// 立即为站点申请 / 续期证书（首次签发走这里；之后由后台任务按到期自动续）
+async fn acme_issue(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+    SafeJson(req): SafeJson<SiteIdReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let data_dir = state.data_dir.clone();
+    let id = req.id.clone();
+    let dd = data_dir.clone();
+    let site = tokio::task::spawn_blocking(move || {
+        crate::websites::list(&dd).into_iter().find(|s| s.id == id)
+    })
+    .await
+    .map_err(|_| ApiError::internal())?
+    .ok_or_else(|| ApiError::bad("站点不存在"))?;
+
+    let db = state.db.clone();
+    let settings = tokio::task::spawn_blocking(move || crate::acme::load_settings(&db))
+        .await
+        .map_err(|_| ApiError::internal())?;
+
+    crate::websites::issue_acme(&data_dir, &site, &settings)
         .await
         .map_err(ApiError::file_err)?;
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -3627,6 +3696,9 @@ pub fn router(state: AppState) -> Router {
             "/websites",
             get(websites_list).post(websites_save).delete(websites_delete),
         )
+        // Let's Encrypt 自动证书：账户设置 + 单站点申请/续期
+        .route("/websites/acme", get(acme_settings_get).post(acme_settings_set))
+        .route("/websites/acme/issue", post(acme_issue))
         .route("/network/interfaces", get(net_interfaces))
         .route("/network/routes", get(net_routes))
         .route("/network/connections", get(net_connections))

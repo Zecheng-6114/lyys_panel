@@ -58,6 +58,9 @@ pub struct Site {
     /// 是否启用 HTTPS
     #[serde(default)]
     pub tls: bool,
+    /// 是否启用 Let's Encrypt 自动证书（启用后由面板申请并可自动续期）
+    #[serde(default)]
+    pub acme: bool,
     /// 是否启用（停用即从 conf.d 移除配置）
     #[serde(default)]
     pub enabled: bool,
@@ -147,6 +150,12 @@ fn validate(site: &Site) -> Result<()> {
     if site.listen == 0 {
         bail!("监听端口必须在 1–65535 之间");
     }
+    if site.acme && !site.tls {
+        bail!("启用自动证书需要同时启用 HTTPS");
+    }
+    if site.acme && acme_domains(site).is_empty() {
+        bail!("启用自动证书需要至少一个真实域名（不支持 `_`、通配符与 IP）");
+    }
     match site.kind {
         SiteKind::Static => {
             if site.root.trim().is_empty() || !valid_dir(&site.root) {
@@ -183,12 +192,44 @@ fn index_path(data_dir: &Path) -> PathBuf {
 
 // ---------- nginx 配置生成 ----------
 
+/// Let's Encrypt http-01 质询目录的 location；`^~` 前缀保证优先于 `location /`，
+/// 反代站点也不会把质询请求转发给上游。
+fn challenge_location(webroot: &Path, indent: usize) -> String {
+    let pad = " ".repeat(indent);
+    let inner = " ".repeat(indent + 4);
+    format!(
+        "{pad}location ^~ /.well-known/acme-challenge/ {{\n\
+         {inner}root {};\n\
+         {inner}default_type text/plain;\n\
+         {inner}try_files $uri =404;\n\
+         {pad}}}\n",
+        webroot.display()
+    )
+}
+
+/// 供 http-01 校验用的独立 HTTP server（站点本身不在 80 端口时补上）。
+/// 只提供质询 location，不做跳转 —— Let's Encrypt 只校验这一个路径。
+fn acme_challenge_server(name: &str, webroot: &Path) -> String {
+    format!(
+        "# 由 LYYS Panel 生成（Let's Encrypt http-01 质询），请勿手改\n\
+         server {{\n    listen 80;\n    server_name {};\n{}}}\n",
+        name.trim(),
+        challenge_location(webroot, 4)
+    )
+}
+
 /// 按站点字段生成一份自包含的 `server {}` 配置。
 ///
 /// 只输出最小可用指令：TLS 用 `listen <port> ssl;`（不写 `http2`，以避开
 /// nginx 1.25 起对 `listen ... http2` 的弃用告警），其余走 nginx 默认值。
-fn conf_body(site: &Site, cert: &Path, key: &Path) -> String {
+///
+/// 启用自动证书时注入质询 location：站点监听 80 就放进本块，否则另补一个
+/// 80 端口的挑战 server —— Let's Encrypt 的 http-01 固定访问 80 端口。
+fn conf_body(site: &Site, cert: &Path, key: &Path, webroot: &Path) -> String {
     let mut s = String::new();
+    if site.acme && site.listen != 80 {
+        s.push_str(&acme_challenge_server(&site.name, webroot));
+    }
     s.push_str("# 由 LYYS Panel 生成，请勿手改（保存站点时会整体重写）\n");
     s.push_str("server {\n");
     if site.tls {
@@ -200,6 +241,9 @@ fn conf_body(site: &Site, cert: &Path, key: &Path) -> String {
     if site.tls {
         s.push_str(&format!("    ssl_certificate {};\n", cert.display()));
         s.push_str(&format!("    ssl_certificate_key {};\n", key.display()));
+    }
+    if site.acme && site.listen == 80 {
+        s.push_str(&challenge_location(webroot, 4));
     }
     match site.kind {
         SiteKind::Static => {
@@ -268,6 +312,133 @@ fn write_key(path: &Path, pem: &str) -> Result<()> {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .context("设置站点私钥权限失败")?;
     }
+    Ok(())
+}
+
+// ---------- Let's Encrypt 自动证书 ----------
+
+/// 从 `server_name` 里挑出可向 CA 申请的域名：剔除兜底名 `_`、通配符（需 DNS-01）
+/// 与 IP 地址（LE 不签发），并做字符白名单过滤。
+pub fn acme_domains(site: &Site) -> Vec<String> {
+    site.name
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|d| {
+            !d.is_empty()
+                && *d != "_"
+                && !d.starts_with("*.")
+                && d.contains('.')
+                && !d.chars().all(|c| c.is_ascii_digit() || c == '.')
+                && d.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        })
+        .map(|d| d.to_string())
+        .collect()
+}
+
+/// 证书是否到了续期时机。判据是证书文件的修改时间（申请成功即写盘）：
+/// 超过 [`crate::acme::RENEW_AFTER_DAYS`] 天即认为该续；证书不存在返回 false
+/// —— 首次签发需人工点「申请证书」，避免刚启用就自动向 CA 下单。
+pub fn acme_due(data_dir: &Path, site: &Site) -> bool {
+    let (cert_path, _) = cert_paths(data_dir, &site.id);
+    let Ok(meta) = std::fs::metadata(&cert_path) else {
+        return false;
+    };
+    let Ok(modified) = meta.modified() else {
+        return false;
+    };
+    let Ok(age) = std::time::SystemTime::now().duration_since(modified) else {
+        return false;
+    };
+    age.as_secs() >= (crate::acme::RENEW_AFTER_DAYS * 86_400) as u64
+}
+
+/// 回滚证书与私钥到申请前的内容（None 表示此前不存在 → 删除）
+fn restore_cert(cert: &Path, prev_cert: Option<String>, key: &Path, prev_key: Option<String>) {
+    match prev_cert {
+        Some(t) => {
+            let _ = std::fs::write(cert, t);
+        }
+        None => {
+            let _ = std::fs::remove_file(cert);
+        }
+    }
+    match prev_key {
+        Some(t) => {
+            let _ = write_key(key, &t);
+        }
+        None => {
+            let _ = std::fs::remove_file(key);
+        }
+    }
+}
+
+/// 为站点申请或续期 Let's Encrypt 证书。要求站点已启用自动证书，
+/// 且域名已解析到本机、80 端口可被外网访问（http-01 的前置条件）。
+pub async fn issue_acme(
+    data_dir: &Path,
+    site: &Site,
+    settings: &crate::acme::AcmeSettings,
+) -> Result<()> {
+    if !site.acme {
+        bail!("站点未启用自动证书");
+    }
+    if !site.enabled {
+        bail!("请先启用站点再申请证书");
+    }
+    if !installed() {
+        bail!("未安装 nginx，请先在「软件」页安装后再管理站点");
+    }
+    let domains = acme_domains(site);
+    if domains.is_empty() {
+        bail!("没有可签发的域名：请填写真实域名（不含 `_`、通配符与 IP）");
+    }
+
+    let webroot = crate::acme::webroot(data_dir);
+    std::fs::create_dir_all(webroot.join(".well-known/acme-challenge")).context("创建质询目录失败")?;
+
+    let (cert_path, key_path) = cert_paths(data_dir, &site.id);
+    let prev_cert = std::fs::read_to_string(&cert_path).ok();
+    let prev_key = std::fs::read_to_string(&key_path).ok();
+
+    // 校验要走 80 端口，质询 location 必须先由 nginx 提供：先重写配置并重载
+    let conf = conf_path(&site.id);
+    let prev_conf = std::fs::read_to_string(&conf).ok();
+    ensure_include()?;
+    std::fs::write(&conf, conf_body(site, &cert_path, &key_path, &webroot))
+        .context("写入站点配置失败")?;
+    if let Err(e) = nginx_test().await {
+        restore_conf(&conf, prev_conf);
+        return Err(e);
+    }
+    apply_reload().await?;
+
+    let issued =
+        crate::acme::issue(data_dir, &domains, &webroot, &settings.email, settings.staging).await?;
+
+    // 落新证书 → 重写配置 → 校验 → 重载；任一步失败都回滚证书与配置
+    std::fs::write(&cert_path, &issued.cert_pem).context("写入站点证书失败")?;
+    if let Err(e) = write_key(&key_path, &issued.key_pem) {
+        restore_cert(&cert_path, prev_cert, &key_path, prev_key);
+        return Err(e);
+    }
+    std::fs::write(&conf, conf_body(site, &cert_path, &key_path, &webroot))
+        .context("写入站点配置失败")?;
+    if let Err(e) = nginx_test().await {
+        restore_conf(&conf, prev_conf);
+        restore_cert(&cert_path, prev_cert, &key_path, prev_key);
+        return Err(e);
+    }
+    if let Err(e) = apply_reload().await {
+        restore_conf(&conf, prev_conf);
+        restore_cert(&cert_path, prev_cert, &key_path, prev_key);
+        return Err(e);
+    }
+    tracing::info!(
+        "站点 {} 的 Let's Encrypt 证书已就绪（{}）",
+        site.id,
+        domains.join(", ")
+    );
     Ok(())
 }
 
@@ -496,7 +667,11 @@ pub async fn save(
     if site.enabled {
         // 启用站点前先确保 conf.d 被 nginx 纳入（Arch 默认没有）
         ensure_include()?;
-        std::fs::write(&conf, conf_body(site, &cert_path, &key_path)).context("写入站点配置失败")?;
+        std::fs::write(
+            &conf,
+            conf_body(site, &cert_path, &key_path, &crate::acme::webroot(data_dir)),
+        )
+        .context("写入站点配置失败")?;
         if let Err(e) = nginx_test().await {
             restore_conf(&conf, prev);
             return Err(e);
@@ -556,6 +731,7 @@ mod tests {
             upstream: "http://127.0.0.1:3000".into(),
             listen: 80,
             tls: false,
+            acme: false,
             enabled: true,
         }
     }
@@ -620,25 +796,85 @@ mod tests {
     fn conf_body_proxy_and_static_and_tls() {
         let cert = Path::new("/var/lib/lyys-panel/websites/a1b2c3.crt");
         let key = Path::new("/var/lib/lyys-panel/websites/a1b2c3.key");
+        let webroot = Path::new("/var/lib/lyys-panel/acme-webroot");
 
-        let proxy = conf_body(&site(), cert, key);
+        let proxy = conf_body(&site(), cert, key, webroot);
         assert!(proxy.contains("listen 80;"));
         assert!(proxy.contains("server_name example.com www.example.com;"));
         assert!(proxy.contains("proxy_pass http://127.0.0.1:3000;"));
         assert!(proxy.contains("proxy_set_header X-Forwarded-Proto $scheme;"));
         assert!(!proxy.contains("ssl_certificate"));
+        assert!(!proxy.contains("acme-challenge"), "未启用自动证书不应注入质询 location");
 
         let mut st = site();
         st.kind = SiteKind::Static;
         st.root = "/var/www/html".into();
         st.tls = true;
         st.listen = 443;
-        let static_conf = conf_body(&st, cert, key);
+        let static_conf = conf_body(&st, cert, key, webroot);
         assert!(static_conf.contains("listen 443 ssl;"));
         assert!(static_conf.contains("root /var/www/html;"));
         assert!(static_conf.contains("try_files $uri $uri/ =404;"));
         assert!(static_conf.contains("ssl_certificate /var/lib/lyys-panel/websites/a1b2c3.crt;"));
         assert!(static_conf.contains("ssl_certificate_key /var/lib/lyys-panel/websites/a1b2c3.key;"));
+    }
+
+    /// 自动证书：非 80 端口应补一个 80 端口的质询 server；监听 80 就写在同一个 server 内
+    #[test]
+    fn conf_body_injects_acme_challenge() {
+        let cert = Path::new("/var/lib/lyys-panel/websites/a1b2c3.crt");
+        let key = Path::new("/var/lib/lyys-panel/websites/a1b2c3.key");
+        let webroot = Path::new("/var/lib/lyys-panel/acme-webroot");
+
+        // 443 站点：应出现独立的 80 端口质询 server
+        let mut s = site();
+        s.tls = true;
+        s.acme = true;
+        s.listen = 443;
+        let conf = conf_body(&s, cert, key, webroot);
+        assert!(conf.contains("listen 80;"), "应补一个 80 端口挑战 server");
+        assert!(conf.contains("listen 443 ssl;"));
+        assert!(conf.contains("location ^~ /.well-known/acme-challenge/ {"));
+        assert!(conf.contains("root /var/lib/lyys-panel/acme-webroot;"));
+        // 挑战 server 段在站点 server 段之前
+        let chal = conf.find("listen 80;").unwrap();
+        let main = conf.find("listen 443 ssl;").unwrap();
+        assert!(chal < main);
+
+        // 监听 80 的站点：质询 location 直接进主 server，不额外起 server 块
+        let mut s = site();
+        s.acme = true;
+        s.tls = true;
+        s.listen = 80;
+        let conf = conf_body(&s, cert, key, webroot);
+        assert_eq!(conf.matches("server {").count(), 1, "不应重复起 server 块");
+        assert!(conf.contains("location ^~ /.well-known/acme-challenge/ {"));
+    }
+
+    /// 可申请域名：剔除 `_`、通配符与 IP，保留真实域名
+    #[test]
+    fn acme_domains_filters_unusable() {
+        let mut s = site();
+        s.name = "example.com *.example.com _ 10.0.0.1 www.example.com".into();
+        let got = acme_domains(&s);
+        assert_eq!(got, vec!["example.com".to_string(), "www.example.com".to_string()]);
+
+        s.name = "_".into();
+        assert!(acme_domains(&s).is_empty());
+        s.tls = true;
+        s.acme = true;
+        assert!(validate(&s).is_err(), "仅兜底名的站点不应允许启用自动证书");
+
+        // 启用自动证书但未启用 HTTPS → 拒绝
+        let mut s = site();
+        s.acme = true;
+        s.tls = false;
+        assert!(validate(&s).is_err());
+
+        let mut s = site();
+        s.acme = true;
+        s.tls = true;
+        assert!(validate(&s).is_ok());
     }
 
     #[test]
