@@ -122,6 +122,7 @@
       </el-form>
       <template #footer>
         <el-button @click="showChannel = false">取消</el-button>
+        <el-button :loading="testing" @click="testChannel">测试发送</el-button>
         <el-button @click="saveChannel">保存</el-button>
       </template>
     </el-dialog>
@@ -175,6 +176,7 @@ const form = reactive<AlertRule>({ metric: "cpu", threshold: 90, notify_resolve:
 const showChannel = ref(false);
 const channelIndex = ref<number | null>(null);
 const chForm = reactive<AlertChannel>({ kind: "webhook", url: "", token: "", chat_id: "" });
+const testing = ref(false);
 
 function metricLabel(m: string) {
   return m === "cpu" ? "CPU" : m === "mem" ? "内存" : "磁盘";
@@ -296,6 +298,18 @@ async function saveChannel() {
     loadChannels();
   } catch (e: any) {
     ElMessage.error(e.response?.data?.error ?? "保存失败");
+  }
+}
+
+async function testChannel() {
+  testing.value = true;
+  try {
+    await http.post("/alerts/channels/test", { channel: { ...chForm } });
+    ElMessage.success("测试消息已发送，请到对应渠道确认");
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error ?? "发送失败");
+  } finally {
+    testing.value = false;
   }
 }
 

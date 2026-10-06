@@ -2836,6 +2836,29 @@ async fn alerts_channels_set(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[derive(Deserialize)]
+struct ChannelTestReq {
+    channel: crate::alerts::AlertChannel,
+}
+
+/// 用给定渠道发一条测试消息 —— 不落库、不改状态，供管理员校验配置是否可用。
+async fn alerts_channel_test(
+    _: RequireRole<2>,
+    SafeJson(req): SafeJson<ChannelTestReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    crate::alerts::validate_channel(&req.channel).map_err(|e| ApiError::bad(e.to_string()))?;
+    // 带上超时：上游无响应时不能让这个请求一直挂着
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|_| ApiError::internal())?;
+    let text = "【LYYS Panel】这是一条测试消息，收到即表示渠道配置可用。";
+    crate::alerts::send_channel(&client, &req.channel, text)
+        .await
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 async fn alerts_events(
     State(state): State<AppState>,
     _: RequireRole<2>,
@@ -3403,6 +3426,7 @@ pub fn router(state: AppState) -> Router {
             "/alerts/channels",
             get(alerts_channels_get).post(alerts_channels_set),
         )
+        .route("/alerts/channels/test", post(alerts_channel_test))
         .route("/alerts/events", get(alerts_events))
         // 安全入口配置：访问路径前缀与 IP 白名单（admin 专属）
         .route("/security", get(security_get).post(security_set))
