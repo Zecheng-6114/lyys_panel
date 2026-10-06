@@ -20,7 +20,7 @@ pub const BACKUP_KEEP: usize = 7;
 /// 保留份数上限
 const BACKUP_KEEP_MAX: usize = 100;
 
-/// 备份配置：目录与保留份数。
+/// 备份配置：目录、保留份数与远端投递。
 ///
 /// 存文件而非 settings 表 —— 恢复流程在打开数据库**之前**就要解析备份
 /// 目录（见 [`apply_pending_restore`]），那时读不到表，只能读文件。
@@ -32,6 +32,31 @@ pub struct BackupConfig {
     /// 保留份数（1–100）
     #[serde(default = "default_keep")]
     pub keep: usize,
+    /// 远端（WebDAV）投递
+    #[serde(default)]
+    pub remote: RemoteConfig,
+}
+
+/// 远端备份目标：把每份备份复制到 WebDAV（Nextcloud / 群晖 / 坚果云等）。
+///
+/// 只做 PUT 上传，不做列目录 —— 目标是「异地多一份」，读回时由管理员从远端
+/// 下载后再用「上传导入」还原。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RemoteConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// WebDAV 目录地址（须 http(s)://，末尾斜杠可有可无）
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub password: String,
+    /// 上传前用口令加密（AES-256-GCM），远端即使泄露也无法直接读取
+    #[serde(default)]
+    pub encrypt: bool,
+    #[serde(default)]
+    pub passphrase: String,
 }
 
 fn default_keep() -> usize {
@@ -43,6 +68,7 @@ impl Default for BackupConfig {
         Self {
             dir: String::new(),
             keep: BACKUP_KEEP,
+            remote: RemoteConfig::default(),
         }
     }
 }
@@ -65,7 +91,7 @@ pub fn save_config(data_dir: &Path, cfg: &BackupConfig) -> Result<()> {
     Ok(())
 }
 
-/// 保存前校验：目录须为绝对路径且不含 `..`；保留份数 1–100
+/// 保存前校验：目录须为绝对路径且不含 `..`；保留份数 1–100；远端配置（若启用）
 pub fn validate_config(cfg: &BackupConfig) -> Result<()> {
     let dir = cfg.dir.trim();
     if !dir.is_empty() {
@@ -78,6 +104,39 @@ pub fn validate_config(cfg: &BackupConfig) -> Result<()> {
     }
     if cfg.keep < 1 || cfg.keep > BACKUP_KEEP_MAX {
         bail!("保留份数需在 1–{BACKUP_KEEP_MAX} 之间");
+    }
+    validate_remote(&cfg.remote)
+}
+
+/// 远端配置校验：地址须为 http(s) 且不含空白/非 ASCII；启用加密时必须有口令
+fn validate_remote(r: &RemoteConfig) -> Result<()> {
+    if !r.enabled {
+        return Ok(());
+    }
+    let url = r.url.trim();
+    if url.is_empty() {
+        bail!("启用远端备份时必须填写 WebDAV 地址");
+    }
+    if url.len() > 512 {
+        bail!("WebDAV 地址过长");
+    }
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        bail!("WebDAV 地址必须以 http(s):// 开头");
+    }
+    if url.chars().any(|c| c.is_whitespace() || !c.is_ascii()) {
+        bail!("WebDAV 地址含非法字符");
+    }
+    if r.username.len() > 128 || r.password.len() > 128 {
+        bail!("WebDAV 用户名或密码过长");
+    }
+    if !r.username.is_empty() && r.password.is_empty() {
+        bail!("填写了用户名就必须填写密码");
+    }
+    if r.encrypt {
+        let p = r.passphrase.trim();
+        if p.len() < 8 || p.len() > 128 {
+            bail!("加密口令长度需为 8–128 个字符");
+        }
     }
     Ok(())
 }
@@ -223,6 +282,85 @@ pub fn import_backup(data_dir: &Path, bytes: &[u8]) -> Result<String> {
     Ok(name)
 }
 
+// ---------- 上传加密（AES-256-GCM + PBKDF2） ----------
+
+/// 加密容器头：魔数(8) | 盐(16) | 随机数(12) | 密文+tag
+const ENC_MAGIC: &[u8; 8] = b"LYYSENC1";
+const ENC_SALT_LEN: usize = 16;
+const ENC_NONCE_LEN: usize = 12;
+/// PBKDF2 迭代次数：一次性加密，可承受较高迭代换取更强抗暴力
+const ENC_ITERS: u32 = 200_000;
+
+fn derive_key(passphrase: &str, salt: &[u8]) -> [u8; 32] {
+    let mut key = [0u8; 32];
+    ring::pbkdf2::derive(
+        ring::pbkdf2::PBKDF2_HMAC_SHA256,
+        // ENC_ITERS 是编译期非零常量，MIN 只是让类型成立、永不取到
+        std::num::NonZeroU32::new(ENC_ITERS).unwrap_or(std::num::NonZeroU32::MIN),
+        salt,
+        passphrase.as_bytes(),
+        &mut key,
+    );
+    key
+}
+
+/// 是否为加密备份（导入时据此决定是否需要口令）
+pub fn is_encrypted(blob: &[u8]) -> bool {
+    blob.starts_with(ENC_MAGIC)
+}
+
+/// 用口令加密任意字节，产出可直接落盘的容器
+pub fn encrypt_bytes(passphrase: &str, plain: &[u8]) -> Result<Vec<u8>> {
+    use rand::RngCore;
+    let mut salt = [0u8; ENC_SALT_LEN];
+    let mut nonce = [0u8; ENC_NONCE_LEN];
+    rand::thread_rng().fill_bytes(&mut salt);
+    rand::thread_rng().fill_bytes(&mut nonce);
+    let key = derive_key(passphrase, &salt);
+    let unbound = ring::aead::UnboundKey::new(&ring::aead::AES_256_GCM, &key)
+        .map_err(|_| anyhow::anyhow!("初始化加密密钥失败"))?;
+    let sealing = ring::aead::LessSafeKey::new(unbound);
+    let mut buf = plain.to_vec();
+    sealing
+        .seal_in_place_append_tag(
+            ring::aead::Nonce::assume_unique_for_key(nonce),
+            ring::aead::Aad::empty(),
+            &mut buf,
+        )
+        .map_err(|_| anyhow::anyhow!("加密失败"))?;
+    let mut out = Vec::with_capacity(ENC_MAGIC.len() + ENC_SALT_LEN + ENC_NONCE_LEN + buf.len());
+    out.extend_from_slice(ENC_MAGIC);
+    out.extend_from_slice(&salt);
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&buf);
+    Ok(out)
+}
+
+/// 用口令解密 [`encrypt_bytes`] 的产物；口令错误或数据损坏都会失败
+pub fn decrypt_bytes(passphrase: &str, blob: &[u8]) -> Result<Vec<u8>> {
+    let head = ENC_MAGIC.len() + ENC_SALT_LEN + ENC_NONCE_LEN;
+    if !is_encrypted(blob) || blob.len() <= head {
+        bail!("不是有效的加密备份文件");
+    }
+    let salt = &blob[ENC_MAGIC.len()..ENC_MAGIC.len() + ENC_SALT_LEN];
+    let nonce: [u8; ENC_NONCE_LEN] = blob[ENC_MAGIC.len() + ENC_SALT_LEN..head]
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("加密文件头损坏"))?;
+    let key = derive_key(passphrase, salt);
+    let unbound = ring::aead::UnboundKey::new(&ring::aead::AES_256_GCM, &key)
+        .map_err(|_| anyhow::anyhow!("初始化解密密钥失败"))?;
+    let opening = ring::aead::LessSafeKey::new(unbound);
+    let mut buf = blob[head..].to_vec();
+    let plain = opening
+        .open_in_place(
+            ring::aead::Nonce::assume_unique_for_key(nonce),
+            ring::aead::Aad::empty(),
+            &mut buf,
+        )
+        .map_err(|_| anyhow::anyhow!("解密失败：口令错误或文件已损坏"))?;
+    Ok(plain.to_vec())
+}
+
 /// 保留策略：只留最新 `keep` 份
 fn prune_backups(dir: &Path, keep: usize) -> Result<()> {
     let mut names: Vec<String> = std::fs::read_dir(dir)?
@@ -241,19 +379,20 @@ fn prune_backups(dir: &Path, keep: usize) -> Result<()> {
 }
 
 /// 每日自动备份入口（monitor 每小时调用）：距上次成功 ≥24h 才备份。
-/// 上次时间记在 settings 表（key=last_backup_ts）。
-pub fn maybe_daily_backup(db: &Db, data_dir: &Path) -> Result<()> {
+/// 上次时间记在 settings 表（key=last_backup_ts）。返回本次新建的文件名
+/// （未到点或未创建时 None），供调用方决定是否投递远端。
+pub fn maybe_daily_backup(db: &Db, data_dir: &Path) -> Result<Option<String>> {
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
     let last: i64 = db
         .get_setting("last_backup_ts")?
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
     if now - last < 24 * 3600 {
-        return Ok(());
+        return Ok(None);
     }
-    create_backup(db, data_dir)?;
+    let name = create_backup(db, data_dir)?;
     db.set_setting("last_backup_ts", &now.to_string())?;
-    Ok(())
+    Ok(Some(name))
 }
 
 // ---------- 恢复：标记文件 + 启动时应用 ----------
@@ -401,6 +540,7 @@ mod tests {
         let custom = BackupConfig {
             dir: tmp.join("mydb").to_string_lossy().to_string(),
             keep: 3,
+            ..Default::default()
         };
         validate_config(&custom).unwrap();
         save_config(&tmp, &custom).unwrap();
@@ -410,25 +550,117 @@ mod tests {
         // 非法：相对路径 / 含 .. / 保留份数越界
         assert!(validate_config(&BackupConfig {
             dir: "relative/dir".into(),
-            keep: 3
+            keep: 3,
+            ..Default::default()
         })
         .is_err());
         assert!(validate_config(&BackupConfig {
             dir: "/data/../etc".into(),
-            keep: 3
+            keep: 3,
+            ..Default::default()
         })
         .is_err());
         assert!(validate_config(&BackupConfig {
             dir: String::new(),
-            keep: 0
+            keep: 0,
+            ..Default::default()
         })
         .is_err());
         assert!(validate_config(&BackupConfig {
             dir: String::new(),
-            keep: BACKUP_KEEP_MAX + 1
+            keep: BACKUP_KEEP_MAX + 1,
+            ..Default::default()
         })
         .is_err());
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn encrypt_roundtrip_and_rejects_wrong_passphrase() {
+        let plain = b"SQLite format 3\0 pretend this is a database".to_vec();
+        let blob = encrypt_bytes("correct horse battery", &plain).unwrap();
+        assert!(is_encrypted(&blob));
+        // 密文里不应出现明文片段
+        assert!(!blob.windows(16).any(|w| w == &plain[..16]));
+        assert_eq!(decrypt_bytes("correct horse battery", &blob).unwrap(), plain);
+        // 错误口令必须失败而不是返回垃圾
+        assert!(decrypt_bytes("wrong passphrase", &blob).is_err());
+        // 非加密数据直接拒绝
+        assert!(decrypt_bytes("x", b"not encrypted").is_err());
+    }
+
+    #[test]
+    fn remote_config_validation() {
+        let base = BackupConfig {
+            dir: String::new(),
+            keep: 7,
+            remote: RemoteConfig::default(),
+        };
+        // 未启用时字段随便填都放行（不打扰已关闭的配置）
+        assert!(validate_config(&BackupConfig {
+            remote: RemoteConfig {
+                url: "not a url".into(),
+                ..Default::default()
+            },
+            ..base.clone()
+        })
+        .is_ok());
+
+        let on = |r: RemoteConfig| BackupConfig {
+            remote: RemoteConfig {
+                enabled: true,
+                ..r
+            },
+            ..base.clone()
+        };
+        assert!(validate_config(&on(RemoteConfig {
+            url: "https://dav.example.com/panel/".into(),
+            ..Default::default()
+        }))
+        .is_ok());
+        // 缺地址 / 非 http(s) / 带空白 / 有用户名没密码
+        assert!(validate_config(&on(RemoteConfig::default())).is_err());
+        assert!(
+            validate_config(&on(RemoteConfig {
+                url: "ftp://dav/x".into(),
+                ..Default::default()
+            }))
+            .is_err()
+        );
+        assert!(
+            validate_config(&on(RemoteConfig {
+                url: "https://dav/a b".into(),
+                ..Default::default()
+            }))
+            .is_err()
+        );
+        assert!(
+            validate_config(&on(RemoteConfig {
+                url: "https://dav/x".into(),
+                username: "u".into(),
+                ..Default::default()
+            }))
+            .is_err()
+        );
+        // 启用加密但口令太短
+        assert!(
+            validate_config(&on(RemoteConfig {
+                url: "https://dav/x".into(),
+                encrypt: true,
+                passphrase: "short".into(),
+                ..Default::default()
+            }))
+            .is_err()
+        );
+        assert!(
+            validate_config(&on(RemoteConfig {
+                url: "https://dav/x".into(),
+                encrypt: true,
+                passphrase: "long-enough".into(),
+                ..Default::default()
+            }))
+            .is_ok()
+        );
     }
 
     #[test]

@@ -530,14 +530,20 @@ pub fn spawn_sampler(state: AppState) {
                 // 3.1：每日自动备份（VACUUM 是重 IO 操作，放 spawn_blocking）
                 let db3 = db.clone();
                 let dir3 = data_dir.clone();
-                if let Err(e) = tokio::task::spawn_blocking(move || {
+                match tokio::task::spawn_blocking(move || {
                     crate::backup::maybe_daily_backup(&db3, &dir3)
                 })
                 .await
-                .map_err(anyhow::Error::from)
-                .and_then(|r| r)
                 {
-                    tracing::warn!("每日自动备份失败：{e}");
+                    // 新建了备份则顺带投递远端（未启用远端时是 no-op）
+                    Ok(Ok(Some(name))) => {
+                        if let Err(e) = crate::remote::upload_backup(&data_dir, &name).await {
+                            tracing::warn!("每日备份远端投递失败：{e:#}");
+                        }
+                    }
+                    Ok(Ok(None)) => {}
+                    Ok(Err(e)) => tracing::warn!("每日自动备份失败：{e}"),
+                    Err(e) => tracing::warn!("每日自动备份任务失败：{e}"),
                 }
             }
         }

@@ -346,6 +346,10 @@ async fn execute(
                     .map_err(|_| anyhow::anyhow!("备份任务调度失败"))?
                     .context("创建备份失败")?;
             sink(&format!("备份已生成：{name}"));
+            // 远端已启用则顺带投递一份；失败只记日志，不影响本地备份
+            if let Err(e) = crate::remote::upload_backup(&state.data_dir, &name).await {
+                tracing::warn!("备份远端投递失败：{e:#}");
+            }
         }
         JobKind::DockerPull => {
             let target = str_param(&params, "target")?;

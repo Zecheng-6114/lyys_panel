@@ -22,6 +22,7 @@ mod ops; // 4.3 深度运维：unit 文件查看、SMART 磁盘健康
 mod opservice;
 mod packages;
 mod rprocess;
+mod remote; // 备份远端投递：把本地备份复制到 WebDAV 异地存储（可选加密）
 mod security; // 安全入口：访问路径前缀 + IP 白名单，登录前的访问闸门
 mod terminal; // 交互式终端：浏览器 ↔ 本机 PTY 的双向 WebSocket 桥（仅 admin）
 mod timers; // systemd 定时器：计划任务的另一种承载 + journald 执行日志

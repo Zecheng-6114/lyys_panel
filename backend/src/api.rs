@@ -2559,6 +2559,10 @@ async fn backups_create(
         .await
         .map_err(|_| ApiError::internal())?
         .map_err(ApiError::file_err)?;
+    // 远端已启用则顺带投递一份；失败只记日志，不影响本地备份
+    if let Err(e) = crate::remote::upload_backup(&state.data_dir, &name).await {
+        tracing::warn!("备份远端投递失败：{e:#}");
+    }
     Ok(Json(serde_json::json!({ "ok": true, "name": name })))
 }
 
@@ -2624,23 +2628,59 @@ async fn backup_restore(
     })))
 }
 
+#[derive(Deserialize, Default)]
+struct RemoteConfigReq {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    username: String,
+    /// 留空 = 沿用已存密码，避免「未改动即被清空」
+    #[serde(default)]
+    password: String,
+    #[serde(default)]
+    encrypt: bool,
+    /// 留空 = 沿用已存口令
+    #[serde(default)]
+    passphrase: String,
+}
+
 #[derive(Deserialize)]
 struct BackupConfigReq {
     #[serde(default)]
     dir: String,
     keep: usize,
+    #[serde(default)]
+    remote: RemoteConfigReq,
 }
 
-/// 读取备份配置（自定义目录 + 保留份数）
+/// 配置的对外视图：远端密码/口令只回「是否已设置」，绝不回明文（安全基线 §1）
+fn backup_config_view(cfg: &crate::backup::BackupConfig) -> serde_json::Value {
+    serde_json::json!({
+        "dir": cfg.dir,
+        "keep": cfg.keep,
+        "remote": {
+            "enabled": cfg.remote.enabled,
+            "url": cfg.remote.url,
+            "username": cfg.remote.username,
+            "password_set": !cfg.remote.password.is_empty(),
+            "encrypt": cfg.remote.encrypt,
+            "passphrase_set": !cfg.remote.passphrase.trim().is_empty(),
+        }
+    })
+}
+
+/// 读取备份配置（目录 + 保留份数 + 远端投递）
 async fn backups_config_get(
     State(state): State<AppState>,
     _: RequireRole<2>,
-) -> Result<Json<crate::backup::BackupConfig>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let data_dir = state.data_dir.clone();
     let cfg = tokio::task::spawn_blocking(move || crate::backup::load_config(&data_dir))
         .await
         .map_err(|_| ApiError::internal())?;
-    Ok(Json(cfg))
+    Ok(Json(backup_config_view(&cfg)))
 }
 
 async fn backups_config_set(
@@ -2648,28 +2688,65 @@ async fn backups_config_set(
     _: RequireRole<2>,
     SafeJson(req): SafeJson<BackupConfigReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let cfg = crate::backup::BackupConfig {
-        dir: req.dir,
-        keep: req.keep,
-    };
-    crate::backup::validate_config(&cfg).map_err(ApiError::file_err)?;
     let data_dir = state.data_dir.clone();
-    let saved = cfg.clone();
-    tokio::task::spawn_blocking(move || crate::backup::save_config(&data_dir, &cfg))
+    let saved = tokio::task::spawn_blocking(move || -> anyhow::Result<crate::backup::BackupConfig> {
+        let mut cfg = crate::backup::load_config(&data_dir);
+        cfg.dir = req.dir;
+        cfg.keep = req.keep;
+        cfg.remote.enabled = req.remote.enabled;
+        cfg.remote.url = req.remote.url.trim().to_string();
+        cfg.remote.username = req.remote.username.trim().to_string();
+        if !req.remote.password.is_empty() {
+            cfg.remote.password = req.remote.password;
+        }
+        cfg.remote.encrypt = req.remote.encrypt;
+        if !req.remote.passphrase.trim().is_empty() {
+            cfg.remote.passphrase = req.remote.passphrase.trim().to_string();
+        }
+        crate::backup::validate_config(&cfg)?;
+        crate::backup::save_config(&data_dir, &cfg)?;
+        Ok(cfg)
+    })
+    .await
+    .map_err(|_| ApiError::internal())?
+    .map_err(ApiError::file_err)?;
+    Ok(Json(
+        serde_json::json!({ "ok": true, "config": backup_config_view(&saved) }),
+    ))
+}
+
+/// 把最新一份本地备份立即投递到远端（admin）
+async fn backup_remote_upload(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let dir = state.data_dir.clone();
+    let list = tokio::task::spawn_blocking(move || crate::backup::list_backups(&dir))
         .await
         .map_err(|_| ApiError::internal())?
         .map_err(ApiError::file_err)?;
-    Ok(Json(serde_json::json!({ "ok": true, "config": saved })))
+    let Some(latest) = list.first() else {
+        return Err(ApiError::bad("没有可上传的本地备份"));
+    };
+    let name = latest.name.clone();
+    let uploaded = crate::remote::upload_backup(&state.data_dir, &name)
+        .await
+        .map_err(ApiError::file_err)?;
+    if !uploaded {
+        return Err(ApiError::bad("未启用远端备份，请先在设置中配置"));
+    }
+    Ok(Json(serde_json::json!({ "ok": true, "name": name })))
 }
 
-/// 上传外部备份文件（multipart 字段 `file`）：校验后存入备份目录，
-/// 之后在列表中正常点「恢复」即可。
+/// 上传外部备份文件（multipart 字段 `file`，可选 `passphrase`）：校验后存入备份目录，
+/// 之后在列表中正常点「恢复」即可。加密副本必须带正确口令才能导入。
 async fn backup_upload(
     State(state): State<AppState>,
     _: RequireRole<2>,
     mut mp: Multipart,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let mut bytes: Vec<u8> = Vec::new();
+    let mut passphrase = String::new();
     while let Some(field) = mp.next_field().await.map_err(|e| {
         tracing::warn!("备份上传解析失败：{e}");
         ApiError::bad("上传请求格式错误")
@@ -2683,6 +2760,11 @@ async fn backup_upload(
                     ApiError::bad("上传数据读取失败")
                 })?
                 .to_vec();
+        } else if field.name() == Some("passphrase") {
+            passphrase = field.text().await.map_err(|e| {
+                tracing::warn!("备份上传字段 passphrase 读取失败：{e}");
+                ApiError::bad("上传数据读取失败")
+            })?;
         }
     }
     if bytes.is_empty() {
@@ -2694,6 +2776,15 @@ async fn backup_upload(
             BACKUP_MAX_BYTES / 1024 / 1024
         )));
     }
+    // 加密副本先解密再交给导入；非加密文件直接走原路径
+    let bytes = if crate::backup::is_encrypted(&bytes) {
+        if passphrase.trim().is_empty() {
+            return Err(ApiError::bad("该备份已加密，请填写解密口令"));
+        }
+        crate::backup::decrypt_bytes(passphrase.trim(), &bytes).map_err(ApiError::file_err)?
+    } else {
+        bytes
+    };
     let data_dir = state.data_dir.clone();
     let name = tokio::task::spawn_blocking(move || crate::backup::import_backup(&data_dir, &bytes))
         .await
@@ -3410,6 +3501,7 @@ pub fn router(state: AppState) -> Router {
             "/backups/upload",
             post(backup_upload).layer(DefaultBodyLimit::max(BACKUP_MAX_BYTES)),
         )
+        .route("/backups/remote/upload", post(backup_remote_upload))
         // 3.2 自更新（admin 专属）。上传通道需放宽请求体上限
         .route("/update/check", get(update_check))
         .route("/update/install", post(update_install))
