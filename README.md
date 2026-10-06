@@ -346,7 +346,7 @@ lyys_panel/
 │   │   └── ops.rs / opservice.rs / rprocess.rs   SMART 磁盘 / systemd 服务 / 进程操作
 │   ├── Cargo.toml
 │   ├── rust-toolchain.toml
-│   └── migrations/         SQL 迁移脚本（0001…0010，按版本号顺序应用，事务包裹）
+│   └── migrations/         SQL 迁移脚本（0001…0013，按版本号顺序应用，事务包裹）
 ├── frontend/           Vue 3 前端
 │   ├── index.html          构建入口（vite 构建产物根目录）
 │   ├── tsconfig.json
@@ -363,7 +363,6 @@ lyys_panel/
 │       ├── themes/presets.ts      主题预设（浅色 / 深色 / 柔和纸色 / 高对比）
 │       ├── api/                   http（axios 封装与拦截器）/ jobs / meta
 │       └── styles/                theme.css：Element Plus 变量覆盖（主题 / 圆角 / 字体）
-│                                  responsive.css：窄屏断点
 ├── scripts/            git 钩子安装与 install / uninstall 一键部署脚本
 ├── docs/               设计稿与落地方案（任务队列、实例边界重构、成熟度路线图）
 ├── .github/workflows/  CI（PR 检查）与 Release（tag 多平台发布）工作流

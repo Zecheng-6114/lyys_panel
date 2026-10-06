@@ -86,8 +86,8 @@ Signed-off-by: <Name> <email>
   - `fix` / `perf` → PATCH（x.y.Z）
   - `feat` → MINOR（x.Y.z）
   - `BREAKING CHANGE`（任意 type）→ MAJOR（X.y.z）
-- `0.y.z` 阶段（当前 `0.1.0`）为初始开发期，一切接口不保证稳定；`1.0.0` 定义
-  面板对外 API（HTTP 路由 + 二进制行为）的稳定基线。
+- `1.0.0` 起定义面板对外 API（HTTP 路由 + 二进制行为）的稳定基线；当前版本
+  `1.11.0`，破坏性变更一律走 MAJOR。
 - 版本号的实际递增在**发布**时执行（打 `vX.Y.Z` tag + GitHub Release），日常功能
   提交不改动版本号文件；发布提交用 `chore(release): X.Y.Z` 主题。
 - 面板自更新模块（`update.rs`）从 GitHub Release 读取最新版本，发布 tag 即更新源。
@@ -111,7 +111,8 @@ Signed-off-by: <Name> <email>
 - Lint：clippy `all` 组（correctness/suspicious/style/complexity/perf）全部
   `-D warnings` 提级为错误；`pedantic`/`restriction`/`nursery` 不整体开启，
   需要时逐条 cherry-pick。确需保留例外用 `#[allow(...)]` 局部豁免并注释原因。
-- 错误处理：内部 anyhow，对外 API 层 thiserror；库代码禁 panic、禁
+- 错误处理：内部用 anyhow，对外 API 层用 `api.rs` 里手写的 `ApiError`（携带
+  HTTP 状态码 + 中文消息），未引入 thiserror；库代码禁 panic、禁
   `unwrap()`/`expect()` 出现在非测试路径（测试内可用）。
 - 模块按领域划分（auth/monitor/process/service/log/backup/alerts/update/...），
   跨模块共享状态只经 `AppState`。
@@ -127,7 +128,8 @@ Signed-off-by: <Name> <email>
   可复用块放 `components/`。
 - 类型检查以 `vue-tsc`（已并入 `npm run build`）为准，禁止 `any` 泛滥；
   确需 `any` 局部使用并注释。
-- ESLint + Prettier 默认配置，提交前无 error。
+- 格式以 Prettier 默认配置为准（`npm run format`）；ESLint 尚未接入 flat config，
+  暂不纳入提交门禁。
 
 ### 通用
 
