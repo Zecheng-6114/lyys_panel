@@ -69,6 +69,13 @@ const routes: RouteRecordRaw[] = [
         meta: { adminOnly: true },
       },
       {
+        // 网站管理：生成 nginx 站点配置并重载，影响对外服务，仅 admin
+        path: "websites",
+        name: "websites",
+        component: () => import("../views/Websites.vue"),
+        meta: { adminOnly: true },
+      },
+      {
         // 实例视图：容器与 systemd 服务的统一入口，块内直达日志 / 进程
         path: "instances",
         name: "instances",

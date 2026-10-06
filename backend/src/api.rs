@@ -1477,6 +1477,100 @@ async fn timers_logs(
     Ok(Json(serde_json::json!({ "logs": text })))
 }
 
+// ---------- 网站管理（Nginx，admin 专属） ----------
+
+async fn websites_status(_: RequireRole<2>) -> Result<Json<crate::websites::Status>, ApiError> {
+    Ok(Json(crate::websites::status().await))
+}
+
+async fn websites_list(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+) -> Result<Json<Vec<crate::websites::Site>>, ApiError> {
+    let data_dir = state.data_dir.clone();
+    let sites = tokio::task::spawn_blocking(move || crate::websites::list(&data_dir))
+        .await
+        .map_err(|_| ApiError::internal())?;
+    Ok(Json(sites))
+}
+
+#[derive(Deserialize)]
+struct SiteReq {
+    /// 新建时留空 → 服务端分配标识；更新时必填
+    id: Option<String>,
+    name: String,
+    kind: crate::websites::SiteKind,
+    #[serde(default)]
+    root: String,
+    #[serde(default)]
+    upstream: String,
+    listen: u16,
+    #[serde(default)]
+    tls: bool,
+    #[serde(default)]
+    enabled: bool,
+    /// 本次上传的证书 PEM（留空 = 沿用已存文件；TLS 且无文件时自动生成自签证书）
+    #[serde(default)]
+    cert_pem: String,
+    /// 本次上传的私钥 PEM
+    #[serde(default)]
+    key_pem: String,
+}
+
+async fn websites_save(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+    SafeJson(req): SafeJson<SiteReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let data_dir = state.data_dir.clone();
+    let mut site = crate::websites::Site {
+        id: req.id.unwrap_or_default(),
+        name: req.name,
+        kind: req.kind,
+        root: req.root,
+        upstream: req.upstream,
+        listen: req.listen,
+        tls: req.tls,
+        enabled: req.enabled,
+    };
+    let is_new = site.id.is_empty();
+    if is_new {
+        let dd = data_dir.clone();
+        site.id =
+            tokio::task::spawn_blocking(move || crate::websites::new_id(&crate::websites::list(&dd)))
+                .await
+                .map_err(|_| ApiError::internal())?;
+    }
+    // 证书与私钥必须成对提供，避免只换一半导致证书与私钥不匹配
+    let new_cert = match (req.cert_pem.trim().is_empty(), req.key_pem.trim().is_empty()) {
+        (true, true) => None,
+        (false, false) => Some((req.cert_pem, req.key_pem)),
+        _ => return Err(ApiError::bad("证书与私钥需同时提供")),
+    };
+    let id = site.id.clone();
+    crate::websites::save(&data_dir, &site, is_new, new_cert)
+        .await
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({ "ok": true, "id": id })))
+}
+
+#[derive(Deserialize)]
+struct SiteIdReq {
+    id: String,
+}
+
+async fn websites_delete(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+    SafeJson(req): SafeJson<SiteIdReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let data_dir = state.data_dir.clone();
+    crate::websites::delete(&data_dir, &req.id)
+        .await
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 // ---------- 网络查看 ----------
 
 async fn net_interfaces(_user: AuthUser) -> Result<Json<serde_json::Value>, ApiError> {
@@ -3441,6 +3535,12 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/timers/run", post(timers_run))
         .route("/timers/logs", get(timers_logs))
+        // 网站管理（admin 专属）：生成 nginx 站点配置并校验 / 重载
+        .route("/websites/status", get(websites_status))
+        .route(
+            "/websites",
+            get(websites_list).post(websites_save).delete(websites_delete),
+        )
         .route("/network/interfaces", get(net_interfaces))
         .route("/network/routes", get(net_routes))
         .route("/network/connections", get(net_connections))

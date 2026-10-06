@@ -29,6 +29,7 @@ mod timers; // systemd 定时器：计划任务的另一种承载 + journald 执
 mod tls;
 mod update;
 mod websearch; // AI 助手联网：搜索多通道 + 网页正文抓取（含 SSRF 闸门）
+mod websites; // 网站管理：Nginx 站点（静态托管 / 反向代理，可选 HTTPS）生成与启停
 
 use std::path::PathBuf;
 use std::sync::Arc;
