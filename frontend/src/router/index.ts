@@ -61,6 +61,13 @@ const routes: RouteRecordRaw[] = [
         component: () => import("../views/Network.vue"),
       },
       {
+        // 防火墙管理：改规则/启停影响主机暴露面，仅 admin
+        path: "firewall",
+        name: "firewall",
+        component: () => import("../views/Firewall.vue"),
+        meta: { adminOnly: true },
+      },
+      {
         // 实例视图：容器与 systemd 服务的统一入口，块内直达日志 / 进程
         path: "instances",
         name: "instances",

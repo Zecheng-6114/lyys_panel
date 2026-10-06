@@ -1345,6 +1345,77 @@ async fn net_dns(_user: AuthUser) -> Result<Json<Vec<String>>, ApiError> {
         .map_err(ApiError::file_err)
 }
 
+// ---------- 防火墙管理 ----------
+//
+// 只驱动发行版自带的防火墙前端（Debian 系 ufw / Arch 系 firewalld），
+// 不接管 iptables/nftables 裸规则。改规则与启停都会改变主机网络暴露面，
+// 属危险操作，读写一律 admin 专属。
+
+async fn firewall_status(_: RequireRole<2>) -> Result<Json<crate::firewall::Status>, ApiError> {
+    crate::firewall::status()
+        .await
+        .map(Json)
+        .map_err(ApiError::file_err)
+}
+
+async fn firewall_rules(_: RequireRole<2>) -> Result<Json<Vec<crate::firewall::Rule>>, ApiError> {
+    crate::firewall::rules()
+        .await
+        .map(Json)
+        .map_err(ApiError::file_err)
+}
+
+#[derive(Deserialize)]
+struct FirewallAddReq {
+    op: crate::firewall::Op,
+    #[serde(default)]
+    port: String,
+    #[serde(default)]
+    protocol: String,
+    #[serde(default)]
+    from: String,
+}
+
+async fn firewall_rule_add(
+    _: RequireRole<2>,
+    SafeJson(req): SafeJson<FirewallAddReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    crate::firewall::add(req.op, &req.port, &req.protocol, &req.from)
+        .await
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct FirewallRemoveReq {
+    id: String,
+}
+
+async fn firewall_rule_remove(
+    _: RequireRole<2>,
+    SafeJson(req): SafeJson<FirewallRemoveReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    crate::firewall::remove(&req.id)
+        .await
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct FirewallToggleReq {
+    enable: bool,
+}
+
+async fn firewall_toggle(
+    _: RequireRole<2>,
+    SafeJson(req): SafeJson<FirewallToggleReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    crate::firewall::toggle(req.enable)
+        .await
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 // ---------- Docker 控制 ----------
 
 /// Docker 环境状态：未安装或守护进程未启动时也返回 200，由前端决定展示方式
@@ -2949,6 +3020,11 @@ pub fn router(state: AppState) -> Router {
         .route("/network/routes", get(net_routes))
         .route("/network/connections", get(net_connections))
         .route("/network/dns", get(net_dns))
+        // 防火墙管理（admin 专属）：状态与规则只读，增删/启停改主机暴露面
+        .route("/firewall/status", get(firewall_status))
+        .route("/firewall/rules", get(firewall_rules))
+        .route("/firewall/rule", post(firewall_rule_add).delete(firewall_rule_remove))
+        .route("/firewall/toggle", post(firewall_toggle))
         .route("/docker/status", get(docker_status))
         .route("/docker/install", post(docker_install))
         .route("/docker/containers", get(docker_containers))

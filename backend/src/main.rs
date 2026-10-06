@@ -12,6 +12,7 @@ mod distro;
 mod docker;
 mod embed;
 mod files;
+mod firewall; // 防火墙管理：ufw / firewalld 的规则读写与启停（仅 admin）
 mod instances; // 实例视图：容器与 systemd 服务聚合，作为各自日志/进程的入口
 mod jobs; // P2-1 作业队列：长操作脱离请求生命周期，输出落表并经 SSE 增量推送
 mod logs;

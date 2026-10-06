@@ -124,7 +124,7 @@ fn gate(group: LockGroup) -> Option<&'static tokio::sync::Mutex<()>> {
     match group {
         LockGroup::Package => Some(&PKG_GATE),
         LockGroup::Docker => Some(&DOCKER_GATE),
-        LockGroup::None | LockGroup::Systemd => None,
+        LockGroup::None | LockGroup::Systemd | LockGroup::Firewall => None,
     }
 }
 

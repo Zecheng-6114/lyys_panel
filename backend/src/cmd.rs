@@ -26,6 +26,8 @@
 //! | apt-get / pacman 安装卸载升级 | 1800  | Package  |
 //! | docker 列表                   | 20    | Docker   |
 //! | docker 拉取 / compose 长操作  | 900   | Docker   |
+//! | ufw / firewall-cmd 规则读     | 10    | None     |
+//! | ufw / firewall-cmd 规则写 / 启停 | 15-20 | Firewall |
 
 use anyhow::{Context, Result};
 use std::process::{ExitStatus, Stdio};
@@ -45,6 +47,9 @@ pub enum LockGroup {
     Docker,
     /// systemctl 写操作（start / stop / restart / enable 等）
     Systemd,
+    /// 防火墙写操作（ufw / firewall-cmd）：规则增删与启停全局串行，
+    /// 避免并发修改同一份规则集造成中间态丢失
+    Firewall,
 }
 
 /// 单条命令的执行预算
@@ -99,6 +104,15 @@ impl Budget {
             group: LockGroup::Systemd,
         }
     }
+
+    /// 防火墙读写：Firewall 组串行
+    pub fn firewall(secs: u64) -> Self {
+        Budget {
+            timeout: Duration::from_secs(secs),
+            max_output: QUERY_CAP,
+            group: LockGroup::Firewall,
+        }
+    }
 }
 
 /// 命令结果。字段口径与 std::process::Output 对齐，调用方可平滑迁移。
@@ -145,6 +159,7 @@ impl std::error::Error for CommandFailed {}
 static PKG_LOCK: Mutex<()> = Mutex::const_new(());
 static DOCKER_LOCK: Mutex<()> = Mutex::const_new(());
 static SYSTEMD_LOCK: Mutex<()> = Mutex::const_new(());
+static FIREWALL_LOCK: Mutex<()> = Mutex::const_new(());
 
 /// 获取分组互斥锁。None 组不加锁（返回 None）。
 /// 锁在 run 返回前一直持有，粒度恰好覆盖命令执行期。
@@ -154,6 +169,7 @@ async fn acquire(group: LockGroup) -> Option<MutexGuard<'static, ()>> {
         LockGroup::Package => Some(PKG_LOCK.lock().await),
         LockGroup::Docker => Some(DOCKER_LOCK.lock().await),
         LockGroup::Systemd => Some(SYSTEMD_LOCK.lock().await),
+        LockGroup::Firewall => Some(FIREWALL_LOCK.lock().await),
     }
 }
 

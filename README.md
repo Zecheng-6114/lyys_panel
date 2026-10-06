@@ -31,6 +31,7 @@ LYYS Panel 面向单台 Linux 服务器的日常运维，把系统监控、进�
 | 软件 | 包列表、可升级查询、搜索、安装 / 卸载 / 升级（Debian 系 apt、Arch 系 pacman） |
 | 计划任务 | crontab 增删改查 |
 | 网络 | 网卡、路由、连接、DNS 查看 |
+| 防火墙 | ufw / firewalld 状态与规则查看、放行 / 拒绝 / 删除规则、启用停用（仅 admin） |
 | 任务 | 后台作业队列：安装 / 更新等长操作转后台执行，可离开页面，列表回看进度与输出尾部（每个作业保留最近 200 行），支持取消 |
 | 在线会话 | 已登录用户的会话列表，可按会话强制下线 |
 | Docker | 容器列表与启动 / 停止 / 重启 / 删除、容器日志、镜像拉取与删除、Compose 项目启停；未安装时页面上可直接安装 |
@@ -434,7 +435,7 @@ lyys_panel/
 
 **功能与工程**
 
-- 外部命令全部走 `cmd.rs`：已按命令类别给超时预算、分组互斥（Package / Docker / Systemd 各自串行）
+- 外部命令全部走 `cmd.rs`：已按命令类别给超时预算、分组互斥（Package / Docker / Systemd / Firewall 各自串行）
   与输出上限，但**未做重试**；apt / pacman 安装这类长操作靠「任务」页转后台，不代表失败会自动重试
 - 实例页只收两类显式边界：Docker 容器，以及 unit 文件位于 `/etc/systemd/system/`
   或 `/run/systemd/system/` 的 systemd 服务。软件包自带的单元（`/usr/lib/systemd/system/`）

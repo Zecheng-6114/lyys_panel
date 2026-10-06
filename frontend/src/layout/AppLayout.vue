@@ -140,6 +140,7 @@ import {
   Setting,
   Download,
   Tickets,
+  Lock,
 } from "@element-plus/icons-vue";
 
 const route = useRoute();
@@ -242,6 +243,8 @@ const navGroups: NavGroup[] = [
       { path: "/packages", title: "软件", icon: Box },
       { path: "/instances", title: "实例", icon: Ship },
       { path: "/network", title: "网络", icon: Connection },
+      // 防火墙改的是主机网络暴露面，与终端同为危险操作：分组可见、菜单项限 admin
+      { path: "/firewall", title: "防火墙", icon: Lock, admin: true },
     ],
   },
   {
