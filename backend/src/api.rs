@@ -3054,6 +3054,92 @@ async fn alerts_events(
     Ok(Json(state.db.alert_event_list_async(limit, offset).await?))
 }
 
+// ---------- 3.4 站点可用性探针（admin）----------
+
+#[derive(Deserialize)]
+struct ProbesReq {
+    targets: Vec<crate::probe::ProbeTarget>,
+}
+
+async fn probes_get(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let db = state.db.clone();
+    let targets = tokio::task::spawn_blocking(move || crate::probe::load_targets(&db))
+        .await
+        .map_err(|_| ApiError::internal())?;
+    Ok(Json(serde_json::json!({ "targets": targets })))
+}
+
+/// 全量保存目标集（前端提交完整列表）。保存后借用告警重载信号：探针任务同样
+/// 订阅它，因此新增/修改的目标会立刻重探，而不必等满一个探测周期。
+async fn probes_set(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+    SafeJson(req): SafeJson<ProbesReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if req.targets.len() > crate::probe::TARGET_MAX {
+        return Err(ApiError::bad(format!(
+            "监控目标过多（上限 {} 条）",
+            crate::probe::TARGET_MAX
+        )));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for t in &req.targets {
+        crate::probe::validate_target(t).map_err(|e| ApiError::bad(e.to_string()))?;
+        if !seen.insert(t.id.clone()) {
+            return Err(ApiError::bad("目标 id 重复"));
+        }
+    }
+    let db = state.db.clone();
+    let targets = req.targets.clone();
+    tokio::task::spawn_blocking(move || crate::probe::save_targets(&db, &targets))
+        .await
+        .map_err(|_| ApiError::internal())?
+        .map_err(ApiError::file_err)?;
+    state.alert_reload.send_modify(|v| *v = v.wrapping_add(1));
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// 配置与运行态合并返回，前端一次拿全（未探测过的目标 last_check = 0）
+async fn probes_status(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+) -> Result<Json<Vec<crate::probe::ProbeStatus>>, ApiError> {
+    let db = state.db.clone();
+    let targets = tokio::task::spawn_blocking(move || crate::probe::load_targets(&db))
+        .await
+        .map_err(|_| ApiError::internal())?;
+    let engine = state.probes.lock().unwrap_or_else(|p| p.into_inner());
+    Ok(Json(engine.snapshot(&targets)))
+}
+
+#[derive(Deserialize)]
+struct ProbeTestReq {
+    target: crate::probe::ProbeTarget,
+}
+
+/// 立即探测一次（不落库、不改状态），供保存前确认地址是否真的可达
+async fn probes_test(
+    _: RequireRole<2>,
+    SafeJson(req): SafeJson<ProbeTestReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    crate::probe::validate_target(&req.target).map_err(|e| ApiError::bad(e.to_string()))?;
+    let client = reqwest::Client::builder()
+        .user_agent("lyys-panel-probe/1.0")
+        .danger_accept_invalid_certs(req.target.insecure)
+        .build()
+        .map_err(|_| ApiError::internal())?;
+    let out = crate::probe::check(&client, &req.target).await;
+    Ok(Json(serde_json::json!({
+        "ok": out.ok,
+        "status": out.status,
+        "ms": out.ms,
+        "error": out.error,
+    })))
+}
+
 // ---------- 审计中间件（2.3） ----------
 
 /// 从请求头尽力解析出当前用户（id, username）。
@@ -3620,6 +3706,9 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/alerts/channels/test", post(alerts_channel_test))
         .route("/alerts/events", get(alerts_events))
+        .route("/alerts/probes", get(probes_get).post(probes_set))
+        .route("/alerts/probes/status", get(probes_status))
+        .route("/alerts/probes/test", post(probes_test))
         // 安全入口配置：访问路径前缀与 IP 白名单（admin 专属）
         .route("/security", get(security_get).post(security_set))
         // 2.3：审计中间件挂在受保护路由上，记录所有非 GET 业务请求

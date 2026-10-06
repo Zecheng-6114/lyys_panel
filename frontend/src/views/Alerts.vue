@@ -46,6 +46,57 @@
       <el-button size="small" @click="openChannel(null)">新增渠道</el-button>
     </div>
 
+    <div class="block block-probes">
+      <div class="probe-head">
+        <div class="section-title">站点探针</div>
+        <span class="hint">周期探测以下地址，连续失败达阈值才告警；运行态只存内存，重启后重新探测</span>
+        <el-button size="small" @click="openProbe(null)">新增探针</el-button>
+      </div>
+      <el-table v-loading="probesLoading" :data="probeRows" size="small">
+        <el-table-column label="状态" v-bind="col(90)">
+          <template #default="{ row }">
+            <span class="dot-wrap">
+              <i class="dot" :class="probeState(row).cls" />
+              {{ probeState(row).text }}
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="名称" v-bind="col(140)" prop="name" />
+        <el-table-column label="地址" v-bind="col(240, true)">
+          <template #default="{ row }">
+            <span class="mono">{{ row.url }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="最近检查" v-bind="col(180)">
+          <template #default="{ row }">
+            {{ row.status?.last_check ? fmtTime(row.status.last_check) : "—" }}
+          </template>
+        </el-table-column>
+        <el-table-column label="耗时" v-bind="col(90)" v-if="!hideColP3">
+          <template #default="{ row }">
+            {{ row.status?.last_ms ? row.status.last_ms + "ms" : "—" }}
+          </template>
+        </el-table-column>
+        <el-table-column label="失败次数" v-bind="col(100)" v-if="!hideColP3">
+          <template #default="{ row }">{{ row.status?.failures_total ?? 0 }}</template>
+        </el-table-column>
+        <el-table-column label="操作" v-bind="col(190)" align="right">
+          <template #default="{ $index }">
+            <el-button link size="small" @click="openProbe($index)">编辑</el-button>
+            <el-button
+              link
+              size="small"
+              :loading="probeTesting === $index"
+              @click="testProbe($index)"
+            >
+              测试
+            </el-button>
+            <el-button link size="small" @click="removeProbe($index)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </div>
+
     <div class="block block-events">
       <div class="section-title">最近告警事件</div>
       <el-table v-loading="eventsLoading" :data="events" size="small">
@@ -126,12 +177,64 @@
         <el-button @click="saveChannel">保存</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog
+      v-model="showProbe"
+      :title="probeIndex === null ? '新增探针' : '编辑探针'"
+      width="480px"
+    >
+      <el-form label-width="120px" size="small">
+        <el-form-item label="名称">
+          <el-input v-model="probeForm.name" placeholder="如：官网首页" />
+        </el-form-item>
+        <el-form-item label="地址">
+          <el-input v-model="probeForm.url" placeholder="https://example.com/" />
+        </el-form-item>
+        <el-form-item label="启用">
+          <el-switch v-model="probeForm.enabled" />
+        </el-form-item>
+        <el-form-item label="期望状态码">
+          <el-input-number
+            v-model="probeForm.expect_status"
+            :min="0"
+            :max="599"
+            style="width: 100%"
+          />
+        </el-form-item>
+        <el-form-item label="正文关键字">
+          <el-input v-model="probeForm.keyword" placeholder="可留空；填了则要求正文包含它" />
+        </el-form-item>
+        <el-form-item label="连续失败次数">
+          <el-input-number
+            v-model="probeForm.fail_threshold"
+            :min="1"
+            :max="10"
+            style="width: 100%"
+          />
+        </el-form-item>
+        <el-form-item label="超时（秒）">
+          <el-input-number v-model="probeForm.timeout_s" :min="1" :max="30" style="width: 100%" />
+        </el-form-item>
+        <el-form-item label="忽略证书错误">
+          <el-switch v-model="probeForm.insecure" />
+        </el-form-item>
+      </el-form>
+      <div class="hint">
+        期望状态码填 0 表示任意 2xx 即正常；连续失败达到设定次数才判定宕机并推送，
+        避免一次网络抖动就误报。被监控站点用自签证书时勾选「忽略证书错误」。
+      </div>
+      <template #footer>
+        <el-button @click="showProbe = false">取消</el-button>
+        <el-button :loading="probeFormTesting" @click="testProbeForm">测试</el-button>
+        <el-button @click="saveProbe">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { col, hideColP3 } from "../composables/useResponsive";
-import { onMounted, reactive, ref } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 import http from "../api/http";
 
 interface AlertRule {
@@ -157,6 +260,36 @@ interface AlertChannel {
   chat_id: string;
 }
 
+/** 站点探针的配置项 */
+interface ProbeTarget {
+  id: string;
+  name: string;
+  url: string;
+  enabled: boolean;
+  /** 期望状态码：0 = 任意 2xx */
+  expect_status: number;
+  keyword: string;
+  fail_threshold: number;
+  timeout_s: number;
+  insecure: boolean;
+}
+
+/** 站点探针的运行态（配置 + 探测结果合并给前端） */
+interface ProbeStatus {
+  id: string;
+  last_status: number;
+  last_ms: number;
+  last_error: string;
+  last_check: number;
+  down: boolean;
+  failures: number;
+  failures_total: number;
+  checks: number;
+}
+
+/** 表格行 = 配置 + 对应运行态（未探测过则 status 为空） */
+type ProbeRow = ProbeTarget & { status: ProbeStatus | null };
+
 const CHANNEL_KINDS: { value: ChannelKind; label: string }[] = [
   { value: "webhook", label: "通用 Webhook" },
   { value: "dingtalk", label: "钉钉机器人" },
@@ -177,6 +310,40 @@ const showChannel = ref(false);
 const channelIndex = ref<number | null>(null);
 const chForm = reactive<AlertChannel>({ kind: "webhook", url: "", token: "", chat_id: "" });
 const testing = ref(false);
+
+const targets = ref<ProbeTarget[]>([]);
+const statusById = ref<Record<string, ProbeStatus>>({});
+const probesLoading = ref(false);
+const showProbe = ref(false);
+const probeIndex = ref<number | null>(null);
+const probeTesting = ref<number | null>(null);
+const probeFormTesting = ref(false);
+const probeForm = reactive<ProbeTarget>(emptyProbe());
+
+/** 表格数据 = 配置数组 join 运行态；顺序与 targets 一致，编辑按下标回取 */
+const probeRows = computed<ProbeRow[]>(() =>
+  targets.value.map((t) => ({ ...t, status: statusById.value[t.id] ?? null })),
+);
+
+function emptyProbe(): ProbeTarget {
+  return {
+    id: crypto.randomUUID(),
+    name: "",
+    url: "",
+    enabled: true,
+    expect_status: 0,
+    keyword: "",
+    fail_threshold: 2,
+    timeout_s: 10,
+    insecure: false,
+  };
+}
+
+/** 状态点：从未探测 = 未知；宕机 = 实心，其余空心（沿用黑白灰，与事件表同款） */
+function probeState(row: ProbeRow) {
+  if (!row.status?.last_check) return { text: "未知", cls: "dot-off" };
+  return row.status.down ? { text: "宕机", cls: "dot-on" } : { text: "正常", cls: "dot-off" };
+}
 
 function metricLabel(m: string) {
   return m === "cpu" ? "CPU" : m === "mem" ? "内存" : "磁盘";
@@ -232,6 +399,7 @@ async function loadEvents() {
 function loadAll() {
   loadRules();
   loadChannels();
+  loadProbes();
   loadEvents();
 }
 
@@ -324,7 +492,105 @@ async function removeChannel(index: number) {
   }
 }
 
-onMounted(loadAll);
+async function loadProbes() {
+  probesLoading.value = true;
+  try {
+    const { data } = await http.get("/alerts/probes");
+    targets.value = data.targets ?? [];
+    await refreshProbeStatus();
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error ?? "读取站点探针失败");
+  } finally {
+    probesLoading.value = false;
+  }
+}
+
+/** 只刷运行态（轮询用）：不摆 loading，避免每隔几十秒闪一次 */
+async function refreshProbeStatus() {
+  try {
+    const { data } = await http.get("/alerts/probes/status");
+    const map: Record<string, ProbeStatus> = {};
+    for (const s of data as ProbeStatus[]) map[s.id] = s;
+    statusById.value = map;
+  } catch {
+    // 轮询失败静默：下一轮会补上，不打扰用户
+  }
+}
+
+function openProbe(index: number | null) {
+  probeIndex.value = index;
+  if (index === null) {
+    Object.assign(probeForm, emptyProbe());
+  } else {
+    Object.assign(probeForm, targets.value[index]);
+  }
+  showProbe.value = true;
+}
+
+async function saveProbe() {
+  const next = [...targets.value];
+  const entry: ProbeTarget = { ...probeForm };
+  if (probeIndex.value === null) {
+    next.push(entry);
+  } else {
+    next[probeIndex.value] = entry;
+  }
+  try {
+    await http.post("/alerts/probes", { targets: next });
+    showProbe.value = false;
+    ElMessage.success("已保存，探针立即重探");
+    loadProbes();
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error ?? "保存失败");
+  }
+}
+
+async function removeProbe(index: number) {
+  const next = targets.value.filter((_, i) => i !== index);
+  try {
+    await http.post("/alerts/probes", { targets: next });
+    ElMessage.success("已删除");
+    loadProbes();
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error ?? "删除失败");
+  }
+}
+
+/** 立即探测一次（不落库、不影响已存状态），用于确认地址是否真的可达 */
+async function runProbeTest(target: ProbeTarget) {
+  try {
+    const { data } = await http.post("/alerts/probes/test", { target });
+    if (data.ok) {
+      ElMessage.success(`可达：HTTP ${data.status}，${data.ms}ms`);
+    } else {
+      ElMessage.error(`探测失败：${data.error || "未知原因"}`);
+    }
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error ?? "探测失败");
+  }
+}
+
+async function testProbe(index: number) {
+  probeTesting.value = index;
+  await runProbeTest(targets.value[index]);
+  probeTesting.value = null;
+}
+
+async function testProbeForm() {
+  probeFormTesting.value = true;
+  await runProbeTest({ ...probeForm });
+  probeFormTesting.value = false;
+}
+
+// 探针由后台每 60s 推进一轮，前端 30s 拉一次状态即可
+let probeTimer: number | undefined;
+onMounted(() => {
+  loadAll();
+  probeTimer = window.setInterval(refreshProbeStatus, 30000);
+});
+onUnmounted(() => {
+  if (probeTimer !== undefined) window.clearInterval(probeTimer);
+});
 </script>
 
 <style scoped>
@@ -345,12 +611,24 @@ onMounted(loadAll);
   min-height: 0;
 }
 .block-rules {
-  flex: 1 1 30%;
-  min-height: 96px;
+  flex: 1 1 22%;
+  min-height: 88px;
+}
+.block-probes {
+  flex: 1 1 33%;
+  min-height: 110px;
 }
 .block-events {
-  flex: 1 1 70%;
-  min-height: 144px;
+  flex: 1 1 45%;
+  min-height: 132px;
+}
+/* 区块标题行：标题 + 说明 + 右侧按钮（探针表与规则表样式一致） */
+.probe-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  flex-wrap: wrap;
 }
 /* EP 表格默认是「内容多高就多高」（.el-table{height:fit-content}），
    这里把它拉成 flex 子项填满 .block，表头固定、body 区滚动。 */

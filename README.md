@@ -39,7 +39,7 @@ LYYS Panel 面向单台 Linux 服务器的日常运维，把系统监控、进�
 | AI 助手 | 流式对话（OpenAI 兼容上游，支持 Ollama 等本地模型），思考过程与工具调用按时间顺序呈现；内置面板只读工具与联网检索，配置可在设置页在线修改 |
 | 备份 | 数据库快照列表 / 立即备份 / 下载 / 上传导入 / 删除 / 恢复（重启生效），备份目录与保留份数可配，每日自动备份，可投递 WebDAV 远端（含口令加密） |
 | 面板更新 | 检查 GitHub Release、按架构（x86_64 / aarch64）在线下载替换二进制、内网手动上传旁路 |
-| 告警 | CPU / 内存 / 磁盘阈值规则（滞回防抖）、事件历史、钉钉 / 企业微信 / 飞书 / Telegram / 通用 webhook 通知（失败退避重试、可测试发送） |
+| 告警 | CPU / 内存 / 磁盘阈值规则（滞回防抖）、站点可用性探针（周期探测 URL，连续失败达阈值触发）、事件历史、钉钉 / 企业微信 / 飞书 / Telegram / 通用 webhook 通知（失败退避重试、可测试发送） |
 | 账号 | 多用户 + RBAC（admin / operator / viewer，写操作按等级分派）、在线会话、操作审计日志 |
 | 系统设置 | 仅管理员可改的服务端配置（AI 上游地址 / 密钥 / 模型）与界面预设 |
 
@@ -331,6 +331,7 @@ lyys_panel/
 │   │   ├── tls.rs          HTTPS：自签证书生成 / 正式证书加载
 │   │   ├── monitor.rs      系统指标采集、小时聚合与保留清理
 │   │   ├── alerts.rs       阈值告警规则（滞回状态机）与多渠道通知（失败退避重试）
+│   │   ├── probe.rs        站点可用性探针（周期探测 URL，连续失败达阈值，复用告警渠道通知）
 │   │   ├── backup.rs       数据库备份 / 恢复（VACUUM INTO + 标记重启生效）与备份加密
 │   │   ├── remote.rs       备份远端投递（WebDAV PUT，失败只记日志）
 │   │   ├── update.rs       自更新（GitHub Release 检查 / 下载 / 校验 / 原子替换）
@@ -450,6 +451,7 @@ lyys_panel/
   首次启用站点时面板会在 `http {}` 块插入一行带标记的 include（插入前备份 `nginx.conf`）。
   HTTPS 走自签或上传证书，暂不含 Let's Encrypt 自动签发与续期（PHP-FPM 站点也不在本期范围）；
   静态根目录不要放在 `/tmp` —— nginx.service 带 `PrivateTmp`，会看不到临时目录
+- 站点探针运行态只存内存（重启后重新探测），命中阈值只经通知渠道外发，不写入「告警事件」表
 - `frontend/package.json` 里 `npm run lint` 用的是 eslint 8 的 `--ext` 参数，而仓库只有 eslint 9 依赖、
   也没提交 flat config，该脚本会直接失败；`npm run format` 能跑，但同样没有 Prettier 配置文件，
   会按 prettier 默认风格格式化（当前 `prettier --check` 报 23 个文件不合默认风格）。前端改动靠 `npm run build` 校验

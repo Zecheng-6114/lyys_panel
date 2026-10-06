@@ -21,8 +21,9 @@ mod network;
 mod ops; // 4.3 深度运维：unit 文件查看、SMART 磁盘健康
 mod opservice;
 mod packages;
-mod rprocess;
+mod probe; // 站点可用性探针：周期探测被监控 URL，连续失败达阈值才告警（应用层可用性）
 mod remote; // 备份远端投递：把本地备份复制到 WebDAV 异地存储（可选加密）
+mod rprocess; // 进程查询：/proc 解析（进程详情、cgroup 归属）
 mod security; // 安全入口：访问路径前缀 + IP 白名单，登录前的访问闸门
 mod terminal; // 交互式终端：浏览器 ↔ 本机 PTY 的双向 WebSocket 桥（仅 admin）
 mod timers; // systemd 定时器：计划任务的另一种承载 + journald 执行日志
@@ -66,6 +67,8 @@ pub struct AppState {
     /// P2-1 作业运行时索引：句柄用于取消、广播通道用于 SSE 推送。
     /// 作业的事实来源是 jobs 表，这里只是进程内索引，重启即清空。
     pub jobs: Arc<jobs::JobHub>,
+    /// 站点探针运行态：后台探针任务推进，接口从这里读（std 锁，临界区极短且不跨 await）
+    pub probes: Arc<std::sync::Mutex<probe::ProbeEngine>>,
 }
 
 #[tokio::main]
@@ -158,10 +161,13 @@ async fn main() -> anyhow::Result<()> {
         data_dir: Arc::new(data_dir),
         db_path: Arc::new(db_path),
         jobs: Arc::new(jobs::JobHub::new()),
+        probes: Arc::new(std::sync::Mutex::new(probe::ProbeEngine::default())),
     };
 
     // 启动后台监控采样任务
     monitor::spawn_sampler(state.clone());
+    // 站点可用性探针：独立周期（60s），与 2s 的主机采样互不干扰
+    probe::spawn_prober(state.clone());
     // 容器列表的后台采样：CLI 每次 fork 都要 ~170ms，不能让实例页每请求付一遍
     instances::spawn_container_sampler();
 
