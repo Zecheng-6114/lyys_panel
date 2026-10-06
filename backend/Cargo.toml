@@ -46,6 +46,9 @@ futures-util = "0.3"
 # P1-2 自更新：下载产物的 sha256 校验。直接用 ring —— 它已作为 rustls 的加密
 # 后端在依赖树里（reqwest/rustls 拉进来），显式声明不引入任何新代码体积。
 ring = "0.17"
+# 交互式终端：openpty / ioctl(TIOCSCTTY/TIOCSWINSZ) 等 PTY 系统调用。
+# libc 同样已在依赖树里（rusqlite 等间接引入），显式声明不新增代码体积。
+libc = "0.2"
 
 
 [profile.release]

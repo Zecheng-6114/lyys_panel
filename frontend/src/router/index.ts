@@ -78,6 +78,13 @@ const routes: RouteRecordRaw[] = [
         component: () => import("../views/Sessions.vue"),
       },
       {
+        // 交互式终端：等价于任意命令执行，仅 admin
+        path: "terminal",
+        name: "terminal",
+        component: () => import("../views/Terminal.vue"),
+        meta: { adminOnly: true },
+      },
+      {
         // 2.2 账号管理：仅 admin
         path: "users",
         name: "users",

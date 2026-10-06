@@ -2228,8 +2228,8 @@ struct LogStreamQuery {
 /// WebSocket 日志流的手动鉴权：与 AuthUser 提取器同一套口径
 /// （token 校验 → 吊销名单 → 会话存在 → 账号存在 → 首登改密闸门），
 /// 只是认证载体从 Header 换成了查询串。任意失败一律拒绝升级。
-/// 4.5 会话 WS 同样复用此函数（故 pub(crate)）。
-pub(crate) async fn ws_auth(state: &AppState, token: &str) -> Result<(), ApiError> {
+/// 成功时返回该账号的角色，供调用方做更细的权限判定（如终端仅限 admin）。
+async fn ws_auth(state: &AppState, token: &str) -> Result<String, ApiError> {
     let claims = auth::verify_token(&state.jwt_secret, token)
         .map_err(|_| ApiError::unauthorized("登录已过期，请重新登录"))?;
     if state.revocations.is_revoked(&claims.jti).await {
@@ -2246,7 +2246,8 @@ pub(crate) async fn ws_auth(state: &AppState, token: &str) -> Result<(), ApiErro
     if user.2 {
         return Err(ApiError::forbidden("请先修改初始密码"));
     }
-    Ok(())
+    // user = (用户名, 角色, 是否强改密)；角色回给调用方做权限判定
+    Ok(user.1)
 }
 
 async fn docker_logstream_ws(
@@ -2265,6 +2266,32 @@ async fn docker_logstream_ws(
     // 初始回看行数限制在 1..=1000，防超大查询拖垮 docker daemon
     let tail = q.tail.unwrap_or(200).clamp(1, 1000);
     Ok(ws.on_upgrade(move |socket| crate::ops::container_log_stream(socket, id, tail)))
+}
+
+#[derive(Deserialize)]
+struct TerminalQuery {
+    token: String,
+    /// 前端上报的终端尺寸（列/行），缺省用 80×24
+    cols: Option<u16>,
+    rows: Option<u16>,
+}
+
+/// 交互式终端（WebSocket）：仅 admin。鉴权与日志流同口径（token 走查询串）。
+/// 之所以单独限制角色：终端是任意命令执行，权限级别与电源操作对齐，不下放给
+/// viewer/operator。
+async fn terminal_ws(
+    State(state): State<AppState>,
+    Query(q): Query<TerminalQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    let role = ws_auth(&state, &q.token).await?;
+    if role != "admin" {
+        return Err(ApiError::forbidden("终端功能仅限管理员"));
+    }
+    // 尺寸按合理区间夹紧，防止超大行列数拖垮前端渲染与内核
+    let cols = q.cols.unwrap_or(80).clamp(20, 500);
+    let rows = q.rows.unwrap_or(24).clamp(5, 300);
+    Ok(ws.on_upgrade(move |socket| crate::terminal::bridge(socket, cols, rows)))
 }
 
 // ---------- 3.1 备份管理（admin）----------
@@ -2934,6 +2961,8 @@ pub fn router(state: AppState) -> Router {
         // 4.3 容器日志流（WebSocket）。浏览器 WS 无法带 Authorization 头，
         // token 走查询串，handler 内做与 AuthUser 同口径的手动鉴权
         .route("/docker/logstream", get(docker_logstream_ws))
+        // 交互式终端（WebSocket，仅 admin）：同样是查询串 token + 手动鉴权
+        .route("/terminal", get(terminal_ws))
         // 4.2 仪表盘自定义：GET 读取（全员）、POST 保存（admin，白名单校验）
         .route(
             "/dashboard-config",

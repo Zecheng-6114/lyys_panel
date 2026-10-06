@@ -1006,6 +1006,7 @@ dependencies = [
  "axum-server",
  "futures-util",
  "jsonwebtoken",
+ "libc",
  "mime_guess",
  "r2d2",
  "r2d2_sqlite",

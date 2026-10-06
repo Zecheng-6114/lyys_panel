@@ -14,6 +14,7 @@
           <el-menu-item-group v-if="!g.admin || auth.isAdmin()" :title="g.label">
             <el-menu-item
               v-for="item in g.items"
+              v-show="!item.admin || auth.isAdmin()"
               :key="item.path"
               :index="item.path"
               :style="{ animationDelay: `${(navOrder.get(item.path) ?? 0) * 18}ms` }"
@@ -132,6 +133,7 @@ import {
   Ship,
   Tools,
   ChatLineRound,
+  Monitor,
   User,
   CopyDocument,
   Bell,
@@ -206,6 +208,8 @@ interface NavItem {
   path: string;
   title: string;
   icon: Component;
+  /** 该项仅 admin 可见：用于在非 admin 分组里混入个别管理员项（如终端） */
+  admin?: boolean;
 }
 interface NavGroup {
   label: string;
@@ -252,6 +256,8 @@ const navGroups: NavGroup[] = [
     items: [
       { path: "/ops", title: "深度运维", icon: Tools },
       { path: "/sessions", title: "在线会话", icon: ChatLineRound },
+      // 终端是任意命令执行，权限与电源操作对齐：分组可见但菜单项单独限 admin
+      { path: "/terminal", title: "终端", icon: Monitor, admin: true },
     ],
   },
   {
