@@ -117,6 +117,7 @@ import { useRoute, useRouter } from "vue-router";
 import http from "../api/http";
 import AiBall from "../components/AiBall.vue";
 import { useThemeStore } from "../stores/theme";
+import { useFontStore } from "../stores/font";
 import { useAuthStore } from "../stores/auth";
 import { useJobsStore } from "../stores/jobs";
 import {
@@ -142,13 +143,15 @@ import {
 const route = useRoute();
 const router = useRouter();
 const theme = useThemeStore();
+const font = useFontStore();
 const auth = useAuthStore();
 const jobWatch = useJobsStore();
 const appVersion = __APP_VERSION__;
 
-// 进入布局（已登录）时拉取服务端主题定制配置与当前账号信息（角色/强制改密）
+// 进入布局（已登录）时拉取服务端主题/字体定制配置与当前账号信息（角色/强制改密）
 onMounted(async () => {
   theme.load();
+  font.load();
   // 服务端可能已经有作业在跑（提交完刷新过页面）：补登记，跑完照样通知
   void jobWatch.adoptRunning();
   try {

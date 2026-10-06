@@ -4,7 +4,7 @@ use axum::extract::{
 };
 // 4.3 容器日志流：WebSocket 升级提取器
 use axum::extract::ws::WebSocketUpgrade;
-use axum::http::{header, request::Parts, StatusCode};
+use axum::http::{header, request::Parts, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 // AI 助手功能暂时停用（见文件末尾 "AI 助手已停用" 说明），以下导入仅 AI 段使用
 use axum::response::{IntoResponse, Response};
@@ -1605,6 +1605,292 @@ async fn theme_set(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+// ---------- 界面字体（可选，不随包分发） ----------
+
+/// settings 表中界面字体配置的键名（值为前端序列化的 JSON 字符串）。
+///
+/// 面板不再内嵌第三方字体：CJK 全字库一个文件就近 8MB，多字重会让二进制凭空
+/// 多出几十 MB，而它只在用户想要统一界面字体时才有意义。默认走系统字体栈，
+/// 需要的用户在设置页自行上传字体文件（并自行遵守该字体的许可协议）。
+const FONT_KEY: &str = "ui_font";
+/// 单个字体文件上限。CJK 全字库 TTF 常见 8~15MB，留足余量取 24MB。
+const FONT_MAX_BYTES: usize = 24 * 1024 * 1024;
+/// 自定义字体在数据目录下的子目录名
+const FONT_DIR: &str = "fonts";
+
+/// 字体文件名白名单：`<16 位小写十六进制>.<扩展名>`。
+///
+/// 文件名一律由服务端在入库时生成（见 [`font_upload`]），这里只做复核。
+/// 关键在于文件名里不含 `.`（除扩展名外）与路径分隔符，于是
+/// `data_dir/fonts/<name>` 无论如何都拼不出 `..` 或绝对路径。
+fn valid_font_file(name: &str) -> bool {
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some(v) => v,
+        None => return false,
+    };
+    stem.len() == 16
+        && stem
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && matches!(ext, "ttf" | "otf" | "woff" | "woff2")
+}
+
+/// 字体名白名单：这个名字会被拼进注入页面的 `font-family`。引号/分号/花括号/
+/// 反斜杠/圆括号/逗号/控制字符可把字符串闭合出去构成样式注入，一律拒绝
+/// （与主题的 validate_theme 同一套思路，双端各校验一次）。
+fn valid_font_family(s: &str) -> bool {
+    if s.is_empty() || s.chars().count() > 64 {
+        return false;
+    }
+    !s.chars().any(|c| {
+        matches!(c, '"' | '\'' | ';' | '{' | '}' | '\\' | '(' | ')' | ',') || (c as u32) < 0x20
+    })
+}
+
+/// 字体配置字段白名单校验。允许字段：version / family / faces[{weight,file}]。
+/// 非 null 的配置必须同时给出 family 与非空 faces —— 缺任何一半，前端都拼不出
+/// 可用的 @font-face，存下去只会得到一份「设置了但没生效」的配置。
+fn validate_font(cfg: &serde_json::Value) -> Result<(), String> {
+    let obj = cfg.as_object().ok_or_else(|| "字体配置必须是对象".to_string())?;
+    for (k, v) in obj {
+        match k.as_str() {
+            "version" => {
+                if v.as_number().is_none() {
+                    return Err("version 必须是数字".into());
+                }
+            }
+            "family" => {
+                let s = v.as_str().ok_or("family 必须是字符串")?;
+                if !valid_font_family(s) {
+                    return Err("字体名称含不允许的字符或为空（上限 64 字符）".into());
+                }
+            }
+            "faces" => {
+                let arr = v.as_array().ok_or("faces 必须是数组")?;
+                if arr.len() > 10 {
+                    return Err("字重文件过多（上限 10 个）".into());
+                }
+                for f in arr {
+                    let fo = f.as_object().ok_or("faces 元素必须是对象")?;
+                    for key in fo.keys() {
+                        if !matches!(key.as_str(), "weight" | "file") {
+                            return Err(format!("faces 含未知字段：{key}"));
+                        }
+                    }
+                    let w = fo
+                        .get("weight")
+                        .and_then(|x| x.as_u64())
+                        .ok_or("weight 必须是整数")?;
+                    if !(100..=900).contains(&w) {
+                        return Err("weight 必须在 100..900 之间".into());
+                    }
+                    let file = fo
+                        .get("file")
+                        .and_then(|x| x.as_str())
+                        .ok_or("file 必须是字符串")?;
+                    if !valid_font_file(file) {
+                        return Err("字体文件名不合法".into());
+                    }
+                }
+            }
+            _ => return Err(format!("未知字段：{k}")),
+        }
+    }
+    let faces_ok = obj
+        .get("faces")
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| !a.is_empty());
+    if obj.get("family").is_none() || !faces_ok {
+        return Err("字体配置必须包含 family 与非空的 faces".into());
+    }
+    Ok(())
+}
+
+/// 取出配置引用的字体文件名（用于存在性校验与旧文件清理）；null/损坏返回空表
+fn font_files(cfg: &serde_json::Value) -> Vec<String> {
+    cfg.get("faces")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|f| f.get("file").and_then(|x| x.as_str()).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 按文件头判定字体类型。只认扩展名白名单里的四种；识别不出的一律拒绝，
+/// 避免把任意文件塞进字体目录后由公开路由 /fonts/custom/* 原样吐出去。
+fn detect_font_ext(b: &[u8]) -> Option<&'static str> {
+    match b {
+        [0x77, 0x4F, 0x46, 0x32, ..] => Some("woff2"),
+        [0x77, 0x4F, 0x46, 0x46, ..] => Some("woff"),
+        [0x4F, 0x54, 0x54, 0x4F, ..] => Some("otf"),
+        // 0x00010000 与 "true"（Apple 版）都是 TTF 的合法文件头
+        [0x00, 0x01, 0x00, 0x00, ..] | [0x74, 0x72, 0x75, 0x65, ..] => Some("ttf"),
+        _ => None,
+    }
+}
+
+/// 删除字体目录中不再被配置引用的文件。上传与配置保存是两个动作，用户换字体
+/// 时旧文件不会自动消失；不清理就会在数据目录里越攒越多（那台机器可能只有
+/// 1GB 盘）。目录不存在视为无可清理，不报错。
+async fn prune_fonts(dir: &std::path::Path, keep: &[String]) -> anyhow::Result<()> {
+    let mut rd = match tokio::fs::read_dir(dir).await {
+        Ok(rd) => rd,
+        Err(_) => return Ok(()),
+    };
+    while let Some(entry) = rd.next_entry().await? {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !keep.iter().any(|k| k == &name)
+            && let Err(e) = tokio::fs::remove_file(entry.path()).await
+        {
+            tracing::warn!("删除未引用字体文件 {name} 失败：{e}");
+        }
+    }
+    Ok(())
+}
+
+/// 读取字体配置；未定制过（或用系统字体）时返回 null
+async fn font_get(
+    State(state): State<AppState>,
+    _user: AuthUser,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let raw = state.db.get_setting_async(FONT_KEY).await?;
+    let value = match raw {
+        Some(s) => {
+            let v =
+                serde_json::from_str::<serde_json::Value>(&s).unwrap_or(serde_json::Value::Null);
+            if !v.is_null() && validate_font(&v).is_err() {
+                tracing::warn!("忽略库中未通过安全校验的字体配置");
+                serde_json::Value::Null
+            } else {
+                v
+            }
+        }
+        None => serde_json::Value::Null,
+    };
+    Ok(Json(serde_json::json!({ "config": value })))
+}
+
+/// 保存字体配置（admin）。传 null 表示清除自定义字体、恢复系统字体，
+/// 同时会把已上传的字体文件一并清掉。
+async fn font_set(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let text =
+        String::from_utf8(body.to_vec()).map_err(|_| ApiError::bad("字体配置必须是 UTF-8 JSON"))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|_| ApiError::bad("字体配置 JSON 无法解析"))?;
+    let dir = state.data_dir.join(FONT_DIR);
+    if !value.is_null() {
+        validate_font(&value).map_err(ApiError::bad)?;
+        // 引用的文件必须都已落盘，否则存下去就是一份永远加载不出字体的配置
+        for file in font_files(&value) {
+            if tokio::fs::metadata(dir.join(&file)).await.is_err() {
+                return Err(ApiError::bad(format!("字体文件 {file} 不存在，请重新上传")));
+            }
+        }
+    }
+    let stored = if value.is_null() { "" } else { &value.to_string() };
+    state.db.set_setting_async(FONT_KEY, stored).await?;
+    // 落库成功后再清理，避免配置保存失败却先删了文件
+    let keep = font_files(&value);
+    if let Err(e) = prune_fonts(&dir, &keep).await {
+        tracing::warn!("清理未引用字体文件失败：{e:#}");
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// 上传单个字重文件：multipart 字段 `file`。
+///
+/// 文件名取内容 sha256 前 16 位、扩展名由文件头判定（用户给的文件名不可信）。
+/// 内容相同即同名，重复上传天然去重；文件名与内容绑定，于是
+/// [`font_serve`] 可以放心用 immutable 强缓存。
+async fn font_upload(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+    mut mp: Multipart,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Some(field) = mp.next_field().await.map_err(|e| {
+        tracing::warn!("字体上传解析失败：{e}");
+        ApiError::bad("上传请求格式错误")
+    })? {
+        if field.name() == Some("file") {
+            bytes = field
+                .bytes()
+                .await
+                .map_err(|e| {
+                    tracing::warn!("字体上传字段 file 读取失败：{e}");
+                    ApiError::bad("上传数据读取失败")
+                })?
+                .to_vec();
+        }
+    }
+    if bytes.is_empty() {
+        return Err(ApiError::bad("缺少 file 字段"));
+    }
+    if bytes.len() > FONT_MAX_BYTES {
+        return Err(ApiError::bad(format!(
+            "字体文件过大（上限 {}MB）",
+            FONT_MAX_BYTES / 1024 / 1024
+        )));
+    }
+    let ext = detect_font_ext(&bytes)
+        .ok_or_else(|| ApiError::bad("不是可识别的字体文件（支持 ttf/otf/woff/woff2）"))?;
+    let digest = ring::digest::digest(&ring::digest::SHA256, &bytes);
+    let mut hex = String::with_capacity(16);
+    for b in &digest.as_ref()[..8] {
+        hex.push_str(&format!("{b:02x}"));
+    }
+    let name = format!("{hex}.{ext}");
+    let dir = state.data_dir.join(FONT_DIR);
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| {
+        tracing::error!("创建字体目录失败：{e:#}");
+        ApiError::internal()
+    })?;
+    tokio::fs::write(dir.join(&name), &bytes).await.map_err(|e| {
+        tracing::error!("写入字体文件失败：{e:#}");
+        ApiError::internal()
+    })?;
+    Ok(Json(
+        serde_json::json!({ "ok": true, "file": name, "size": bytes.len() }),
+    ))
+}
+
+/// 自定义字体文件服务：@font-face 的请求由浏览器直接发出，带不上 Authorization
+/// 头，所以这条路由挂在鉴权之外（与 /assets/* 同一暴露面）。文件名是内容哈希且
+/// 过了白名单复核 —— 既不敏感，也猜不到。
+async fn font_serve(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+    if !valid_font_file(&name) {
+        return (StatusCode::NOT_FOUND, "字体不存在").into_response();
+    }
+    match tokio::fs::read(state.data_dir.join(FONT_DIR).join(&name)).await {
+        Ok(bytes) => {
+            let mime = mime_guess::from_path(&name).first_or_octet_stream();
+            (
+                [
+                    (
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_str(mime.as_ref()).unwrap_or_else(|_| {
+                            HeaderValue::from_static("application/octet-stream")
+                        }),
+                    ),
+                    (
+                        header::CACHE_CONTROL,
+                        HeaderValue::from_static("public, max-age=31536000, immutable"),
+                    ),
+                ],
+                bytes,
+            )
+                .into_response()
+        }
+        Err(_) => (StatusCode::NOT_FOUND, "字体不存在").into_response(),
+    }
+}
+
 // ---------- 4.2 仪表盘自定义 ----------
 
 /// settings 表中仪表盘配置的键名
@@ -2669,6 +2955,13 @@ pub fn router(state: AppState) -> Router {
                 .post(theme_set)
                 .layer(DefaultBodyLimit::max(THEME_MAX_BYTES)),
         )
+        // 界面字体：GET 读取（全员）、POST 保存（admin）。上传单独一条 ——
+        // 字体文件可达 20MB+，需放宽默认 2MB 的请求体上限
+        .route("/font", get(font_get).post(font_set))
+        .route(
+            "/font/upload",
+            post(font_upload).layer(DefaultBodyLimit::max(FONT_MAX_BYTES)),
+        )
         // 3.1 备份管理（admin 专属）
         .route(
             "/backups",
@@ -2704,6 +2997,8 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/api/login", post(login))
+        // 自定义字体文件：@font-face 请求带不上 Authorization 头，必须挂在鉴权之外
+        .route("/fonts/custom/{name}", get(font_serve))
         .nest("/api", protected)
         .fallback(crate::embed::handler)
         .with_state(state)

@@ -48,7 +48,7 @@ LYYS Panel 面向单台 Linux 服务器的日常运维，把系统监控、进�
 - 实时监控快照与历史趋势（小时聚合 + 保留策略）
 - 在线自更新（GitHub Release 下载 → 校验 → 原子替换 → 重启生效）
 - AI 流式对话，支持接入本地 Ollama 模型
-- 界面使用 HarmonyOS Sans SC 字体（表格数字保证数据列对齐）
+- 界面字体可自配：默认系统字体，设置页可上传自有字体文件（对所有设备生效）
 - 所有数据落本地 SQLite，无云端依赖
 
 ## 安全说明
@@ -67,7 +67,7 @@ LYYS Panel 面向单台 Linux 服务器的日常运维，把系统监控、进�
 ## 技术栈
 
 - **后端**：Rust 2024 edition · Axum 0.8 · Tokio · rusqlite（bundled，无外部 SQLite 依赖）· JWT + Argon2 · rustls（TLS）
-- **前端**：Vue 3 · TypeScript · Vite 5 · Element Plus · Pinia · ECharts · HarmonyOS Sans SC
+- **前端**：Vue 3 · TypeScript · Vite 5 · Element Plus · Pinia · ECharts
 - **前端嵌入**：`rust-embed` 编译期把 `frontend/dist` 打入二进制
 
 ## 快速开始
@@ -348,7 +348,6 @@ lyys_panel/
 │   ├── rust-toolchain.toml
 │   └── migrations/         SQL 迁移脚本（0001…0010，按版本号顺序应用，事务包裹）
 ├── frontend/           Vue 3 前端
-│   ├── public/fonts/       HarmonyOS Sans SC 原样 TTF（含许可协议）
 │   ├── index.html          构建入口（vite 构建产物根目录）
 │   ├── tsconfig.json
 │   ├── vite.config.ts
@@ -416,7 +415,7 @@ lyys_panel/
   是为了避开 teleport 到 body 的 Element Plus 浮层。
 - **圆角基准**：`theme.css` 中 `--radius` 默认 6px，全站圆角（含 Element Plus 各圆角变量与侧边栏内凹）都引用它；主题配置可自带 `radius` 覆盖（高对比预设就是 0），设置页也能单独调。新增组件一律引用该变量，不要写死数值。
 - **主题定制**：`themes/presets.ts` 内置浅色 / 深色 / 柔和纸色 / 高对比 4 套预设，设置页可切换预设并自定义主色、页面底色、卡片底色、文字色、圆角、阴影开关与背景图（配置存服务端，对所有设备生效）；自定义后层次表达同上，仍靠背景色差而非彩色描边。注意浏览器自动填充的输入框底色由浏览器绘制（暗色下是一层暗黄），不受面板变量控制。
-- **字体**：全站统一 HarmonyOS Sans SC（`--el-font-family` 与 `body` 均引用）；数据展示区（`.mono`、日志、路径栏等）用同一字体并加 `font-variant-numeric: tabular-nums` 保证数字列对齐。字体文件必须**原样分发**（Huawei 协议禁止修改/转格式），新增字重或裁剪均不允许。
+- **字体**：面板不内置任何第三方字体，默认走系统字体栈（`--el-font-family` 与 `body` 均引用）。需要统一界面字体的用户在「设置页 → 界面设置 → 界面字体」自行上传字体文件（存服务端数据目录，对所有设备生效），前端由 `stores/font.ts` 运行时注入 `@font-face` 并覆盖 `--el-font-family` / `--panel-mono`，文件名与字体名双端做白名单校验。数据展示区（`.mono`、日志、路径栏等）沿用同一字体栈并加 `font-variant-numeric: tabular-nums` 保证数字列对齐 —— 自选字体若不含 tnum 特性，数字列会参差。上传前请自行确认该字体的许可协议允许此用途。
 - 按钮与输入框并排时不要给按钮写死高度（会变成正方形），也不要给文本域写死 `rows`；让容器 `align-items: stretch`，按钮跟随输入框高度。
 - 圆角容器若内部子元素带背景（表头、hover 行、加载遮罩等），**必须配 `overflow: hidden`**，否则背景会填满四角、把圆角盖成直角。
 
@@ -462,9 +461,8 @@ lyys_panel/
 
 本项目采用 [GPL-3.0](https://www.gnu.org/licenses/gpl-3.0.html) 许可证。
 
-### 第三方字体声明
+### 第三方字体
 
-本面板界面使用 **HarmonyOS Sans** 字体（Copyright 2021 Huawei Device Co., Ltd.），
-按 [HarmonyOS Sans Fonts License Agreement](frontend/public/fonts/HarmonyOS_Sans_SC/LICENSE.txt)
-以**未经修改的原样文件**内嵌分发。该字体不属于本项目 GPL-3.0 授权范围，其使用
-条款以上述协议为准。
+本面板不内置任何第三方字体。若你通过设置页上传字体文件（例如 HarmonyOS Sans，
+Copyright 2021 Huawei Device Co., Ltd.），该字体不属于本项目 GPL-3.0 授权范围，
+其使用条款以字体自身的许可协议为准，请自行确认后再上传。

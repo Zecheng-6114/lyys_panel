@@ -10,56 +10,17 @@
    投影也只许用 --panel-card-shadow 这一个变量，别在各页面里抄同一串字面量。 */
 
 
-/* HarmonyOS Sans SC：按许可协议以【原样 TTF】内嵌分发（协议第 2 条禁止
-   任何修改/格式转换，LICENSE.txt 随字体目录一同保留）。六字重全量声明。 */
-@font-face {
-  font-family: "HarmonyOS Sans SC";
-  font-weight: 100;
-  font-style: normal;
-  font-display: swap;
-  src: url("/fonts/HarmonyOS_Sans_SC/HarmonyOS_Sans_SC_Thin.ttf") format("truetype");
-}
-@font-face {
-  font-family: "HarmonyOS Sans SC";
-  font-weight: 300;
-  font-style: normal;
-  font-display: swap;
-  src: url("/fonts/HarmonyOS_Sans_SC/HarmonyOS_Sans_SC_Light.ttf") format("truetype");
-}
-@font-face {
-  font-family: "HarmonyOS Sans SC";
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-  src: url("/fonts/HarmonyOS_Sans_SC/HarmonyOS_Sans_SC_Regular.ttf") format("truetype");
-}
-@font-face {
-  font-family: "HarmonyOS Sans SC";
-  font-weight: 500;
-  font-style: normal;
-  font-display: swap;
-  src: url("/fonts/HarmonyOS_Sans_SC/HarmonyOS_Sans_SC_Medium.ttf") format("truetype");
-}
-@font-face {
-  font-family: "HarmonyOS Sans SC";
-  font-weight: 700;
-  font-style: normal;
-  font-display: swap;
-  src: url("/fonts/HarmonyOS_Sans_SC/HarmonyOS_Sans_SC_Bold.ttf") format("truetype");
-}
-@font-face {
-  font-family: "HarmonyOS Sans SC";
-  font-weight: 900;
-  font-style: normal;
-  font-display: swap;
-  src: url("/fonts/HarmonyOS_Sans_SC/HarmonyOS_Sans_SC_Black.ttf") format("truetype");
-}
+/* 界面字体：面板不再内嵌第三方字体 —— CJK 全字库单文件就近 8MB，多字重会让
+   二进制凭空多出几十 MB，而它只在用户想统一界面字体时才有意义。默认走系统
+   字体栈；需要统一字体的用户自行获取字体文件后在设置页上传，
+   @font-face 与 --el-font-family / --panel-mono 由 stores/font.ts 运行时注入。 */
 
 :root {
-  /* 全局字体：鸿蒙字体置于栈首，EP 组件字体变量同步覆盖 */
+  /* 全局字体：系统字体栈；配置了自定义字体时由 stores/font.ts 覆盖此变量，
+     Element Plus 组件的字体变量同步跟随 */
   --el-font-family:
-    "HarmonyOS Sans SC", -apple-system, "Segoe UI", Roboto, "PingFang SC",
-    "Microsoft YaHei", sans-serif;
+    -apple-system, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei",
+    sans-serif;
   /* 主色改为纯黑 */
   --el-color-primary: #111111;
   --el-color-primary-light-3: #444444;
@@ -258,11 +219,11 @@
      历史别名（.el-card / Dashboard 的 .card / 登录卡 / AI 面板内各处写的是这个名字）。
      浮层与模态请改用 --panel-shadow-2 / -3。 */
 
-  /* 机器数据字体：统一用鸿蒙字体 + 表格数字（tnum）。经实测该字体
-     0-9 字身宽全部一致（570 单位）且带 tnum 特性，数字列天然对齐，
-     不再需要独立等宽栈。 */
-  --panel-mono: "HarmonyOS Sans SC", -apple-system, "Segoe UI", Roboto,
-    "PingFang SC", "Microsoft YaHei", sans-serif;
+  /* 机器数据字体：与全局同栈，靠表格数字（tnum）让数字列对齐。面板不再内置
+     鸿蒙字体；自传字体若不含 tnum 特性，数字列会参差 —— 换字体时要留意。
+     .mono / 日志框 / 路径栏都吃这一栈。 */
+  --panel-mono: -apple-system, "Segoe UI", Roboto, "PingFang SC",
+    "Microsoft YaHei", sans-serif;
   /* 工具栏占位：单行时 = 按钮 32 + 下边距 12。列表页都在表格上方挂一条
      .toolbar，算表格可用高度时它必须扣掉（见下）。
      🔴 踩过：--panel-table-height 早先漏算这一块，表格比可用空间高出 32px，

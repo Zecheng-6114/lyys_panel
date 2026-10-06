@@ -187,6 +187,71 @@
             </div>
           </div>
         </div>
+
+        <div class="card">
+          <div class="card-title">界面字体</div>
+          <div class="card-sub">
+            默认使用系统字体。面板不再内置第三方字体（中文字体单文件就近 8MB，
+            多字重会显著增大程序体积）。如需统一界面字体，请自行获取字体文件
+            —— 并遵守该字体自身的许可协议 —— 在此上传：文件保存在服务器上，
+            仅本面板使用。
+          </div>
+
+          <div class="form">
+            <div class="row">
+              <label>字体名称</label>
+              <el-input
+                v-model="fontDraft.family"
+                placeholder="如 HarmonyOS Sans SC（须与字体内部名称一致）"
+                maxlength="64"
+              />
+            </div>
+
+            <div class="row">
+              <label>添加字重</label>
+              <div class="btns">
+                <el-select v-model="fontWeight" style="width: 110px">
+                  <el-option v-for="w in FONT_WEIGHTS" :key="w" :label="`${w}`" :value="w" />
+                </el-select>
+                <el-button size="small" :loading="fontUploading" @click="pickFont">
+                  选择字体文件
+                </el-button>
+                <input
+                  ref="fontInput"
+                  type="file"
+                  accept=".ttf,.otf,.woff,.woff2"
+                  class="hidden-file"
+                  @change="onFontFile"
+                />
+              </div>
+            </div>
+
+            <div v-if="fontDraft.faces.length" class="face-list">
+              <div v-for="f in fontDraft.faces" :key="f.weight" class="face-row">
+                <span class="face-weight">{{ f.weight }}</span>
+                <span class="face-file">{{ f.file }}</span>
+                <el-button link type="danger" size="small" @click="removeFace(f.weight)">
+                  移除
+                </el-button>
+              </div>
+            </div>
+            <div v-else class="hint">尚未上传字体文件。至少上传一个字重才能保存。</div>
+
+            <div class="row">
+              <label></label>
+              <div class="btns">
+                <el-button type="primary" :loading="fontSaving" @click="saveFont">
+                  保存字体
+                </el-button>
+                <el-button :disabled="fontSaving" @click="resetFont">恢复系统字体</el-button>
+              </div>
+            </div>
+            <div class="hint">
+              字重按 CSS 数值对应文件（400 常规 / 500 中等 / 700 粗体）；同一字重重复上传
+              会覆盖。保存后对所有设备生效。「恢复系统字体」会一并删除已上传的字体文件。
+            </div>
+          </div>
+        </div>
       </el-tab-pane>
     </el-tabs>
   </div>
@@ -197,6 +262,7 @@ import { computed, onMounted, reactive, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import http from "../api/http";
 import { isDarkTheme, useThemeStore, type ThemeColors, type ThemeConfig } from "../stores/theme";
+import { useFontStore, type FontFace } from "../stores/font";
 import { PRESETS } from "../themes/presets";
 import { monetFromImage } from "../themes/monet";
 
@@ -611,6 +677,109 @@ async function resetDefault() {
   }
 }
 
+/* ---------------- 界面设置：字体 ---------------- */
+
+const font = useFontStore();
+
+/// 上传时可选的 CSS 字重
+const FONT_WEIGHTS = [100, 200, 300, 400, 500, 600, 700, 800, 900];
+
+interface FontDraft {
+  family: string;
+  faces: FontFace[];
+}
+
+const fontDraft = reactive<FontDraft>({ family: "", faces: [] });
+const fontWeight = ref(400);
+const fontUploading = ref(false);
+const fontSaving = ref(false);
+const fontInput = ref<HTMLInputElement>();
+
+// 字体配置由 AppLayout 异步拉取，到位后同步进编辑态
+watch(
+  () => font.config,
+  (cfg) => {
+    fontDraft.family = cfg?.family ?? "";
+    fontDraft.faces = (cfg?.faces ?? [])
+      .map((f) => ({ ...f }))
+      .sort((a, b) => a.weight - b.weight);
+  },
+  { immediate: true },
+);
+
+function pickFont() {
+  fontInput.value?.click();
+}
+
+function sortFaces(faces: FontFace[]): FontFace[] {
+  return faces.sort((a, b) => a.weight - b.weight);
+}
+
+async function onFontFile(e: Event) {
+  const input = e.target as HTMLInputElement;
+  const file = input.files?.[0];
+  // 清空 value，否则连续选同一个文件不会再触发 change
+  input.value = "";
+  if (!file) return;
+  fontUploading.value = true;
+  try {
+    const name = await font.upload(file);
+    // 同一字重覆盖：一个字重只留一个文件
+    const faces = fontDraft.faces.filter((f) => f.weight !== fontWeight.value);
+    faces.push({ weight: fontWeight.value, file: name });
+    fontDraft.faces = sortFaces(faces);
+    // 首次上传且没填名称时，用文件名兜个底（用户可改）
+    if (!fontDraft.family.trim()) {
+      fontDraft.family = file.name.replace(/\.(ttf|otf|woff2?)$/i, "");
+    }
+    ElMessage.success(`已上传：${name}`);
+  } catch (err: unknown) {
+    const e2 = err as { response?: { data?: { error?: string } } };
+    ElMessage.error(e2.response?.data?.error ?? "上传失败");
+  } finally {
+    fontUploading.value = false;
+  }
+}
+
+function removeFace(weight: number) {
+  fontDraft.faces = fontDraft.faces.filter((f) => f.weight !== weight);
+}
+
+async function saveFont() {
+  const family = fontDraft.family.trim();
+  if (!family) {
+    ElMessage.warning("请填写字体名称");
+    return;
+  }
+  if (!fontDraft.faces.length) {
+    ElMessage.warning("请至少上传一个字重文件");
+    return;
+  }
+  fontSaving.value = true;
+  try {
+    await font.save({ version: 1, family, faces: fontDraft.faces });
+    ElMessage.success("字体已保存并对所有设备生效");
+  } catch (e: unknown) {
+    const err = e as { response?: { data?: { error?: string } } };
+    ElMessage.error(err.response?.data?.error ?? "保存失败");
+  } finally {
+    fontSaving.value = false;
+  }
+}
+
+async function resetFont() {
+  fontSaving.value = true;
+  try {
+    await font.save(null);
+    ElMessage.success("已恢复系统字体");
+  } catch (e: unknown) {
+    const err = e as { response?: { data?: { error?: string } } };
+    ElMessage.error(err.response?.data?.error ?? "操作失败");
+  } finally {
+    fontSaving.value = false;
+  }
+}
+
 onMounted(() => {
   load().catch(() => ElMessage.error("配置加载失败"));
 });
@@ -687,5 +856,35 @@ onMounted(() => {
 }
 .hidden-file {
   display: none;
+}
+/* 已上传的字重文件列表 */
+.face-list {
+  max-width: 480px;
+  margin-bottom: 12px;
+}
+.face-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 10px;
+  border-radius: var(--radius, 6px);
+  background: var(--el-fill-color-light);
+  font-size: 12px;
+}
+.face-row + .face-row {
+  margin-top: 4px;
+}
+.face-weight {
+  flex: none;
+  width: 40px;
+  color: var(--el-text-color-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.face-file {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--panel-mono);
 }
 </style>
