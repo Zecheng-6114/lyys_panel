@@ -6,11 +6,9 @@ use axum::extract::{
 use axum::extract::ws::WebSocketUpgrade;
 use axum::http::{header, request::Parts, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
-// AI 助手功能暂时停用（见文件末尾 "AI 助手已停用" 说明），以下导入仅 AI 段使用
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-// use std::convert::Infallible;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -385,8 +383,8 @@ async fn login(
     };
     // argon2 校验是 CPU 密集操作（默认参数下约 100ms），必须离开异步工作线程，
     // 否则并发登录会把 tokio 的线程池占满。
-    let password = req.password.clone();
-    let hash_for_verify = row.password_hash.clone();
+    let password = req.password;
+    let hash_for_verify = row.password_hash;
     let verified =
         tokio::task::spawn_blocking(move || auth::verify_password(&password, &hash_for_verify))
             .await
@@ -588,7 +586,7 @@ async fn users_create(
     if state.db.find_user_async(&req.username).await?.is_some() {
         return Err(ApiError::bad("用户名已存在"));
     }
-    let pwd = req.password.clone();
+    let pwd = req.password;
     let (hash, salt) = tokio::task::spawn_blocking(move || auth::hash_password(&pwd))
         .await
         .map_err(|e| {
@@ -1207,10 +1205,9 @@ async fn packages_search(
     _user: AuthUser,
     Query(q): Query<PkgListQuery>,
 ) -> Result<Json<Vec<crate::packages::PackageInfo>>, ApiError> {
-    let kw = q.filter.clone().unwrap_or_default();
-    if kw.is_empty() {
+    let Some(kw) = q.filter.filter(|s| !s.is_empty()) else {
         return Err(ApiError::bad("请输入搜索关键字"));
-    }
+    };
     let limit = q.limit.clamp(1, 2000);
     crate::packages::search(&kw, limit)
         .await
@@ -2308,8 +2305,8 @@ async fn backup_download(
     Query(q): Query<BackupNameQuery>,
 ) -> Result<Response, ApiError> {
     let data_dir = state.data_dir.clone();
-    let name = q.name.clone();
-    let name_for_check = q.name.clone();
+    let name = q.name;
+    let name_for_check = name.clone();
     let path = tokio::task::spawn_blocking(move || {
         crate::backup::resolve_backup(&data_dir, &name_for_check)
     })
@@ -2392,10 +2389,8 @@ async fn update_install(_: RequireRole<2>) -> Result<Json<serde_json::Value>, Ap
         .await
         .map_err(ApiError::file_err)?;
     // P1-2：sha256 由 download_github 一并取回；取不到校验和文件时在上一步就已失败
-    let tag = download.tag.clone();
-    tokio::task::spawn_blocking(move || {
-        crate::update::install_binary(&download.bytes, Some(&download.sha256))
-    })
+    let crate::update::Download { bytes, tag, sha256 } = download;
+    tokio::task::spawn_blocking(move || crate::update::install_binary(&bytes, Some(&sha256)))
     .await
     .map_err(|_| ApiError::internal())?
     .map_err(ApiError::file_err)?;
@@ -2456,8 +2451,7 @@ async fn alerts_rules_set(
         crate::alerts::validate_rule(r).map_err(|e| ApiError::bad(e.to_string()))?;
     }
     let db = state.db.clone();
-    let owned = rules.clone();
-    tokio::task::spawn_blocking(move || crate::alerts::save_rules(&db, &owned))
+    tokio::task::spawn_blocking(move || crate::alerts::save_rules(&db, &rules))
         .await
         .map_err(|_| ApiError::internal())?
         .map_err(ApiError::file_err)?;
@@ -2488,7 +2482,7 @@ async fn alerts_webhook_set(
     SafeJson(req): SafeJson<WebhookReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let db = state.db.clone();
-    let url = req.url.clone();
+    let url = req.url;
     // 校验失败必须以 400 反馈（save_webhook 内部会 validate）
     if let Some(u) = &url
         && !u.is_empty() {

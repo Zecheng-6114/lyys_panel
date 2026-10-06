@@ -8,15 +8,8 @@ pub async fn journal(unit: Option<&str>, lines: u32) -> Result<String> {
     let mut cmd = Command::new("journalctl");
     cmd.args(["--no-pager", "--reverse", "--lines", &lines.to_string()]);
     if let Some(u) = unit {
-        // 单元名安全校验，防止参数注入
-        if u.is_empty()
-            || u.len() > 128
-            || !u
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '@' | '-' | '_'))
-        {
-            anyhow::bail!("非法单元名");
-        }
+        // 单元名安全校验，防止参数注入（与 ops 同一口径）
+        crate::ops::check_unit_name(u)?;
         cmd.arg("-u");
         cmd.arg(u);
     }

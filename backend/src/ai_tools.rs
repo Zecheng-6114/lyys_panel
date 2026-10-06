@@ -14,6 +14,7 @@
 //! 不走 HTTP 回环：省一次序列化/鉴权往返，也不依赖监听地址。
 
 use serde_json::json;
+use std::sync::OnceLock;
 
 use crate::AppState;
 
@@ -43,7 +44,13 @@ pub(super) struct ToolDef {
 ///
 /// 描述里写清「什么时候该用」而不是只写「这是什么」——模型选错工具多半是
 /// 描述只说明了能力、没说明场景。联网类工具额外标注了它查到的是外部资料。
-fn registry() -> Vec<ToolDef> {
+fn registry() -> &'static [ToolDef] {
+    static REGISTRY: OnceLock<Vec<ToolDef>> = OnceLock::new();
+    REGISTRY.get_or_init(build_registry)
+}
+
+/// 构建注册表本体；内容为静态常量，进程内只跑一次（见 [`registry`]）。
+fn build_registry() -> Vec<ToolDef> {
     let no_args = json!({"type": "object", "properties": {}});
     vec![
         ToolDef {
@@ -258,13 +265,13 @@ fn registry() -> Vec<ToolDef> {
 /// 生成上游请求体里的 `tools` 数组（OpenAI function calling 格式）。
 pub(super) fn tools_json() -> serde_json::Value {
     json!(registry()
-        .into_iter()
+        .iter()
         .map(|t| json!({
             "type": "function",
             "function": {
                 "name": t.name,
                 "description": t.description,
-                "parameters": t.parameters,
+                "parameters": t.parameters.clone(),
             }
         }))
         .collect::<Vec<_>>())
@@ -273,7 +280,7 @@ pub(super) fn tools_json() -> serde_json::Value {
 /// 按触发者角色过滤出可用工具名集合（执行时的角色闸门与之一致）。
 fn allowed(name: &str, role: &str) -> bool {
     registry()
-        .into_iter()
+        .iter()
         .find(|t| t.name == name)
         .map(|t| role_level(role) >= t.min_role)
         .unwrap_or(false)

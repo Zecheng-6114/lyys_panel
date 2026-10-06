@@ -259,7 +259,6 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from "vue";
-import { ElMessage } from "element-plus";
 import http from "../api/http";
 import { isDarkTheme, useThemeStore, type ThemeColors, type ThemeConfig } from "../stores/theme";
 import { useFontStore, type FontFace } from "../stores/font";
@@ -351,7 +350,7 @@ async function save() {
     form.key = "";
     await load();
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.message || "保存失败");
+    ElMessage.error(e.response?.data?.error || "保存失败");
   } finally {
     saving.value = false;
   }
@@ -371,7 +370,7 @@ async function clearKey() {
     ElMessage.success("已清除设置页密钥（如配置了环境变量将回退）");
     await load();
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.message || "操作失败");
+    ElMessage.error(e.response?.data?.error || "操作失败");
   } finally {
     saving.value = false;
   }

@@ -137,7 +137,6 @@ import * as echarts from "echarts/core";
 import { LineChart } from "echarts/charts";
 import { GridComponent, LegendComponent, TooltipComponent } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
-import { ElMessage } from "element-plus";
 import http from "../api/http";
 import { useAuthStore } from "../stores/auth";
 import {

@@ -453,19 +453,4 @@ onMounted(async () => {
 .tag-todo {
   color: var(--el-text-color-placeholder);
 }
-
-.output {
-  background: var(--el-bg-color);
-  border-radius: var(--radius);
-  padding: 12px 16px;
-  max-height: 60vh;
-  overflow: auto;
-  font-family: var(--panel-mono);
-  font-variant-numeric: tabular-nums;
-  font-size: 12px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  word-break: break-all;
-  margin: 0;
-}
 </style>

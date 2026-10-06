@@ -491,16 +491,21 @@ fn remove_blocks(html: &str, tags: &[&str]) -> String {
     for tag in tags {
         let open = format!("<{tag}");
         let close = format!("</{tag}>");
-        // 每轮都重新取小写副本：文本中可能同时存在多种写法
+        // 只小写 `from` 之后的未处理后缀：前缀已扫描过且无残留开标签，偏移也不受后续删除影响。
+        let mut from = 0;
         loop {
-            let lower = out.to_ascii_lowercase();
-            let Some(start) = lower.find(&open) else { break };
-            let Some(rel) = lower[start..].find(&close) else {
+            let lower = out[from..].to_ascii_lowercase();
+            let Some(rel_start) = lower.find(&open) else { break };
+            let start = from + rel_start;
+            // 闭标签要在同一段里找，避免跨过已删区域
+            let Some(rel) = lower[rel_start..].find(&close) else {
                 out.truncate(start);
                 break;
             };
             let end = start + rel + close.len();
             out.replace_range(start..end, "\n");
+            // 替换后该位置只剩 1 字节的 "\n"，从其后继续找下一个块
+            from = start + 1;
         }
     }
     out

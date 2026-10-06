@@ -26,7 +26,8 @@ pub struct Claims {
 /// 生成 n 个随机字节
 fn random_bytes(n: usize) -> Vec<u8> {
     // `gen` 在 2024 版里是保留字，方法路径位置也要转义（rand 0.8 的 API 名没变）
-    (0..n).map(|_| rand::Rng::r#gen(&mut rand::thread_rng())).collect()
+    let mut rng = rand::thread_rng();
+    (0..n).map(|_| rand::Rng::r#gen(&mut rng)).collect()
 }
 
 /// 随机 JWT 密钥（64 位十六进制字符串 = 32 字节）
@@ -42,8 +43,9 @@ const PWD_CHARSET: &[u8] = b"abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ2345
 
 /// 生成随机密码：字符集混合大小写与数字，长度 16。
 fn random_password() -> String {
+    let mut rng = rand::thread_rng();
     (0..16)
-        .map(|_| PWD_CHARSET[rand::thread_rng().gen_range(0..PWD_CHARSET.len())] as char)
+        .map(|_| PWD_CHARSET[rng.gen_range(0..PWD_CHARSET.len())] as char)
         .collect()
 }
 

@@ -210,11 +210,11 @@ async fn main() -> anyhow::Result<()> {
 /// 纯 HTTP → HTTPS 的 301 跳转服务（PANEL_HTTP_PORT 启用时）
 fn spawn_http_redirect(http_port: String, https_addr: String) {
     tokio::spawn(async move {
-        let host = https_addr.split(':').next().unwrap_or("127.0.0.1");
-        let target = format!(
-            "https://{host}:{port}",
-            port = https_addr.split(':').nth(1).unwrap_or("3789")
-        );
+        // rsplit_once 取最后一段，天然兼容 IPv6 字面量 `[::1]:3789`
+        let (host, port) = https_addr
+            .rsplit_once(':')
+            .unwrap_or((https_addr.as_str(), "3789"));
+        let target = format!("https://{host}:{port}");
         let log_target = target.clone();
         let app = axum::routing::any(move |uri: axum::http::Uri| {
             let target = target.clone();

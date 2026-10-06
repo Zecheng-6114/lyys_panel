@@ -384,16 +384,6 @@ impl Db {
         Ok(user)
     }
 
-    /// 创建用户（RBAC：带角色与强制改密标记）
-    pub fn create_user(&self, username: &str, hash: &str, salt: &str) -> Result<()> {
-        let conn = self.pool.get().context("获取数据库连接失败")?;
-        conn.execute(
-            "INSERT INTO users (username, password_hash, salt) VALUES (?1, ?2, ?3)",
-            (username, hash, salt),
-        )?;
-        Ok(())
-    }
-
     /// 创建带角色的用户；must_change=1 表示首次登录需强制改密
     pub fn create_user_role(
         &self,
@@ -728,13 +718,6 @@ impl Db {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows.reverse();
         Ok(rows)
-    }
-
-    /// 删除早于 before 时间戳的监控历史，返回删除行数
-    pub fn prune_metrics(&self, before: i64) -> Result<u64> {
-        let conn = self.pool.get().context("获取数据库连接失败")?;
-        let n = conn.execute("DELETE FROM metrics WHERE ts < ?1", [before])?;
-        Ok(n as u64)
     }
 
     /// 1.2 保留策略：把早于 raw_before 的原始采样按小时聚合进
@@ -1339,11 +1322,6 @@ impl Db {
     pub async fn recent_metrics_async(&self, limit: i64) -> Result<Vec<MetricPoint>> {
         let db = self.clone();
         blocking(move || db.recent_metrics(limit)).await
-    }
-
-    pub async fn prune_metrics_async(&self, before: i64) -> Result<u64> {
-        let db = self.clone();
-        blocking(move || db.prune_metrics(before)).await
     }
 
     pub async fn rollup_and_prune_async(&self, raw_before: i64, hourly_before: i64) -> Result<()> {

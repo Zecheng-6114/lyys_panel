@@ -18,7 +18,7 @@ const CMD_TIMEOUT: u64 = 20;
 
 /// 校验 systemd 单元名（与 opservice::action 同一口径）：
 /// 仅允许字母数字与 `. @ - _`，不含路径分隔符，天然防穿越。
-fn check_unit_name(name: &str) -> Result<()> {
+pub(crate) fn check_unit_name(name: &str) -> Result<()> {
     if name.is_empty()
         || name.len() > 128
         || name.starts_with('.')

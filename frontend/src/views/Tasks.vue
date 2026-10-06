@@ -77,7 +77,6 @@
 <script setup lang="ts">
 import { col, hideColP2 } from "../composables/useResponsive";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
-import { ElMessage } from "element-plus";
 import {
   cancelJob,
   getJob,
@@ -129,8 +128,8 @@ function elapsed(row: JobRow): string {
   return `${Math.floor(mins / 60)} 时 ${mins % 60} 分`;
 }
 function errText(e: unknown): string {
-  const x = e as { response?: { data?: { message?: string } }; message?: string };
-  return x?.response?.data?.message ?? x?.message ?? "请求失败";
+  const x = e as { response?: { data?: { error?: string } }; message?: string };
+  return x?.response?.data?.error ?? x?.message ?? "请求失败";
 }
 
 async function load() {

@@ -161,7 +161,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import http from "../api/http";
 import { humanBytes, renderMarkdown } from "../utils/markdown";
 

@@ -154,6 +154,7 @@ impl Monitor {
         self.last_disk_io = Some((io_read, io_write, now));
 
         let (os_name, kernel) = self.os_info();
+        let la = System::load_average();
 
         let snap = Snapshot {
             ts: time::OffsetDateTime::now_utc().unix_timestamp(),
@@ -164,9 +165,9 @@ impl Monitor {
             disk_total,
             net_in_per_sec: (net_in as f64 / dt) as i64,
             net_out_per_sec: (net_out as f64 / dt) as i64,
-            load1: System::load_average().one,
-            load5: System::load_average().five,
-            load15: System::load_average().fifteen,
+            load1: la.one,
+            load5: la.five,
+            load15: la.fifteen,
             cpu_cores: self.sys.cpus().len(),
             uptime: System::uptime(),
             swap_used: self.sys.used_swap() as i64,

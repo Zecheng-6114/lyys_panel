@@ -180,15 +180,8 @@ async fn list_from_text() -> Result<Vec<ServiceInfo>> {
 
 /// 对服务执行操作（start/stop/restart/reload）
 pub async fn action(name: &str, act: Action) -> Result<serde_json::Value> {
-    // 基础校验：服务名只允许安全字符，避免命令注入
-    if name.is_empty()
-        || name.len() > 128
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '@' | '-' | '_'))
-    {
-        anyhow::bail!("非法服务名");
-    }
+    // 基础校验：服务名只允许安全字符，避免命令注入（与 ops 同一口径）
+    crate::ops::check_unit_name(name)?;
     // P1-1：服务写操作走 Systemd 组串行，预算 20s
     let mut cmd = Command::new("systemctl");
     cmd.arg(act.as_str()).arg(name);
