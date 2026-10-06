@@ -35,6 +35,88 @@
       </el-table-column>
     </el-table>
 
+    <div class="section-title">systemd 定时器</div>
+    <div class="toolbar">
+      <el-button @click="loadTimers">刷新</el-button>
+      <el-button @click="openTimer(null)">新增定时器</el-button>
+      <span class="hint">由 systemd 调度（OnCalendar 表达式），输出进 journald，可查看执行日志</span>
+    </div>
+
+    <div class="block-timers">
+      <el-table v-loading="timersLoading" :data="timers" size="small" class="ctable">
+        <el-table-column label="说明" v-bind="col(150, true)">
+          <template #default="{ row }">{{ row.description || row.id }}</template>
+        </el-table-column>
+        <el-table-column label="调度" prop="schedule" v-bind="col(170)" />
+        <el-table-column label="命令" prop="command" v-bind="col(260, true)" show-overflow-tooltip />
+        <el-table-column label="状态" v-bind="col(90)">
+          <template #default="{ row }">
+            <span class="dot-wrap">
+              <i class="dot" :class="row.enabled ? 'dot-on' : 'dot-off'" />
+              {{ row.enabled ? "启用" : "停用" }}
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" v-bind="col(200)" align="right">
+          <template #default="{ row }">
+            <el-button link size="small" @click="runTimer(row.id)">执行</el-button>
+            <el-button link size="small" @click="showLogs(row.id)">日志</el-button>
+            <el-button link size="small" @click="openTimer(row)">编辑</el-button>
+            <el-button link size="small" @click="removeTimer(row.id)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </div>
+
+    <el-dialog
+      v-model="showTimer"
+      :title="timerForm.id ? '编辑定时器' : '新增定时器'"
+      width="560px"
+    >
+      <el-form label-width="92px" size="small">
+        <el-form-item label="说明">
+          <el-input v-model="timerForm.description" placeholder="可选，用于识别任务" />
+        </el-form-item>
+        <el-form-item label="OnCalendar">
+          <el-input v-model="timerForm.schedule" placeholder="如：*-*-* 03:00:00" />
+        </el-form-item>
+        <el-form-item label="命令">
+          <el-input
+            v-model="timerForm.command"
+            type="textarea"
+            :rows="3"
+            placeholder="以 /bin/sh 执行，可写多行"
+          />
+        </el-form-item>
+        <el-form-item label="启用">
+          <el-switch v-model="timerForm.enabled" />
+        </el-form-item>
+      </el-form>
+      <div class="presets">
+        <span>常用：</span>
+        <button
+          v-for="p in timerPresets"
+          :key="p.label"
+          type="button"
+          class="mini-btn mini-btn--sm"
+          @click="timerForm.schedule = p.value"
+        >
+          {{ p.label }}
+        </button>
+      </div>
+      <template #footer>
+        <el-button @click="showTimer = false">取消</el-button>
+        <el-button @click="saveTimer">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="showLogsDlg" :title="`执行日志 · ${logsId}`" width="720px">
+      <pre class="logbox">{{ logsText || "（暂无日志）" }}</pre>
+      <template #footer>
+        <el-button @click="showLogsDlg = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="showEdit" :title="editIndex === null ? '新增任务' : '编辑任务'" width="520px">
       <el-form label-width="64px" size="small">
         <el-form-item label="说明">
@@ -186,7 +268,141 @@ async function removeEntry(index: number) {
   }
 }
 
-onMounted(load);
+// ---------- systemd 定时器 ----------
+
+interface TimerJob {
+  id: string;
+  schedule: string;
+  command: string;
+  description: string;
+  enabled: boolean;
+}
+
+const timers = ref<TimerJob[]>([]);
+const timersLoading = ref(false);
+const showTimer = ref(false);
+const timerForm = reactive({
+  id: "",
+  schedule: "",
+  command: "",
+  description: "",
+  enabled: true,
+});
+
+const timerPresets = [
+  { label: "每小时", value: "hourly" },
+  { label: "每天零点", value: "*-*-* 00:00:00" },
+  { label: "每周一 09:00", value: "Mon *-*-* 09:00:00" },
+  { label: "每月 1 号 03:00", value: "*-*-01 03:00:00" },
+];
+
+const showLogsDlg = ref(false);
+const logsText = ref("");
+const logsId = ref("");
+
+async function loadTimers() {
+  timersLoading.value = true;
+  try {
+    const { data } = await http.get("/timers");
+    timers.value = data;
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error ?? "读取定时任务失败");
+  } finally {
+    timersLoading.value = false;
+  }
+}
+
+function openTimer(row: TimerJob | null) {
+  if (row === null) {
+    Object.assign(timerForm, {
+      id: "",
+      schedule: "*-*-* 03:00:00",
+      command: "",
+      description: "",
+      enabled: true,
+    });
+  } else {
+    Object.assign(timerForm, {
+      id: row.id,
+      schedule: row.schedule,
+      command: row.command,
+      description: row.description,
+      enabled: row.enabled,
+    });
+  }
+  showTimer.value = true;
+}
+
+async function saveTimer() {
+  if (!timerForm.schedule.trim()) {
+    ElMessage.warning("OnCalendar 表达式不能为空");
+    return;
+  }
+  if (!timerForm.command.trim()) {
+    ElMessage.warning("命令不能为空");
+    return;
+  }
+  try {
+    await http.post("/timers", {
+      // 新建时传 null，由服务端分配标识
+      id: timerForm.id || null,
+      schedule: timerForm.schedule,
+      command: timerForm.command,
+      description: timerForm.description,
+      enabled: timerForm.enabled,
+    });
+    showTimer.value = false;
+    ElMessage.success("已保存");
+    loadTimers();
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error ?? "保存失败");
+  }
+}
+
+async function removeTimer(id: string) {
+  try {
+    await ElMessageBox.confirm("确定删除该定时器？", "删除确认", {
+      type: "warning",
+      confirmButtonText: "删除",
+      cancelButtonText: "取消",
+    });
+  } catch {
+    return;
+  }
+  try {
+    await http.delete("/timers", { data: { id } });
+    ElMessage.success("已删除");
+    loadTimers();
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error ?? "删除失败");
+  }
+}
+
+async function runTimer(id: string) {
+  try {
+    const { data } = await http.post("/timers/run", { id });
+    ElMessage.success(data.message ?? "已触发执行");
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error ?? "执行失败");
+  }
+}
+
+async function showLogs(id: string) {
+  logsId.value = id;
+  logsText.value = "";
+  showLogsDlg.value = true;
+  try {
+    const { data } = await http.get("/timers/logs", { params: { id, lines: 200 } });
+    logsText.value = data.logs ?? "";
+  } catch (e: any) {
+    logsText.value = e.response?.data?.error ?? "读取日志失败";
+  }
+}
+
+onMounted(() => {
+  load();
+  loadTimers();
+});
 </script>
 
 <style scoped>
@@ -207,5 +423,30 @@ onMounted(load);
   font-size: 12px;
   color: var(--el-text-color-secondary);
   padding-left: 64px;
+}
+.section-title {
+  font-size: 14px;
+  font-weight: 500;
+  margin: 20px 0 12px;
+}
+.dot-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.logbox {
+  background: var(--el-bg-color);
+  border-radius: var(--radius);
+  box-shadow: var(--panel-shadow-1);
+  padding: 12px 16px;
+  max-height: 420px;
+  overflow: auto;
+  font-family: var(--panel-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
 }
 </style>

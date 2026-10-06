@@ -22,7 +22,9 @@ mod ops; // 4.3 深度运维：unit 文件查看、SMART 磁盘健康
 mod opservice;
 mod packages;
 mod rprocess;
+mod security; // 安全入口：访问路径前缀 + IP 白名单，登录前的访问闸门
 mod terminal; // 交互式终端：浏览器 ↔ 本机 PTY 的双向 WebSocket 桥（仅 admin）
+mod timers; // systemd 定时器：计划任务的另一种承载 + journald 执行日志
 mod tls;
 mod update;
 mod websearch; // AI 助手联网：搜索多通道 + 网页正文抓取（含 SSRF 闸门）

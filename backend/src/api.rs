@@ -1377,6 +1377,106 @@ async fn cron_delete(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+// ---------- systemd 定时器（计划任务升级，operator 起） ----------
+
+async fn timers_list(
+    State(state): State<AppState>,
+    _: AuthUser,
+) -> Result<Json<Vec<crate::timers::TimerJob>>, ApiError> {
+    let data_dir = state.data_dir.clone();
+    let jobs = tokio::task::spawn_blocking(move || crate::timers::list(&data_dir))
+        .await
+        .map_err(|_| ApiError::internal())?;
+    Ok(Json(jobs))
+}
+
+#[derive(Deserialize)]
+struct TimerReq {
+    /// 新建时留空 → 服务端分配标识；更新时必填
+    id: Option<String>,
+    schedule: String,
+    command: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    enabled: bool,
+}
+
+async fn timers_save(
+    State(state): State<AppState>,
+    _: RequireRole<1>,
+    SafeJson(req): SafeJson<TimerReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let data_dir = state.data_dir.clone();
+    let mut job = crate::timers::TimerJob {
+        id: req.id.unwrap_or_default(),
+        schedule: req.schedule,
+        command: req.command,
+        description: req.description,
+        enabled: req.enabled,
+    };
+    let is_new = job.id.is_empty();
+    if is_new {
+        let dd = data_dir.clone();
+        job.id = tokio::task::spawn_blocking(move || crate::timers::new_id(&crate::timers::list(&dd)))
+            .await
+            .map_err(|_| ApiError::internal())?;
+    }
+    let id = job.id.clone();
+    crate::timers::save(&data_dir, &job, is_new)
+        .await
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({ "ok": true, "id": id })))
+}
+
+#[derive(Deserialize)]
+struct TimerIdReq {
+    id: String,
+}
+
+async fn timers_delete(
+    State(state): State<AppState>,
+    _: RequireRole<1>,
+    SafeJson(req): SafeJson<TimerIdReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let data_dir = state.data_dir.clone();
+    crate::timers::delete(&data_dir, &req.id)
+        .await
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn timers_run(
+    State(state): State<AppState>,
+    _: RequireRole<1>,
+    SafeJson(req): SafeJson<TimerIdReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let data_dir = state.data_dir.clone();
+    crate::timers::run_now(&data_dir, &req.id)
+        .await
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "message": "已触发执行，稍后可在日志中查看结果"
+    })))
+}
+
+#[derive(Deserialize)]
+struct TimerLogsQuery {
+    id: String,
+    lines: Option<usize>,
+}
+
+async fn timers_logs(
+    _: RequireRole<1>,
+    Query(q): Query<TimerLogsQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let text = crate::timers::logs(&q.id, q.lines.unwrap_or(200))
+        .await
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({ "logs": text })))
+}
+
 // ---------- 网络查看 ----------
 
 async fn net_interfaces(_user: AuthUser) -> Result<Json<serde_json::Value>, ApiError> {
@@ -2429,6 +2529,9 @@ async fn terminal_ws(
 
 // ---------- 3.1 备份管理（admin）----------
 
+/// 导入备份体积上限（主库通常几百 KB ～ 几十 MB）
+const BACKUP_MAX_BYTES: usize = 200 * 1024 * 1024;
+
 #[derive(Deserialize)]
 struct BackupNameQuery {
     name: String,
@@ -2519,6 +2622,84 @@ async fn backup_restore(
         "ok": true,
         "message": "恢复已登记，重启面板服务后生效"
     })))
+}
+
+#[derive(Deserialize)]
+struct BackupConfigReq {
+    #[serde(default)]
+    dir: String,
+    keep: usize,
+}
+
+/// 读取备份配置（自定义目录 + 保留份数）
+async fn backups_config_get(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+) -> Result<Json<crate::backup::BackupConfig>, ApiError> {
+    let data_dir = state.data_dir.clone();
+    let cfg = tokio::task::spawn_blocking(move || crate::backup::load_config(&data_dir))
+        .await
+        .map_err(|_| ApiError::internal())?;
+    Ok(Json(cfg))
+}
+
+async fn backups_config_set(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+    SafeJson(req): SafeJson<BackupConfigReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let cfg = crate::backup::BackupConfig {
+        dir: req.dir,
+        keep: req.keep,
+    };
+    crate::backup::validate_config(&cfg).map_err(ApiError::file_err)?;
+    let data_dir = state.data_dir.clone();
+    let saved = cfg.clone();
+    tokio::task::spawn_blocking(move || crate::backup::save_config(&data_dir, &cfg))
+        .await
+        .map_err(|_| ApiError::internal())?
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({ "ok": true, "config": saved })))
+}
+
+/// 上传外部备份文件（multipart 字段 `file`）：校验后存入备份目录，
+/// 之后在列表中正常点「恢复」即可。
+async fn backup_upload(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+    mut mp: Multipart,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Some(field) = mp.next_field().await.map_err(|e| {
+        tracing::warn!("备份上传解析失败：{e}");
+        ApiError::bad("上传请求格式错误")
+    })? {
+        if field.name() == Some("file") {
+            bytes = field
+                .bytes()
+                .await
+                .map_err(|e| {
+                    tracing::warn!("备份上传字段 file 读取失败：{e}");
+                    ApiError::bad("上传数据读取失败")
+                })?
+                .to_vec();
+        }
+    }
+    if bytes.is_empty() {
+        return Err(ApiError::bad("缺少 file 字段"));
+    }
+    if bytes.len() > BACKUP_MAX_BYTES {
+        return Err(ApiError::bad(format!(
+            "备份文件过大（上限 {}MB）",
+            BACKUP_MAX_BYTES / 1024 / 1024
+        )));
+    }
+    let data_dir = state.data_dir.clone();
+    let name = tokio::task::spawn_blocking(move || crate::backup::import_backup(&data_dir, &bytes))
+        .await
+        .map_err(|_| ApiError::internal())?
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({ "ok": true, "name": name })))
 }
 
 // ---------- 3.2 面板自更新（admin）----------
@@ -2621,34 +2802,34 @@ async fn alerts_rules_set(
 }
 
 #[derive(Deserialize)]
-struct WebhookReq {
-    url: Option<String>,
+struct ChannelsReq {
+    channels: Vec<crate::alerts::AlertChannel>,
 }
 
-async fn alerts_webhook_get(
+async fn alerts_channels_get(
     State(state): State<AppState>,
     _: RequireRole<2>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let db = state.db.clone();
-    let url = tokio::task::spawn_blocking(move || crate::alerts::load_webhook(&db))
+    let channels = tokio::task::spawn_blocking(move || crate::alerts::load_channels(&db))
         .await
         .map_err(|_| ApiError::internal())?;
-    Ok(Json(serde_json::json!({ "url": url })))
+    Ok(Json(serde_json::json!({ "channels": channels })))
 }
 
-async fn alerts_webhook_set(
+async fn alerts_channels_set(
     State(state): State<AppState>,
     _: RequireRole<2>,
-    SafeJson(req): SafeJson<WebhookReq>,
+    SafeJson(req): SafeJson<ChannelsReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    if req.channels.len() > 20 {
+        return Err(ApiError::bad("通知渠道数量过多（上限 20 条）"));
+    }
+    for ch in &req.channels {
+        crate::alerts::validate_channel(ch).map_err(|e| ApiError::bad(e.to_string()))?;
+    }
     let db = state.db.clone();
-    let url = req.url;
-    // 校验失败必须以 400 反馈（save_webhook 内部会 validate）
-    if let Some(u) = &url
-        && !u.is_empty() {
-            crate::alerts::validate_webhook_url(u).map_err(|e| ApiError::bad(e.to_string()))?;
-        }
-    tokio::task::spawn_blocking(move || crate::alerts::save_webhook(&db, url.as_deref()))
+    tokio::task::spawn_blocking(move || crate::alerts::save_channels(&db, &req.channels))
         .await
         .map_err(|_| ApiError::internal())?
         .map_err(ApiError::file_err)?;
@@ -3022,6 +3203,63 @@ async fn send_event(
         .map_err(|_| ())
 }
 
+// ---------- 安全入口（admin 专属） ----------
+//
+// 入口前缀与 IP 白名单由 security::guard 挂最外层逐请求生效，这里只负责读写配置。
+// 保存时做与中间件同口径的校验，避免把面板存成谁也进不去的配置。
+
+async fn security_get(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let entrance = state
+        .db
+        .get_setting_async(crate::security::KEY_ENTRANCE)
+        .await?
+        .unwrap_or_default();
+    let allowlist = state
+        .db
+        .get_setting_async(crate::security::KEY_ALLOWLIST)
+        .await?
+        .unwrap_or_default();
+    Ok(Json(serde_json::json!({
+        "entrance": entrance,
+        "allowlist": allowlist,
+    })))
+}
+
+#[derive(Deserialize)]
+struct SecuritySetReq {
+    #[serde(default)]
+    entrance: String,
+    #[serde(default)]
+    allowlist: String,
+}
+
+async fn security_set(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+    SafeJson(req): SafeJson<SecuritySetReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let entrance =
+        crate::security::normalize_entrance(&req.entrance).map_err(|e| ApiError::bad(e.to_string()))?;
+    crate::security::parse_allowlist(&req.allowlist).map_err(|e| ApiError::bad(e.to_string()))?;
+    let allowlist = req.allowlist.trim().to_string();
+    state
+        .db
+        .set_setting_async(crate::security::KEY_ENTRANCE, &entrance)
+        .await?;
+    state
+        .db
+        .set_setting_async(crate::security::KEY_ALLOWLIST, &allowlist)
+        .await?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "entrance": entrance,
+        "allowlist": allowlist,
+    })))
+}
+
 pub fn router(state: AppState) -> Router {
     let protected = Router::new()
         .route("/logout", post(logout))
@@ -3082,6 +3320,13 @@ pub fn router(state: AppState) -> Router {
                 .put(cron_update)
                 .delete(cron_delete),
         )
+        // systemd 定时器：crontab 之外的计划任务承载，带 journald 执行日志
+        .route(
+            "/timers",
+            get(timers_list).post(timers_save).delete(timers_delete),
+        )
+        .route("/timers/run", post(timers_run))
+        .route("/timers/logs", get(timers_logs))
         .route("/network/interfaces", get(net_interfaces))
         .route("/network/routes", get(net_routes))
         .route("/network/connections", get(net_connections))
@@ -3134,6 +3379,14 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/backups/download", get(backup_download))
         .route("/backups/restore", post(backup_restore))
+        .route(
+            "/backups/config",
+            get(backups_config_get).post(backups_config_set),
+        )
+        .route(
+            "/backups/upload",
+            post(backup_upload).layer(DefaultBodyLimit::max(BACKUP_MAX_BYTES)),
+        )
         // 3.2 自更新（admin 专属）。上传通道需放宽请求体上限
         .route("/update/check", get(update_check))
         .route("/update/install", post(update_install))
@@ -3147,10 +3400,12 @@ pub fn router(state: AppState) -> Router {
             get(alerts_rules_get).post(alerts_rules_set),
         )
         .route(
-            "/alerts/webhook",
-            get(alerts_webhook_get).post(alerts_webhook_set),
+            "/alerts/channels",
+            get(alerts_channels_get).post(alerts_channels_set),
         )
         .route("/alerts/events", get(alerts_events))
+        // 安全入口配置：访问路径前缀与 IP 白名单（admin 专属）
+        .route("/security", get(security_get).post(security_set))
         // 2.3：审计中间件挂在受保护路由上，记录所有非 GET 业务请求
         // （from_fn 不支持 State 提取器，必须用 from_fn_with_state）
         .layer(middleware::from_fn_with_state(state.clone(), audit_mw))
@@ -3159,14 +3414,26 @@ pub fn router(state: AppState) -> Router {
         .route("/ai/history", get(crate::ai::ai_history))
         .route("/ai/history/clear", post(crate::ai::ai_history_clear))
         .route("/ai/config", get(ai_config_get).post(ai_config_set));
-    Router::new()
+    let inner = Router::new()
         .route("/health", get(health))
         .route("/api/login", post(login))
         // 自定义字体文件：@font-face 请求带不上 Authorization 头，必须挂在鉴权之外
         .route("/fonts/custom/{name}", get(font_serve))
         .nest("/api", protected)
         .fallback(crate::embed::handler)
-        .with_state(state)
+        .with_state(state.clone());
+
+    // 安全入口：最外层闸门，SPA、/api 与静态资源一视同仁；
+    // 未配前缀的白名单为空时逐请求读库都是空值，等同直接放行。
+    //
+    // 必须套在路由匹配之前。`Router::layer` 是「逐路由」包裹（axum 会给
+    // path_router 与 fallback 各套一层），套在已匹配的路由上再改写 URI 改变不了
+    // 匹配结果 —— 这正是 guard 剥前缀却仍落到 SPA fallback 的原因。把整棵路由树
+    // 放进一个空的外层 Router 的 fallback，再把 guard 套上去：请求先过闸门、
+    // 剥掉前缀，之后才进入内层匹配。
+    Router::new()
+        .fallback_service(inner)
+        .layer(middleware::from_fn_with_state(state, crate::security::guard))
 }
 
 #[cfg(test)]

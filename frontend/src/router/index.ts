@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from "vue-router";
 import type { RouteRecordRaw } from "vue-router";
 import { useAuthStore } from "../stores/auth";
+import { basePath } from "../base";
 
 const routes: RouteRecordRaw[] = [
   {
@@ -129,7 +130,8 @@ const routes: RouteRecordRaw[] = [
 ];
 
 const router = createRouter({
-  history: createWebHistory(),
+  // 基路径取自服务端注入的 <base href>：启用安全入口时路由也需带上同一前缀
+  history: createWebHistory(basePath()),
   routes,
 });
 

@@ -461,9 +461,14 @@ pub fn spawn_sampler(state: AppState) {
                     .unwrap_or(ev.firing);
                 if notify {
                     tokio::spawn(async move {
-                        if let Some(url) = crate::alerts::load_webhook(&db2) {
-                            let client = reqwest::Client::new();
-                            crate::alerts::send_webhook(&client, &url, &msg).await;
+                        let channels = crate::alerts::load_channels(&db2);
+                        if channels.is_empty() {
+                            return;
+                        }
+                        let client = reqwest::Client::new();
+                        // 渠道之间顺序发送：告警频率低，串行足够且能收敛突发
+                        for ch in &channels {
+                            crate::alerts::send_with_retry(&client, ch, &msg).await;
                         }
                     });
                 }

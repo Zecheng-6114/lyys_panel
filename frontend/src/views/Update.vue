@@ -40,8 +40,8 @@
       </el-button>
     </div>
     <div class="hint">
-      选择在其他机器构建的 lyys-panel 二进制（Linux x86_64），服务端校验 ELF
-      格式与体积后原子替换，重启服务后生效。
+      选择在其他机器构建的 lyys-panel 二进制（Linux x86_64 或 aarch64，需与本机
+      架构一致），服务端校验 ELF 格式与体积后原子替换，重启服务后生效。
     </div>
   </div>
 </template>

@@ -145,6 +145,7 @@
 import { col, hideColP2, hideColP3 } from "../composables/useResponsive";
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import http from "../api/http";
+import { wsUrl } from "../base";
 
 // ---------- SMART ----------
 interface SmartDisk {
@@ -233,17 +234,12 @@ async function loadContainers() {
   }
 }
 
-function wsBase() {
-  const p = location.protocol === "https:" ? "wss" : "ws";
-  return `${p}://${location.host}`;
-}
-
 function startLog() {
   if (!logContainer.value || ws) return;
   const token = localStorage.getItem("panel_token");
   if (!token) return;
   const url =
-    `${wsBase()}/api/docker/logstream?id=${encodeURIComponent(logContainer.value)}` +
+    `${wsUrl("/docker/logstream")}?id=${encodeURIComponent(logContainer.value)}` +
     `&tail=${logTail.value}&token=${encodeURIComponent(token)}`;
   ws = new WebSocket(url);
   logConnected.value = true;

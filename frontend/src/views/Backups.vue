@@ -3,7 +3,16 @@
     <div class="toolbar">
       <el-button @click="load">刷新</el-button>
       <el-button :loading="creating" @click="createNow">立即备份</el-button>
-      <span class="hint">每日自动备份，保留最近 {{ keep }} 份；恢复需重启服务生效</span>
+      <el-button :loading="uploading" @click="pickFile">上传导入</el-button>
+      <el-button @click="openConfig">设置</el-button>
+      <input
+        ref="fileEl"
+        type="file"
+        accept=".db"
+        style="display: none"
+        @change="onFile"
+      />
+      <span class="hint">每日自动备份，保留最近 {{ cfg.keep }} 份；恢复需重启服务生效</span>
     </div>
 
     <el-table
@@ -31,12 +40,28 @@
         </template>
       </el-table-column>
     </el-table>
+
+    <el-dialog v-model="showConfig" title="备份设置" width="460px">
+      <el-form label-width="100px" size="small">
+        <el-form-item label="备份目录">
+          <el-input v-model="form.dir" placeholder="留空 = 数据目录下 backups/" />
+        </el-form-item>
+        <el-form-item label="保留份数">
+          <el-input-number v-model="form.keep" :min="1" :max="100" style="width: 100%" />
+        </el-form-item>
+      </el-form>
+      <div class="hint">备份目录须为绝对路径；修改后新备份写入新目录，旧目录的备份不会迁移。</div>
+      <template #footer>
+        <el-button @click="showConfig = false">取消</el-button>
+        <el-button type="primary" :loading="saving" @click="saveConfig">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { col, hideColP2 } from "../composables/useResponsive";
-import { onMounted, ref } from "vue";
+import { onMounted, reactive, ref } from "vue";
 import http from "../api/http";
 import { submitJob } from "../api/jobs";
 import { useJobsStore } from "../stores/jobs";
@@ -48,10 +73,18 @@ interface BackupInfo {
 }
 
 const jobWatch = useJobsStore();
-const keep = 7;
 const rows = ref<BackupInfo[]>([]);
 const loading = ref(false);
 const creating = ref(false);
+const uploading = ref(false);
+const saving = ref(false);
+const fileEl = ref<HTMLInputElement | null>(null);
+
+/** 生效中的配置（用于展示保留份数） */
+const cfg = reactive({ dir: "", keep: 7 });
+/** 设置弹窗表单草稿 */
+const form = reactive({ dir: "", keep: 7 });
+const showConfig = ref(false);
 
 function fmtSize(n: number) {
   if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + " MB";
@@ -144,7 +177,68 @@ async function remove(name: string) {
   }
 }
 
-onMounted(load);
+async function loadConfig() {
+  try {
+    const { data } = await http.get("/backups/config");
+    cfg.dir = data.dir ?? "";
+    cfg.keep = data.keep ?? 7;
+  } catch {
+    // 读取失败保留默认值，不打扰用户
+  }
+}
+
+function openConfig() {
+  form.dir = cfg.dir;
+  form.keep = cfg.keep;
+  showConfig.value = true;
+}
+
+async function saveConfig() {
+  saving.value = true;
+  try {
+    const { data } = await http.post("/backups/config", {
+      dir: form.dir,
+      keep: form.keep,
+    });
+    cfg.dir = data.config.dir;
+    cfg.keep = data.config.keep;
+    showConfig.value = false;
+    ElMessage.success("已保存");
+    load();
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error ?? "保存失败");
+  } finally {
+    saving.value = false;
+  }
+}
+
+function pickFile() {
+  fileEl.value?.click();
+}
+
+async function onFile(e: Event) {
+  const input = e.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  uploading.value = true;
+  try {
+    const fd = new FormData();
+    fd.append("file", file);
+    const { data } = await http.post("/backups/upload", fd);
+    ElMessage.success(`已导入 ${data.name}，可在列表中恢复`);
+    load();
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error ?? "导入失败");
+  } finally {
+    uploading.value = false;
+  }
+}
+
+onMounted(() => {
+  load();
+  loadConfig();
+});
 </script>
 
 <style scoped>

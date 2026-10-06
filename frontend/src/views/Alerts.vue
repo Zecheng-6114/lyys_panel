@@ -29,15 +29,21 @@
       </el-table>
     </div>
 
-    <div class="section-title">Webhook 通知</div>
+    <div class="section-title">通知渠道</div>
     <div class="webhook-row">
-      <el-input
-        v-model="webhook"
+      <el-tag
+        v-for="(c, i) in channels"
+        :key="i"
+        class="chan-tag"
         size="small"
-        placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/…（留空则不通知）"
-        style="max-width: 520px"
-      />
-      <el-button size="small" @click="saveWebhook">保存</el-button>
+        closable
+        @close="removeChannel(i)"
+        @click="openChannel(i)"
+      >
+        {{ kindLabel(c.kind) }} · {{ channelTarget(c) }}
+      </el-tag>
+      <span v-if="!channels.length" class="hint">未配置渠道：告警只记录事件，不推送</span>
+      <el-button size="small" @click="openChannel(null)">新增渠道</el-button>
     </div>
 
     <div class="block block-events">
@@ -85,6 +91,40 @@
         <el-button @click="saveRule">保存</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog
+      v-model="showChannel"
+      :title="channelIndex === null ? '新增渠道' : '编辑渠道'"
+      width="460px"
+    >
+      <el-form label-width="100px" size="small">
+        <el-form-item label="渠道类型">
+          <el-select v-model="chForm.kind" style="width: 100%">
+            <el-option
+              v-for="k in CHANNEL_KINDS"
+              :key="k.value"
+              :label="k.label"
+              :value="k.value"
+            />
+          </el-select>
+        </el-form-item>
+        <template v-if="chForm.kind === 'telegram'">
+          <el-form-item label="Bot Token">
+            <el-input v-model="chForm.token" placeholder="123456:ABC-DEF…" />
+          </el-form-item>
+          <el-form-item label="会话 ID">
+            <el-input v-model="chForm.chat_id" placeholder="私聊/群为数字，频道可填 @name" />
+          </el-form-item>
+        </template>
+        <el-form-item v-else label="Webhook 地址">
+          <el-input v-model="chForm.url" placeholder="https://…" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showChannel = false">取消</el-button>
+        <el-button @click="saveChannel">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -107,17 +147,47 @@ interface AlertEvent {
   state: string;
 }
 
+type ChannelKind = "webhook" | "dingtalk" | "wecom" | "feishu" | "telegram";
+
+interface AlertChannel {
+  kind: ChannelKind;
+  url: string;
+  token: string;
+  chat_id: string;
+}
+
+const CHANNEL_KINDS: { value: ChannelKind; label: string }[] = [
+  { value: "webhook", label: "通用 Webhook" },
+  { value: "dingtalk", label: "钉钉机器人" },
+  { value: "wecom", label: "企业微信机器人" },
+  { value: "feishu", label: "飞书机器人" },
+  { value: "telegram", label: "Telegram" },
+];
+
 const rules = ref<AlertRule[]>([]);
 const events = ref<AlertEvent[]>([]);
-const webhook = ref("");
+const channels = ref<AlertChannel[]>([]);
 const loading = ref(false);
 const eventsLoading = ref(false);
 const showEdit = ref(false);
 const editIndex = ref<number | null>(null);
 const form = reactive<AlertRule>({ metric: "cpu", threshold: 90, notify_resolve: false });
+const showChannel = ref(false);
+const channelIndex = ref<number | null>(null);
+const chForm = reactive<AlertChannel>({ kind: "webhook", url: "", token: "", chat_id: "" });
 
 function metricLabel(m: string) {
   return m === "cpu" ? "CPU" : m === "mem" ? "内存" : "磁盘";
+}
+
+function kindLabel(kind: ChannelKind) {
+  return CHANNEL_KINDS.find((k) => k.value === kind)?.label ?? kind;
+}
+
+function channelTarget(c: AlertChannel) {
+  if (c.kind === "telegram") return c.chat_id || "未填会话";
+  const url = c.url || "未填地址";
+  return url.length > 48 ? url.slice(0, 48) + "…" : url;
 }
 
 function fmtTime(ts: number) {
@@ -136,12 +206,12 @@ async function loadRules() {
   }
 }
 
-async function loadWebhook() {
+async function loadChannels() {
   try {
-    const { data } = await http.get("/alerts/webhook");
-    webhook.value = data.url ?? "";
+    const { data } = await http.get("/alerts/channels");
+    channels.value = data.channels ?? [];
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.error ?? "读取 webhook 失败");
+    ElMessage.error(e.response?.data?.error ?? "读取通知渠道失败");
   }
 }
 
@@ -159,7 +229,7 @@ async function loadEvents() {
 
 function loadAll() {
   loadRules();
-  loadWebhook();
+  loadChannels();
   loadEvents();
 }
 
@@ -201,12 +271,42 @@ async function removeRule(index: number) {
   }
 }
 
-async function saveWebhook() {
+function openChannel(index: number | null) {
+  channelIndex.value = index;
+  if (index === null) {
+    Object.assign(chForm, { kind: "webhook", url: "", token: "", chat_id: "" });
+  } else {
+    Object.assign(chForm, channels.value[index]);
+  }
+  showChannel.value = true;
+}
+
+async function saveChannel() {
+  const next = [...channels.value];
+  const entry: AlertChannel = { ...chForm };
+  if (channelIndex.value === null) {
+    next.push(entry);
+  } else {
+    next[channelIndex.value] = entry;
+  }
   try {
-    await http.post("/alerts/webhook", { url: webhook.value || null });
-    ElMessage.success(webhook.value ? "webhook 已保存" : "已清除 webhook");
+    await http.post("/alerts/channels", { channels: next });
+    showChannel.value = false;
+    ElMessage.success("已保存");
+    loadChannels();
   } catch (e: any) {
     ElMessage.error(e.response?.data?.error ?? "保存失败");
+  }
+}
+
+async function removeChannel(index: number) {
+  const next = channels.value.filter((_, i) => i !== index);
+  try {
+    await http.post("/alerts/channels", { channels: next });
+    ElMessage.success("已删除");
+    loadChannels();
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error ?? "删除失败");
   }
 }
 
@@ -272,6 +372,10 @@ onMounted(loadAll);
   align-items: center;
   gap: 10px;
   flex: none;
+  flex-wrap: wrap;
+}
+.chan-tag {
+  cursor: pointer;
 }
 .dot-wrap {
   display: inline-flex;

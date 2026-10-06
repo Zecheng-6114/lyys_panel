@@ -29,16 +29,16 @@ LYYS Panel 面向单台 Linux 服务器的日常运维，把系统监控、进�
 | 日志 | journal 日志查询、日志文件列表与实时 tail |
 | 文件 | 目录浏览、在线编辑、上传下载、新建 / 重命名 / 删除、压缩与解压（tar / tar.gz / tar.bz2 / tar.xz / zip）、权限与属主修改 |
 | 软件 | 包列表、可升级查询、搜索、安装 / 卸载 / 升级（Debian 系 apt、Arch 系 pacman） |
-| 计划任务 | crontab 增删改查 |
+| 计划任务 | crontab 增删改查；systemd 定时器（OnCalendar 调度、可启停、立即执行、journald 执行日志） |
 | 网络 | 网卡、路由、连接、DNS 查看 |
 | 防火墙 | ufw / firewalld 状态与规则查看、放行 / 拒绝 / 删除规则、启用停用（仅 admin） |
 | 任务 | 后台作业队列：安装 / 更新等长操作转后台执行，可离开页面，列表回看进度与输出尾部（每个作业保留最近 200 行），支持取消 |
 | 在线会话 | 已登录用户的会话列表，可按会话强制下线 |
 | Docker | 容器列表与启动 / 停止 / 重启 / 删除、容器日志、镜像拉取与删除、Compose 项目启停；未安装时页面上可直接安装 |
 | AI 助手 | 流式对话（OpenAI 兼容上游，支持 Ollama 等本地模型），思考过程与工具调用按时间顺序呈现；内置面板只读工具与联网检索，配置可在设置页在线修改 |
-| 备份 | 数据库快照列表 / 立即备份 / 下载 / 删除 / 恢复（重启生效），每日自动备份保留 7 份 |
-| 面板更新 | 检查 GitHub Release、在线下载替换二进制、内网手动上传旁路 |
-| 告警 | CPU / 内存 / 磁盘阈值规则（滞回防抖）、事件历史、可选 webhook 通知 |
+| 备份 | 数据库快照列表 / 立即备份 / 下载 / 上传导入 / 删除 / 恢复（重启生效），备份目录与保留份数可配，每日自动备份 |
+| 面板更新 | 检查 GitHub Release、按架构（x86_64 / aarch64）在线下载替换二进制、内网手动上传旁路 |
+| 告警 | CPU / 内存 / 磁盘阈值规则（滞回防抖）、事件历史、钉钉 / 企业微信 / 飞书 / Telegram / 通用 webhook 通知（失败退避重试） |
 | 账号 | 多用户 + RBAC（admin / operator / viewer，写操作按等级分派）、在线会话、操作审计日志 |
 | 系统设置 | 仅管理员可改的服务端配置（AI 上游地址 / 密钥 / 模型）与界面预设 |
 
@@ -309,10 +309,9 @@ GitHub，内网环境升级请走「面板更新」页的手动上传通道。
 
 **aarch64 机器能用吗？**
 
-可以。`install.sh` 会按机器架构选择 release 资产（x86_64 取 `lyys-panel`、
-aarch64 取 `lyys-panel-aarch64`）。但内置的「在线自更新」固定拉取名为
-`lyys-panel` 的 x86_64 资产，aarch64 机器升级请走「面板更新」页的手动上传通道，
-或重新执行 `install.sh`。
+可以。`install.sh` 与内置的「在线自更新」都会按机器架构选择 release 资产
+（x86_64 取 `lyys-panel`、aarch64 取 `lyys-panel-aarch64`）。内网环境升级仍可走
+「面板更新」页的手动上传通道（上传与本机架构一致的二进制），或重新执行 `install.sh`。
 
 ## 项目结构
 
@@ -330,7 +329,7 @@ lyys_panel/
 │   │   ├── embed.rs        内嵌前端资源服务（含 SPA 回退与缓存头）
 │   │   ├── tls.rs          HTTPS：自签证书生成 / 正式证书加载
 │   │   ├── monitor.rs      系统指标采集、小时聚合与保留清理
-│   │   ├── alerts.rs       阈值告警规则（滞回状态机）与 webhook 通知
+│   │   ├── alerts.rs       阈值告警规则（滞回状态机）与多渠道通知（失败退避重试）
 │   │   ├── backup.rs       数据库备份 / 恢复（VACUUM INTO + 标记重启生效）
 │   │   ├── update.rs       自更新（GitHub Release 检查 / 下载 / 校验 / 原子替换）
 │   │   ├── ai.rs / ai_tools.rs  AI 流式对话代理（OpenAI 兼容上游，SSE 透传）+ 工具模式
@@ -339,7 +338,8 @@ lyys_panel/
 │   │   ├── container_files.rs  容器内文件浏览 / 读写（复用 files.rs 的口径）
 │   │   ├── distro.rs       发行版检测（仅支持 Debian / Arch 系，不支持则退出）
 │   │   ├── packages.rs     软件包管理（apt / pacman 按家族分派）
-│   │   ├── crontab.rs      计划任务
+│   │   ├── crontab.rs      计划任务（crontab）
+│   │   ├── timers.rs       systemd 定时器（单元生成 + journald 执行日志）
 │   │   ├── network.rs      网络信息
 │   │   ├── logs.rs         日志查询
 │   │   ├── docker.rs       Docker 容器 / 镜像 / Compose（含一键安装）
@@ -445,12 +445,12 @@ lyys_panel/
 - `frontend/package.json` 里 `npm run lint` 用的是 eslint 8 的 `--ext` 参数，而仓库只有 eslint 9 依赖、
   也没提交 flat config，该脚本会直接失败；`npm run format` 能跑，但同样没有 Prettier 配置文件，
   会按 prettier 默认风格格式化（当前 `prettier --check` 报 23 个文件不合默认风格）。前端改动靠 `npm run build` 校验
-- 内置「在线自更新」固定拉取 x86_64 的 `lyys-panel` 资产，不区分 CPU 架构；
-  aarch64 部署的升级请走「面板更新」页手动上传通道，或重跑 `install.sh`
 - 前端无自动化测试（后端已有核心路径集成测试）
 
 **已解决**
 
+- ~~内置「在线自更新」固定拉取 x86_64 资产、不区分 CPU 架构~~ → 已按编译架构选择
+  `lyys-panel` / `lyys-panel-aarch64` 并匹配对应 sha256
 - ~~登录接口无失败限流~~ → 已实现指数退避（`auth::LoginThrottle`）
 - ~~面板默认明文 HTTP~~ → 已默认 HTTPS（自签证书，支持挂正式证书与 HTTP 跳转）
 - ~~前后端均无自动化测试；无 CI~~ → 后端核心路径集成测试 + GitHub Actions CI（PR 检查、tag 多平台发布）

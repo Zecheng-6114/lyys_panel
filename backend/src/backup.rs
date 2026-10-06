@@ -10,16 +10,87 @@
 // 会叠加到新库上造成损坏）。标记存文件而非 settings 表，因为表本身就是
 // 被覆盖的对象。
 use anyhow::{bail, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::db::Db;
 
-/// 自动/手动备份合计保留份数（超出删最旧；文件名含时间戳，字典序即时间序）
+/// 保留份数默认值（可被配置覆盖）
 pub const BACKUP_KEEP: usize = 7;
+/// 保留份数上限
+const BACKUP_KEEP_MAX: usize = 100;
 
+/// 备份配置：目录与保留份数。
+///
+/// 存文件而非 settings 表 —— 恢复流程在打开数据库**之前**就要解析备份
+/// 目录（见 [`apply_pending_restore`]），那时读不到表，只能读文件。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BackupConfig {
+    /// 自定义备份目录；空 = data_dir/backups
+    #[serde(default)]
+    pub dir: String,
+    /// 保留份数（1–100）
+    #[serde(default = "default_keep")]
+    pub keep: usize,
+}
+
+fn default_keep() -> usize {
+    BACKUP_KEEP
+}
+
+impl Default for BackupConfig {
+    fn default() -> Self {
+        Self {
+            dir: String::new(),
+            keep: BACKUP_KEEP,
+        }
+    }
+}
+
+fn config_file(data_dir: &Path) -> PathBuf {
+    data_dir.join("backup.conf")
+}
+
+/// 读取配置；文件缺失或损坏一律回退默认值（不能因配置坏了就停摆）
+pub fn load_config(data_dir: &Path) -> BackupConfig {
+    std::fs::read_to_string(config_file(data_dir))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_config(data_dir: &Path, cfg: &BackupConfig) -> Result<()> {
+    let s = serde_json::to_string(cfg).context("序列化备份配置失败")?;
+    std::fs::write(config_file(data_dir), s).context("写入备份配置失败")?;
+    Ok(())
+}
+
+/// 保存前校验：目录须为绝对路径且不含 `..`；保留份数 1–100
+pub fn validate_config(cfg: &BackupConfig) -> Result<()> {
+    let dir = cfg.dir.trim();
+    if !dir.is_empty() {
+        if !Path::new(dir).is_absolute() {
+            bail!("备份目录必须是绝对路径");
+        }
+        if dir.split(['/', '\\']).any(|seg| seg == "..") {
+            bail!("备份目录不能包含 ..");
+        }
+    }
+    if cfg.keep < 1 || cfg.keep > BACKUP_KEEP_MAX {
+        bail!("保留份数需在 1–{BACKUP_KEEP_MAX} 之间");
+    }
+    Ok(())
+}
+
+/// 当前生效的备份目录（配置为空则回退 data_dir/backups）
 pub fn backups_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join("backups")
+    let dir = load_config(data_dir).dir;
+    let dir = dir.trim();
+    if dir.is_empty() {
+        data_dir.join("backups")
+    } else {
+        PathBuf::from(dir)
+    }
 }
 
 /// 备份文件名校验：panel-YYYYMMDD-HHMMSS.db。
@@ -61,6 +132,7 @@ fn backup_name_now() -> String {
 /// 立即备份一次，返回文件名。成功后顺带执行保留清理。
 pub fn create_backup(db: &Db, data_dir: &Path) -> Result<String> {
     let dir = backups_dir(data_dir);
+    let keep = load_config(data_dir).keep;
     std::fs::create_dir_all(&dir).context("创建备份目录失败")?;
     let name = backup_name_now();
     let target = dir.join(&name);
@@ -68,7 +140,7 @@ pub fn create_backup(db: &Db, data_dir: &Path) -> Result<String> {
         bail!("备份文件已存在（同一秒内重复触发），请稍后重试");
     }
     db.vacuum_into(&target)?;
-    if let Err(e) = prune_backups(&dir) {
+    if let Err(e) = prune_backups(&dir, keep) {
         tracing::warn!("备份保留清理失败：{e}");
     }
     tracing::info!("已创建数据库备份：{name}");
@@ -130,8 +202,29 @@ pub fn delete_backup(data_dir: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// 保留策略：只留最新 BACKUP_KEEP 份
-fn prune_backups(dir: &Path) -> Result<()> {
+/// 导入外部备份文件：校验 SQLite 文件头后落盘到备份目录并分配新名，
+/// 返回文件名；管理员在列表中正常点恢复即可。
+///
+/// 只做文件头校验（与上传字体同一思路）：恢复本身有「先另存当前库」的
+/// 反悔备份兜底，不必在这里做完整库校验。
+pub fn import_backup(data_dir: &Path, bytes: &[u8]) -> Result<String> {
+    if bytes.len() < 100 || !bytes.starts_with(b"SQLite format 3\0") {
+        bail!("不是有效的 SQLite 数据库文件");
+    }
+    let dir = backups_dir(data_dir);
+    std::fs::create_dir_all(&dir).context("创建备份目录失败")?;
+    let name = backup_name_now();
+    let target = dir.join(&name);
+    if target.exists() {
+        bail!("导入过于频繁（同一秒内重复），请稍后重试");
+    }
+    std::fs::write(&target, bytes).context("写入导入备份失败")?;
+    tracing::info!("已导入备份：{name}");
+    Ok(name)
+}
+
+/// 保留策略：只留最新 `keep` 份
+fn prune_backups(dir: &Path, keep: usize) -> Result<()> {
     let mut names: Vec<String> = std::fs::read_dir(dir)?
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().to_string())
@@ -139,7 +232,7 @@ fn prune_backups(dir: &Path) -> Result<()> {
         .collect();
     names.sort();
     names.reverse();
-    for old in names.iter().skip(BACKUP_KEEP) {
+    for old in names.iter().skip(keep) {
         if let Err(e) = std::fs::remove_file(dir.join(old)) {
             tracing::warn!("删除过期备份 {old} 失败：{e}");
         }
@@ -290,6 +383,71 @@ mod tests {
             .exists());
         // 无标记时 apply 返回 false
         assert!(!apply_pending_restore(&tmp, &db_path).unwrap());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn config_roundtrip_and_validation() {
+        let tmp = std::env::temp_dir().join(format!("lyys_backupcfg_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // 默认：落 data_dir/backups，保留 7 份
+        let cfg = load_config(&tmp);
+        assert_eq!(cfg.keep, BACKUP_KEEP);
+        assert!(cfg.dir.is_empty());
+        assert!(backups_dir(&tmp).ends_with("backups"));
+
+        // 自定义目录后 backups_dir 跟随
+        let custom = BackupConfig {
+            dir: tmp.join("mydb").to_string_lossy().to_string(),
+            keep: 3,
+        };
+        validate_config(&custom).unwrap();
+        save_config(&tmp, &custom).unwrap();
+        assert_eq!(backups_dir(&tmp), tmp.join("mydb"));
+        assert_eq!(load_config(&tmp).keep, 3);
+
+        // 非法：相对路径 / 含 .. / 保留份数越界
+        assert!(validate_config(&BackupConfig {
+            dir: "relative/dir".into(),
+            keep: 3
+        })
+        .is_err());
+        assert!(validate_config(&BackupConfig {
+            dir: "/data/../etc".into(),
+            keep: 3
+        })
+        .is_err());
+        assert!(validate_config(&BackupConfig {
+            dir: String::new(),
+            keep: 0
+        })
+        .is_err());
+        assert!(validate_config(&BackupConfig {
+            dir: String::new(),
+            keep: BACKUP_KEEP_MAX + 1
+        })
+        .is_err());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn import_validates_sqlite_header() {
+        let tmp = std::env::temp_dir().join(format!("lyys_backupimp_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // 垃圾数据被拒
+        assert!(import_backup(&tmp, b"definitely not a database").is_err());
+
+        // 真实库文件可导入，并且出现在列表中
+        let db_path = tmp.join("panel.db").to_string_lossy().to_string();
+        let db = Db::open(&db_path).unwrap();
+        db.set_setting("probe", "imported").unwrap();
+        drop(db);
+        let bytes = std::fs::read(&db_path).unwrap();
+        let name = import_backup(&tmp, &bytes).unwrap();
+        assert!(is_valid_backup_name(&name));
+        assert!(list_backups(&tmp).unwrap().iter().any(|b| b.name == name));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

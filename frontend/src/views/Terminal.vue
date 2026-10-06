@@ -90,6 +90,7 @@ import {
 } from "vue";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { wsUrl } from "../base";
 import "@xterm/xterm/css/xterm.css";
 
 /// 一个终端 = 一个标签页 = 一条独立的 PTY WebSocket 连接（后端每连接一会话）。
@@ -146,11 +147,6 @@ function xtermTheme() {
   };
 }
 
-function wsBase() {
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  return `${proto}://${location.host}`;
-}
-
 /// 把当前行列数同步给后端（后端 ioctl TIOCSWINSZ 下发到内核）
 function pushResize(tab: TermTab) {
   if (tab.ws && tab.ws.readyState === WebSocket.OPEN) {
@@ -180,7 +176,7 @@ function connect(tab: TermTab) {
   tab.fit.fit();
   tab.connecting = true;
   const url =
-    `${wsBase()}/api/terminal?token=${encodeURIComponent(token)}` +
+    `${wsUrl("/terminal")}?token=${encodeURIComponent(token)}` +
     `&cols=${tab.term.cols}&rows=${tab.term.rows}`;
   const ws = new WebSocket(url);
   tab.ws = ws;

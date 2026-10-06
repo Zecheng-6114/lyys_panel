@@ -71,6 +71,47 @@
             </el-form-item>
           </el-form>
         </div>
+
+        <div class="card">
+          <div class="card-title">安全入口</div>
+          <div class="card-sub">
+            给面板加一道登录之前的闸门：只有从指定路径前缀访问、且来源 IP 在白名单内
+            的请求才放行。两项都留空即关闭。请谨慎配置 —— 填错可能把自己也挡在门外，
+            修改后须立刻换用新地址访问。
+          </div>
+
+          <el-form label-position="top" class="form">
+            <el-form-item label="访问路径前缀">
+              <el-input
+                v-model="sec.entrance"
+                placeholder="留空为关闭；如填 lyys，则改从 /lyys/ 访问"
+                clearable
+              />
+              <div class="key-hint">
+                4–64 位，仅限字母、数字、下划线、连字符；不可占用 api、health、
+                assets、fonts 等保留字。
+              </div>
+            </el-form-item>
+            <el-form-item label="IP 白名单">
+              <el-input
+                v-model="sec.allowlist"
+                type="textarea"
+                :rows="3"
+                resize="vertical"
+                placeholder="留空为不限制；每行一个，支持单个 IP 或 CIDR，如 192.168.1.0/24"
+              />
+              <div class="key-hint">
+                每行（或逗号分隔）一条，IPv4 / IPv6 均可。仅在直连或本机反向代理
+                场景下按真实来源判断，代理转发的 X-Forwarded-For 仅在请求来自本机时采信。
+              </div>
+            </el-form-item>
+            <el-form-item>
+              <el-button type="primary" :loading="secSaving" @click="saveSecurity">
+                保存安全入口
+              </el-button>
+            </el-form-item>
+          </el-form>
+        </div>
       </el-tab-pane>
 
       <!-- 界面设置：主题定制（预设/配色/圆角/背景图），保存到服务端对所有设备生效 -->
@@ -373,6 +414,38 @@ async function clearKey() {
     ElMessage.error(e.response?.data?.error || "操作失败");
   } finally {
     saving.value = false;
+  }
+}
+
+/* ---------------- 系统设置：安全入口（访问前缀 + IP 白名单） ---------------- */
+
+const sec = reactive({ entrance: "", allowlist: "" });
+const secSaving = ref(false);
+
+async function loadSecurity() {
+  const { data } = await http.get<{ entrance: string; allowlist: string }>("/security");
+  sec.entrance = data.entrance || "";
+  sec.allowlist = data.allowlist || "";
+}
+
+async function saveSecurity() {
+  secSaving.value = true;
+  try {
+    const { data } = await http.post<{ entrance: string; allowlist: string }>("/security", {
+      entrance: sec.entrance.trim(),
+      allowlist: sec.allowlist,
+    });
+    sec.entrance = data.entrance;
+    sec.allowlist = data.allowlist;
+    if (data.entrance) {
+      ElMessage.success(`已保存，请改用 ${location.origin}/${data.entrance}/ 访问面板`);
+    } else {
+      ElMessage.success("已保存，安全入口已关闭");
+    }
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || "保存失败");
+  } finally {
+    secSaving.value = false;
   }
 }
 
@@ -781,6 +854,7 @@ async function resetFont() {
 
 onMounted(() => {
   load().catch(() => ElMessage.error("配置加载失败"));
+  loadSecurity().catch(() => ElMessage.error("安全入口配置加载失败"));
 });
 </script>
 

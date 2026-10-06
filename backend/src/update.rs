@@ -1,7 +1,8 @@
 // 3.2 面板自更新
 //
-// 更新源是 GitHub Release（Zecheng-6114/lyys_panel），二进制资产名固定为
-// lyys-panel。流程：检查 → 下载校验 → 替换 → 重启。
+// 更新源是 GitHub Release（Zecheng-6114/lyys_panel），二进制资产名按运行架构
+// 选择：x86_64 → `lyys-panel`，aarch64 → `lyys-panel-aarch64`（见 [`asset_name`]）。
+// 流程：检查 → 下载校验 → 替换 → 重启。
 //
 // 替换采用「先落临时文件再原子 rename」：目标运行中时 rename 会失败
 // （ETXTBSY），这正是我们要的安全闸——只有服务已停或二进制不在运行路径
@@ -26,7 +27,23 @@ pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// 更新源仓库（发布二进制资产到此 Release 才可被自更新拉取）
 const REPO_OWNER: &str = "Zecheng-6114";
 const REPO_NAME: &str = "lyys_panel";
-const ASSET_NAME: &str = "lyys-panel";
+/// x86_64 资产名：首期发布即用此固定名，不能改（旧版本的自更新逻辑认它）
+const ASSET_X86_64: &str = "lyys-panel";
+/// aarch64 资产名：与 x86_64 产物区分，避免把错架构的二进制装到 ARM 机器上
+const ASSET_AARCH64: &str = "lyys-panel-aarch64";
+
+/// 当前架构对应的 Release 资产名。
+///
+/// 用编译期常量 `ARCH` 而非 `uname -m`：自更新二进制本身已按架构编译，
+/// 编译目标就是运行架构，不必再 fork 子进程探测。
+/// 仅 x86_64 / aarch64 有官方产物，其余架构直接拒绝而不是退回 x86_64。
+fn asset_name() -> Result<&'static str> {
+    match std::env::consts::ARCH {
+        "x86_64" => Ok(ASSET_X86_64),
+        "aarch64" => Ok(ASSET_AARCH64),
+        other => bail!("当前架构 {other} 没有官方构建产物，请走手动上传通道"),
+    }
+}
 
 /// 二进制体积下限：release 产物约 10MB+，小于 1MB 必是错误页/占位文件
 const MIN_BINARY_SIZE: u64 = 1024 * 1024;
@@ -64,13 +81,13 @@ pub struct Download {
     pub sha256: String,
 }
 
-/// 从资产列表中取出与二进制同名的校验和文件。
+/// 从资产列表中取出与指定二进制同名的校验和文件。
 ///
-/// 用 [`ASSET_NAME`] 拼名，而不是只按 `.sha256` 后缀匹配：同一个 release 里还有
-/// aarch64 的校验和，只认后缀会取到另一个架构的哈希 —— 那样校验必然失败，更糟的是
+/// 用资产名拼名，而不是只按 `.sha256` 后缀匹配：同一个 release 里还有另一个
+/// 架构的校验和，只认后缀会取到另一个架构的哈希 —— 那样校验必然失败，更糟的是
 /// 若两个架构产物恰好同源，会「校验通过」却装错了架构。
-fn checksum_asset(release: &ReleaseJson) -> Option<&AssetJson> {
-    let want = format!("{ASSET_NAME}{CHECKSUM_SUFFIX}");
+fn checksum_asset<'a>(release: &'a ReleaseJson, asset: &str) -> Option<&'a AssetJson> {
+    let want = format!("{asset}{CHECKSUM_SUFFIX}");
     release.assets.iter().find(|a| a.name == want)
 }
 
@@ -151,9 +168,10 @@ pub async fn check(client: &reqwest::Client) -> Result<UpdateStatus> {
     })
 }
 
-/// 下载 GitHub 最新版的 lyys-panel 资产，连同发布方公布的 sha256 一并返回。
+/// 下载 GitHub 最新版中**当前架构**对应的资产，连同发布方公布的 sha256 一并返回。
 /// 校验和是必需项：取不到文件或格式不对一律失败，而不是降级为「不带校验地装」。
 pub async fn download_github(client: &reqwest::Client) -> Result<Download> {
+    let asset_name = asset_name()?;
     let url = format!("https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest");
     let release: ReleaseJson = client
         .get(&url)
@@ -170,11 +188,11 @@ pub async fn download_github(client: &reqwest::Client) -> Result<Download> {
     let asset = release
         .assets
         .iter()
-        .find(|a| a.name == ASSET_NAME)
-        .ok_or_else(|| anyhow::anyhow!("最新 release 中没有 {ASSET_NAME} 二进制资产"))?;
+        .find(|a| a.name == asset_name)
+        .ok_or_else(|| anyhow::anyhow!("最新 release 中没有 {asset_name} 二进制资产"))?;
     // P1-2：校验和缺失即整体失败，这里不做任何降级。
-    let checksum = checksum_asset(&release).ok_or_else(|| {
-        anyhow::anyhow!("最新 release 中没有 {ASSET_NAME}{CHECKSUM_SUFFIX}，无法校验，已拒绝更新")
+    let checksum = checksum_asset(&release, asset_name).ok_or_else(|| {
+        anyhow::anyhow!("最新 release 中没有 {asset_name}{CHECKSUM_SUFFIX}，无法校验，已拒绝更新")
     })?;
     let tag = release.tag_name.clone();
 
@@ -304,8 +322,8 @@ mod tests {
         assert!(validate_binary(&good, Some(&"0".repeat(64))).is_err());
     }
 
-    /// 校验和解析与资产挑选：必须精确命中 `lyys-panel.sha256`，
-    /// 不能把同一 release 里 aarch64 的那份取来
+    /// 校验和解析与资产挑选：必须精确命中当前架构的资产名，
+    /// 不能把同一 release 里另一个架构的那份取来
     #[test]
     fn checksum_parsing_and_asset_lookup() {
         let text = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  lyys-panel\n";
@@ -330,14 +348,37 @@ mod tests {
             ],
         };
         assert_eq!(
-            checksum_asset(&release).unwrap().browser_download_url,
+            checksum_asset(&release, ASSET_X86_64)
+                .unwrap()
+                .browser_download_url,
             "https://example.com/x86-sum"
+        );
+        assert_eq!(
+            checksum_asset(&release, ASSET_AARCH64)
+                .unwrap()
+                .browser_download_url,
+            "https://example.com/arm-sum"
         );
 
         let missing = ReleaseJson {
             tag_name: "v1".to_string(),
             assets: vec![asset("lyys-panel", "https://example.com/x86")],
         };
-        assert!(checksum_asset(&missing).is_none(), "缺校验和必须能被发现");
+        assert!(
+            checksum_asset(&missing, ASSET_AARCH64).is_none(),
+            "缺当前架构的校验和必须能被发现"
+        );
+    }
+
+    /// 资产名由编译目标架构决定：x86_64 / aarch64 命中各自产物，
+    /// 其余架构拒绝（而不是退回 x86_64 装错架构）
+    #[test]
+    fn asset_name_follows_target_arch() {
+        match std::env::consts::ARCH {
+            "x86_64" => assert_eq!(asset_name().unwrap(), ASSET_X86_64),
+            "aarch64" => assert_eq!(asset_name().unwrap(), ASSET_AARCH64),
+            // 本仓库只发布这两个架构的产物；测试机若为其他架构应返回 Err
+            _ => assert!(asset_name().is_err()),
+        }
     }
 }

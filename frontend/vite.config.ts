@@ -21,6 +21,9 @@ function cargoVersion(): string {
 
 // 开发时把 /api 代理到后端，生产构建产物由后端 rust-embed 内嵌
 export default defineConfig({
+  // 相对基路径：产物里资源用 ./ 引用，服务端按需注入 <base href="/<安全入口>/">，
+  // 因此在任意入口前缀下都能正确解析（见 backend/src/embed.rs）。
+  base: "./",
   plugins: [
     vue(),
     // element-plus 按需引入：模板里的 el-* 组件与 ElMessage 等 API 只打包用到的那部分，

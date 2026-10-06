@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import http from "../api/http";
+import { basePath } from "../base";
 
 /// 单个字重文件。weight 为 CSS 字重，file 是后端返回的文件名
 /// （内容 sha256 前 16 位 + 扩展名，由服务端生成）。
@@ -62,7 +63,7 @@ export function buildFontCss(cfg: FontConfig | null): string {
   font-weight: ${f.weight};
   font-style: normal;
   font-display: swap;
-  src: url("/fonts/custom/${f.file}") format("${formatHint(f.file)}");
+  src: url("${basePath()}fonts/custom/${f.file}") format("${formatHint(f.file)}");
 }`,
   );
   return `${blocks.join("\n")}

@@ -1,9 +1,10 @@
 import axios from "axios";
 import router from "../router";
+import { apiBase } from "../base";
 
 // 统一的 axios 实例：自动携带 JWT，401 时跳登录
 const http = axios.create({
-  baseURL: "/api",
+  baseURL: apiBase(),
   timeout: 15000,
 });
 
