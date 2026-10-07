@@ -430,6 +430,30 @@ onMounted(() => {
   /* 父容器不是带 gap 的 flex，标题上方留白得自己带（R4） */
   margin: var(--sp-4) 0 var(--sp-2);
 }
+/* crontab 表靠全局那条「根节点直接挂 .el-table → 吃满剩余高度」的规则拿高度，
+   「systemd 定时器」表却是裹在 .block-timers 里的二级节点，那条规则够不着，
+   于是只剩内容高（空态 92px）。这里让它也参与分高：两表各占剩余高度的一半，
+   各自在块内滚动，页面本身仍不产生整页滚动。 */
+.block-timers {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* 与告警页 .block 同一套写法：把 EP 表格由「内容多高就多高」拉成撑满的 flex 子项，
+   表头固定、body 区滚动。 */
+.block-timers :deep(.el-table) {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+  display: flex;
+  flex-direction: column;
+}
+.block-timers :deep(.el-table__body-wrapper) {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
 .dot-wrap {
   display: inline-flex;
   align-items: center;
