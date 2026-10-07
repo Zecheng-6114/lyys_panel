@@ -34,17 +34,29 @@ export interface MonetResult {
 /// 毫秒级。这个值也是 material-color-utilities 自带示例用的值。
 const SAMPLE_EDGE = 128;
 
-/// 页面/卡片底色专用的彩度，以及它们各自的明度档。
+/// 页面/卡片/文字共用的彩度，以及深浅两套明度档。
 ///
-/// 🔴 为什么不能沿用 n1（彩度 4）+ tone 95/99：tone 99 已经在 sRGB 色域的最顶上，
-/// 那里容不下任何彩度，色相会被整个挤掉。实测色相 350 / 20 / 250 三种、彩度
-/// 4 / 8 / 16 / 32 四档，tone 99 一律得到 #fffbff（浅）——也就是说换任何背景图，
-/// 「卡片底色」都停在近纯白，莫奈取色对它等于没生效（页面底色的 tone 95 还没顶到
-/// 色域边界，所以它一直是好的，卡片却不是）。
-/// 这里把彩度提到 8、明度往下让出两档（95/99 → 94/97），色相才留得住：
-/// 同一个色相下卡片底色这才真的跟着图片走，而「卡片比页面亮一档」的层次不变。
-/// 深色档的 6/12 本来就落在色域内，不动。
+/// 🔴 为什么不能沿用 n1（彩度 4）：
+///   - 浅色档：tone 99 已经在 sRGB 色域的最顶上，那里容不下任何彩度，色相会被
+///     整个挤掉。实测色相 350 / 20 / 250 三种、彩度 4 / 8 / 16 / 32 四档，
+///     tone 99 一律得到 #fffbff —— 换任何背景图「卡片底色」都停在近纯白，
+///     莫奈取色对它等于没生效（页面底色的 tone 95 还没顶到色域边界，所以它
+///     一直是好的，卡片却不是）。把彩度提到 8、明度往下让出两档（95/99 →
+///     94/97），色相才留得住，而「卡片比页面亮一档」的层次不变。
+///   - 深色档：tone 6/12/90 落在色域最暗处，别处够用的彩度在这里显得很弱。
+///     实测（hue 283 的蓝紫图）：请求彩度 4 → 页面底色 #131316 对深色预设的
+///     #141414 只差 2 个色阶、卡片 #1f1f23 对 #1d1d1d 差 6 个；提到 8 也只到
+///     差 6 / 10，实机看仍旧「像没变」。所以深色档用一个更大的请求彩度。
+///
+/// 🔴 两边请求值不同，是色域余量不同导致的：浅色档的 tone 94/97 已经贴着
+/// 色域上边界，请求彩度超过 8 就被裁掉（B 卡在 255，实测实际彩度封顶 ~8）；
+/// 深色档的 tone 6/12 离边界还远，请求多少就实得多少（16 → 实际 16）。
+/// 换言之浅色档已经是它的上限，深色档要更多彩度才追到同等的可见度。
 const SURFACE_CHROMA = 8;
+/// 深色档专用（见上）。实测 16 时 hue 283 得到 页面 #111223 / 卡片 #1d1e30 /
+/// 文字 #e1e0f9，对纯灰分别差 15 / 19 / 17 个色阶 —— 一眼能看出是蓝紫调，
+/// 又还没到「染色过头」的程度。
+const SURFACE_CHROMA_DARK = 16;
 const SURFACE_TONE_PAGE = 94;
 const SURFACE_TONE_CARD = 97;
 
@@ -79,19 +91,20 @@ export async function monetFromImage(dataUrl: string, dark: boolean): Promise<Mo
   const palette = CorePalette.of(source);
   const hex = (argb: number) => hexFromArgb(argb).toLowerCase();
 
-  // 中性色盘：与源色同色相、彩度压到 4 的一支，用它铺正文，
-  // 整体会带上图片的色调又不会喧宾夺主（这就是「莫奈」的观感来源）。
+  // 中性色盘：与源色同色相、彩度压到 4 的一支。它只用来取色相（以及灰度图
+  // 时的主色），底色与文字都另走 surface 那支提过彩度的（见 SURFACE_CHROMA）。
   const n = palette.n1;
 
-  // 页面/卡片的底色另起一支色板：与 n 同色相，但浅色档把彩度提到 8、
-  // 明度档从 95/99 下调到 94/97 —— 沿用 n 的 tone 99 会顶到 sRGB 色域边界，
-  // 彩度被整个挤掉，换任何图卡片底色都停在近纯白（详见 SURFACE_CHROMA）。
+  // 页面/卡片底色与文字色统一出一支色板：与 n 同色相，彩度按深浅各取一档
+  // （浅色档受色域所限只能到 8，深色档要走 16，理由见 SURFACE_CHROMA）。
   // 灰度图没有色相可依，退回零彩度，得到一套干净的中性主题。
-  const surface = TonalPalette.fromHueAndChroma(n.hue, achromatic ? 0 : SURFACE_CHROMA);
-  // 深色档（6/12）本来就落在色域内、色相留得住，不动它，仍走 n。
-  const surfacePal = dark ? n : surface;
-  const bgPage = hex(surfacePal.tone(dark ? 6 : SURFACE_TONE_PAGE));
-  const bgCard = hex(surfacePal.tone(dark ? 12 : SURFACE_TONE_CARD));
+  const surface = TonalPalette.fromHueAndChroma(
+    n.hue,
+    achromatic ? 0 : dark ? SURFACE_CHROMA_DARK : SURFACE_CHROMA,
+  );
+  const bgPage = hex(surface.tone(dark ? 6 : SURFACE_TONE_PAGE));
+  const bgCard = hex(surface.tone(dark ? 12 : SURFACE_TONE_CARD));
+  const text = hex(surface.tone(dark ? 90 : 10));
 
   if (achromatic) {
     // 灰度图没有能当主色的颜色。主色退回面板自己的黑白灰口径（浅色近黑、
@@ -103,7 +116,7 @@ export async function monetFromImage(dataUrl: string, dark: boolean): Promise<Mo
         primary: hex(n.tone(dark ? 90 : 10)),
         bg_page: bgPage,
         bg_card: bgCard,
-        text: hex(n.tone(dark ? 90 : 10)),
+        text,
       },
     };
   }
@@ -116,7 +129,7 @@ export async function monetFromImage(dataUrl: string, dark: boolean): Promise<Mo
       primary: hex(palette.a1.tone(dark ? 80 : 40)),
       bg_page: bgPage,
       bg_card: bgCard,
-      text: hex(n.tone(dark ? 90 : 10)),
+      text,
     },
   };
 }
