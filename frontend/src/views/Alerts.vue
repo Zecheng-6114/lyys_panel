@@ -325,9 +325,22 @@ const probeRows = computed<ProbeRow[]>(() =>
   targets.value.map((t) => ({ ...t, status: statusById.value[t.id] ?? null })),
 );
 
+/** 生成探针 id：32 位十六进制随机串，满足后端「非空、≤64、仅字母数字/-/_」的校验。
+ *
+ * 🔴 不能用 crypto.randomUUID：它只在**安全上下文**（HTTPS 或 localhost）下存在，
+ * 面板默认走明文 HTTP，此时 window.isSecureContext 为 false、`crypto.randomUUID`
+ * 直接是 undefined。而它在 setup 顶层经 emptyProbe() 被调到，一抛错整个组件
+ * 渲染就中断 —— 表现是「告警通知」页点进去内容区一片空白，连根节点都没挂上
+ * （router-view 只剩一个注释占位），看起来像页面挂了，其实别的页面都正常。
+ * getRandomValues 不受安全上下文限制，用它自己拼一串即可。 */
+function newProbeId(): string {
+  const buf = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(buf, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 function emptyProbe(): ProbeTarget {
   return {
-    id: crypto.randomUUID(),
+    id: newProbeId(),
     name: "",
     url: "",
     enabled: true,
