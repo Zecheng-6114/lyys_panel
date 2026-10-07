@@ -3,6 +3,86 @@
 本文件记录 LYYS Panel 的显著变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循语义化版本（[SemVer](https://semver.org/lang/zh-CN/)）。
 
+## [1.13.0] - 2026-10-07
+
+### 新增
+- 文件列表补齐可读信息：名字前按类型给图标（目录 / 文档 / 图片 / 视频 / 音频 /
+  压缩包 / 软链，沿用面板单色系），新增属主 / 属组列（主机经 NSS 的 getpwuid_r /
+  getgrgid_r 解析并按进程缓存，容器内直接取 `ls -l`），权限补到四位；每行只留
+  一个主操作，下载、压缩、解压、改权限、重命名、删除收进「更多」下拉，为名字列
+  腾出 180px；表格下方加一行统计（条目总数、目录数、文件数） (21d5e99)
+- 背景图可缩放与调位置：主题配置新增 bg_zoom (100..300) 与 bg_x / bg_y (0..100)
+  并在 validate_theme 校验，默认 100/50/50 即原来的 cover + 居中；尺寸按视口推导、
+  宽高比解码后重注入，设置页用三个滑杆实时预览且不落库 (232ba03)
+- Let's Encrypt 证书自动签发与续期：零新依赖实现 ACME v2 客户端（ring 做 ES256
+  的 JWS、rcgen 做账户密钥与 CSR、reqwest 走 HTTP），账户密钥落
+  `<data_dir>/acme/account.key` (0600)；以 http-01 校验，站点占用 80 时把 challenge
+  location 注入其 server block；签发前后各 `nginx -t` 并 reload，任一失败即回滚证书
+  与配置；首次手动签发，之后证书满 60 天由后台任务自动续期 (67af227)
+- 站点可用性探针：新增独立的 60s 探测循环（远慢于 2s 的主机采样，不会拖住监控），
+  连续失败达阈值才判宕机、对应收到成功才判恢复；复用 alerts::send_with_retry 投递
+  但不写 alert_events（该表按百分比渲染，站点行会显示成 0.0%）；每个目标可配预期
+  状态码、响应体关键字、超时与忽略证书错误，告警页新增探针区块 (b73cb91)
+- 网站管理：为静态托管与反向代理生成并应用 nginx 配置，面板自有配置只落
+  `/etc/nginx/conf.d/lyys-site-<id>.conf`（Arch 缺该 include 时备份 nginx.conf 并
+  注入标记行）；配置由表单项生成而非粘贴原文，应用顺序为写入 → `nginx -t` →
+  reload，测试或 reload 失败即回滚；HTTPS 支持自签 (rcgen) 或上传证书，私钥 0600
+  且不经 API 返回；server_name / root / upstream 走严格白名单校验 (5590a94)
+- 备份投递到 WebDAV（可选加密）：备份创建后 PUT 到配置的远端目录（Nextcloud /
+  Synology / 坚果云等），可设口令用 AES-256-GCM 加密载荷（PBKDF2-SHA256 20 万次
+  派生密钥，容器带 magic header 供导入识别）；WebDAV 密码与口令只返回 *_set 标记、
+  不回显，保存留空表示沿用原值；远端失败只记日志，不影响本地备份 (1972d91)
+- 告警渠道「测试发送」：管理员可用与真实告警相同的代码路径发一条测试消息，渠道先
+  校验且不落库（测试不会改动配置），请求带超时，避免上游不可达时卡住界面 (a23ad74)
+- 五项对比同类面板缺失的能力：安全入口（可选路径前缀 + 来源 IP 白名单，回环对端
+  才信任首个 X-Forwarded-For）、告警渠道（钉钉 / 企业微信 / 飞书 / Telegram 加通用，
+  各家的 payload 与其「HTTP 200 包业务错误」均处理，退避重试至多三次且不阻塞采样，
+  旧 webhook 自动迁移）、备份选项（目录与保留份数可配、支持上传并恢复）、ARM
+  自更新（按编译架构取 lyys-panel / lyys-panel-aarch64 及同名校验文件）、systemd
+  定时器（命令写进数据目录脚本、unit 只跑 /bin/sh） (192a334)
+- 文件管理新增压缩、解压、改权限与改属主：压缩打包成同级 .tar.gz，解压支持 tar、
+  tar.gz、tgz、tar.bz2、tar.xz 与 zip；四者统一走 cmd.rs 出口（继承超时、输出上限
+  与进程回收），tar 与 chown 从固定 sbin/bin 目录定位而非 PATH；路径经 resolve、
+  归档不得写入受保护数据目录、模式 / 属主 / 后缀均先校验，附单元测试 (7fd2098)
+- 防火墙管理：驱动发行版自带前端（Debian 上 ufw、Arch 上 firewalld）而非直接写
+  iptables/nftables，管理员可查看状态与规则、放行或拒绝端口、删规则、启停；规则
+  写入走新的 LockGroup::Firewall 命令预算以免并发交错丢状态，端口 / 来源 / 协议
+  校验后作为独立 argv 传入、不经 shell；未装后端时页面提示要装的包 (d940e98)
+
+### 变更
+- 侧栏、顶栏、内容区从贴边改为漂浮在模糊背景上的独立圆角面板，四周留
+  --frame-gap；背景以背景图模糊副本铺底（.layout::before），--panel-table-height
+  同步按 --frame-gap 派生；设置页纵向再收紧一档以补回被 frame gap 吃掉的 30px (b188cdc)
+- 全站并入一套间距标尺：所有 padding / margin / gap 归到 --sp-* 令牌（就高不就低），
+  卡片内距、块间距、节标题（14px / 600）各自只留一个值；日志与输出块共用一套内距
+  与行高；Instances / Packages 的表格偏移改为用 --panel-table-height 表达 (e9bbd33)
+- 侧边栏滚动条彻底隐藏（Firefox 用 scrollbar-width: none，Chromium 用零宽 webkit
+  伪元素），保留 overflow-y: auto 以让矮屏仍能滚到末尾分组 (2440fd9)
+- 设置页卡片改为响应式网格（够宽并排、不够则堆叠，留有真实间隙），.settings 撑满
+  内容区、滚动留在页签主体内，并按「框架不滚、内容滚」收紧纵向节奏以适配一屏 (c9071d9)
+
+### 修复
+- 表格可读性与空态文案：表头由 --el-text-color-secondary 改为 regular 并加粗到
+  600（原对比度仅 2.9:1，比正文还淡）、正文字号提到 13px（列内距不变），并在
+  App.vue 用 el-config-provider 把 Element Plus 文案统一为中文（空态、分页等） (fa7b8c2)
+- 深度运维页整页滚动：三块面板自然高度合计比内容区多 10px，使 .content 常驻滚动条
+  （实测 scrollHeight 824 / clientHeight 814）；令 .ops 撑满内容区，容器日志面板
+  吃掉剩余高度并保留 120px 下限 (21f8372)
+- 告警通知页在明文 HTTP 下整页空白：探针默认行在 setup 顶层调用 crypto.randomUUID，
+  该函数仅在安全上下文（HTTPS 或 localhost）存在，明文 HTTP 下为 undefined 并抛错，
+  致组件树整体不挂载；改用不受安全上下文限制的 crypto.getRandomValues 拼 32 位
+  十六进制 id (0950d38)
+- 计划任务页 systemd 定时器表被压到内容高度（空表仅 92px）：.block-timers 也设为
+  弹性项并拉伸其中表格，两张表各分剩余高度、各自滚动 (e503437)
+- 告警规则表四列全定宽（合计 440px）致表头只铺满三分之一：指标列改为 min-width
+  以吸收余量，表头与行铺满整张卡片 (49f6c6b)
+- 深色档莫奈取色看不出色相：深色档沿用中性调色板 (chroma 4)，在 tone 6 / 12 / 90
+  处彩度几乎归零（实测页面色 #131316 距纯色 #141414 仅 2 阶、卡片 #1f1f23 距
+  #1d1d1d 6 阶）；深色表面改用与浅色档同源、彩度 16 的调色板 (c9ca4e3)
+- 莫奈取色的卡片底色被挤出色调：卡片底色取自中性调色板 tone 99，该处无彩度存活，
+  卡片恒为近白 #fffbff；改为页面与卡片各用一套提升彩度的调色板（浅色 tone 降到
+  94/97），灰阶图回退为中性色 (bb165c6)
+
 ## [1.12.0] - 2026-10-06
 
 ### 新增
