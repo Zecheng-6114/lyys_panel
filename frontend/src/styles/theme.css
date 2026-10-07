@@ -432,8 +432,11 @@ body {
    一并重置为 none，背景图因此始终不显示 —— 只能用 background-color。） */
 .content {
   background-image: var(--panel-bg-image, none);
-  background-size: cover;
-  background-position: center;
+  /* 尺寸与位置由主题配置注入（stores/theme.ts 的 bgSize）：缺省 cover + center，
+     与从前完全一致。注入的算式是按视口推出来的，只有 background-attachment:
+     fixed（定位区 = 视口）时才对得上，两者必须成对存在。 */
+  background-size: var(--panel-bg-size, cover);
+  background-position: var(--panel-bg-position, center);
   background-attachment: fixed;
   background-repeat: no-repeat;
 }

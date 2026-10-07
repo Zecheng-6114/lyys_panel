@@ -16,6 +16,12 @@ export interface ThemeConfig {
   colors?: ThemeColors;
   /// 背景图（data URL，内嵌在配置里，不落盘）
   bg_image?: string;
+  /// 背景图缩放（百分数）。100 = 铺满视口，上限 300 —— 见 bgSize 的推法。
+  bg_zoom?: number;
+  /// 背景图位置（百分数）：0 靠一边、50 居中、100 靠另一边。
+  /// 只在缩放后仍有多余量的那个方向上起作用（铺满的方向没有可移动的余量）。
+  bg_x?: number;
+  bg_y?: number;
 }
 
 export interface ThemeColors {
@@ -115,6 +121,83 @@ function safeBgImage(s: unknown): string | null {
   return s;
 }
 
+/// 背景缩放白名单（P1-2）：有限数 clamp 到 100..300，其余视为未提供。
+/// 下限锁在 100：100% 的含义就是「铺满视口」，再小就会露出底板颜色。
+function safeZoom(v: unknown): number | null {
+  if (typeof v !== "number" || !Number.isFinite(v)) return null;
+  return Math.min(300, Math.max(100, v));
+}
+
+/// 背景位移白名单（P1-2）：有限数 clamp 到 0..100（百分数）
+function safePos(v: unknown): number | null {
+  if (typeof v !== "number" || !Number.isFinite(v)) return null;
+  return Math.min(100, Math.max(0, v));
+}
+
+/// 背景图长宽比（宽 ÷ 高）。buildThemeCss 是同步的、解码是异步的，所以这里
+/// 只缓存「最近解出来的那一张」：命中不了就先按 CSS 的 cover 兜底渲染，解出来
+/// 再重注入一次；同一张图只解一次。
+let bgAspect: { src: string; ratio: number } | null = null;
+
+/// 解 data URL 的像素尺寸取长宽比；解不出来返回 null（保持 cover 兜底）
+function decodeAspect(src: string): Promise<number | null> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () =>
+      resolve(
+        img.naturalWidth > 0 && img.naturalHeight > 0
+          ? img.naturalWidth / img.naturalHeight
+          : null,
+      );
+    img.onerror = () => resolve(null);
+    img.src = src;
+  });
+}
+
+/// 保证这张图的长宽比已经解出来；没解过就异步解一次，解完回调（重渲染样式）。
+function ensureAspect(image: string, done: () => void) {
+  if (bgAspect?.src === image) return;
+  void decodeAspect(image).then((ratio) => {
+    if (ratio === null) return;
+    bgAspect = { src: image, ratio };
+    done();
+  });
+}
+
+/// 背景尺寸算式：把 cover 展开成显式表达式，再乘缩放系数。
+///
+/// CSS 的 cover 是按图片实际长宽比算出来的，样式里没法再乘一个系数 ——
+/// 所以这里自己算一遍：cover 的宽 = max(视口宽, 视口高 × 图片长宽比)。
+/// 用 vw/vh 表达有个前提：背景是 background-attachment: fixed，定位区
+/// （positioning area）恰好就是视口本身，100vw/100vh 正是 cover 要比的那两个
+/// 尺寸；窗口尺寸变化时浏览器自己重算，不需要 JS 参与。
+/// 长宽比未知时返回 null，由调用方退回 CSS 的 cover。
+function bgSize(zoom: number, ratio: number | null): string | null {
+  if (ratio === null) return null;
+  const z = zoom / 100;
+  const n = (v: number) => Number(v.toFixed(4));
+  return `max(calc(100vw * ${n(z)}), calc(100vh * ${n(z * ratio)})) auto`;
+}
+
+/// 背景图相关的 CSS 变量（图 / 尺寸 / 位置）。主题注入与设置页的即时预览
+/// 共用这一份 —— 滑杆里看到的算式必须和保存后生效的完全是同一套。
+function bgVars(cfg: ThemeConfig): string[] {
+  const image = safeBgImage(cfg.bg_image);
+  if (!image) return [];
+  const out = [`--panel-bg-image: url("${image}");`];
+  const zoom = safeZoom(cfg.bg_zoom);
+  if (zoom !== null) {
+    const size = bgSize(zoom, bgAspect?.src === image ? bgAspect.ratio : null);
+    if (size) out.push(`--panel-bg-size: ${size};`);
+  }
+  const x = safePos(cfg.bg_x);
+  const y = safePos(cfg.bg_y);
+  if (x !== null || y !== null) {
+    out.push(`--panel-bg-position: ${x ?? 50}% ${y ?? 50}%;`);
+  }
+  return out;
+}
+
 /// 把主题配置翻译成注入用的 CSS 文本；空配置返回空串（不注入）。
 /// P1-2：所有字段注入前过白名单，非法值直接丢弃（该条 CSS 变量不生成），
 /// 防止服务端或导入主题包里的恶意值进入样式上下文。
@@ -208,25 +291,61 @@ export function buildThemeCss(cfg: ThemeConfig): string {
     pushColorVars(lines, "warning", mid, fade);
     pushColorVars(lines, "info", mid, fade);
   }
-  const bgImage = safeBgImage(cfg.bg_image);
-  if (bgImage) lines.push(`--panel-bg-image: url("${bgImage}");`);
+  lines.push(...bgVars(cfg));
   if (!lines.length) return "";
   return `:root {\n${lines.join("\n")}\n}`;
 }
 
-/// 注入/替换单个 <style>，保证级联顺序在打包 CSS 之后（后者胜）
-function injectStyle(css: string) {
-  let el = document.getElementById("panel-theme") as HTMLStyleElement | null;
+/// 注入/替换单个 <style>，保证级联顺序在打包 CSS 之后（后者胜）。
+/// 同 id 复用同一个元素，避免反复插拔；不同 id（预览另占一条）各留一个位置。
+function injectStyle(css: string, id = "panel-theme") {
+  let el = document.getElementById(id) as HTMLStyleElement | null;
   if (!css) {
     if (el) el.textContent = "";
     return;
   }
   if (!el) {
     el = document.createElement("style");
-    el.id = "panel-theme";
+    el.id = id;
     document.head.appendChild(el);
   }
   el.textContent = css;
+}
+
+/// 设置页正在预览的那份背景配置（null = 没在预览）
+let previewCfg: ThemeConfig | null = null;
+
+function renderPreview() {
+  const vars = previewCfg ? bgVars(previewCfg) : [];
+  // 预览态下「没有背景图」也要显式压成 none：主题样式里可能还留着已保存的那张，
+  // 不压的话点「清除」后画面上还是旧图，看着像没生效。
+  if (previewCfg && !safeBgImage(previewCfg.bg_image)) {
+    vars.push("--panel-bg-image: none;");
+  }
+  injectStyle(vars.length ? `:root {\n${vars.join("\n")}\n}` : "", "panel-bg-preview");
+}
+
+/// 背景图几何的即时预览（不写库）：设置页拖动缩放/位置滑杆、换图时先落到页面上。
+///
+/// 单独一条 <style>，且固定排在主题样式之后 —— 两边都是 :root 规则、特异性
+/// 相同，后出现在文档里的那条胜出。离开设置页（clearBgPreview）或保存主题后
+/// 主题样式重新接管。
+export function previewBg(cfg: ThemeConfig | null) {
+  previewCfg = cfg;
+  renderPreview();
+  const image = cfg ? safeBgImage(cfg.bg_image) : null;
+  // 长宽比晚一步才解出来时，预览里的缩放算式不完整 —— 解完补渲染一次
+  if (image) {
+    ensureAspect(image, () => {
+      if (previewCfg === cfg) renderPreview();
+    });
+  }
+}
+
+/// 收起预览，主题样式重新接管
+export function clearBgPreview() {
+  previewCfg = null;
+  injectStyle("", "panel-bg-preview");
 }
 
 // 主题 store：主题定制（颜色/圆角/背景），定制持久化到后端 settings 表
@@ -238,6 +357,16 @@ export const useThemeStore = defineStore("theme", () => {
   function applyConfig(cfg: ThemeConfig | null) {
     config.value = cfg;
     injectStyle(cfg ? buildThemeCss(cfg) : "");
+    // 缩放算式要图片长宽比，而解码是异步的：先把 CSS 的 cover 兜底渲染出去，
+    // 解出来再重注入一次（缩放 = 100% 时两者本就等价，看不出来）。
+    const image = cfg ? safeBgImage(cfg.bg_image) : null;
+    if (image) {
+      ensureAspect(image, () => {
+        if (config.value && safeBgImage(config.value.bg_image) === image) {
+          injectStyle(buildThemeCss(config.value));
+        }
+      });
+    }
   }
 
   /// 登录后从服务端拉取定制配置

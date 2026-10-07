@@ -406,14 +406,20 @@ async function logout() {
    inset 取负值向外扩：高斯模糊会把图像边缘糊成半透明，扩出去的这一圈
    正好落在视口之外，免得四周糊出一圈发虚的亮边。
    z-index:-1 把它压到所有面板之下。这里不能用 background 简写直接铺在
-   .layout 自己身上 —— filter 会把面板内容一起糊掉。 */
+   .layout 自己身上 —— filter 会把面板内容一起糊掉。
+   尺寸/位置与内容区那张清晰图共用同一对变量（主题定制注入），所以两张图
+   是同一块取景：平移/缩放时模糊层跟着一起动，不会错开。
+   🔴 background-attachment: fixed 是这套变量成立的前提，不能省：不写的话
+   定位区会变成这个 inset:-64px 的框（比视口大一圈），而注入的算式是按视口
+   推的，取景就会和清晰图差一截。 */
 .layout::before {
   content: "";
   position: fixed;
   inset: -64px;
   background-image: var(--panel-bg-image, none);
-  background-size: cover;
-  background-position: center;
+  background-size: var(--panel-bg-size, cover);
+  background-position: var(--panel-bg-position, center);
+  background-attachment: fixed;
   filter: blur(48px);
   z-index: -1;
 }

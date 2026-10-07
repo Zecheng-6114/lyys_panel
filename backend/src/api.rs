@@ -1938,6 +1938,18 @@ fn validate_theme(cfg: &serde_json::Value) -> Result<(), String> {
                     return Err("bg_image 含有不允许的字符".into());
                 }
             }
+            "bg_zoom" => {
+                let z = v.as_f64().ok_or("bg_zoom 必须是数字")?;
+                if !(100.0..=300.0).contains(&z) {
+                    return Err("bg_zoom 必须在 100..300 之间".into());
+                }
+            }
+            "bg_x" | "bg_y" => {
+                let n = v.as_f64().ok_or(format!("{k} 必须是数字"))?;
+                if !(0.0..=100.0).contains(&n) {
+                    return Err(format!("{k} 必须在 0..100 之间"));
+                }
+            }
             _ => return Err(format!("未知字段：{k}")),
         }
     }

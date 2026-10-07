@@ -202,6 +202,53 @@
               <label>图片</label>
               <div class="btns">
                 <el-button size="small" @click="pickImage">选择图片</el-button>
+                <!-- 位置与缩放：滑杆放在气泡里，拖的时候看的就是内容区那张真图 -->
+                <el-popover
+                  v-if="draft.bg_image"
+                  placement="bottom-start"
+                  :width="250"
+                  trigger="click"
+                  popper-class="bg-adjust-pop"
+                >
+                  <template #reference>
+                    <el-button size="small">位置与大小</el-button>
+                  </template>
+                  <div class="bg-adjust">
+                    <div class="bg-adjust-item">
+                      <span>大小 {{ draft.bg_zoom }}%</span>
+                      <el-slider
+                        v-model="draft.bg_zoom"
+                        :min="100"
+                        :max="300"
+                        :step="5"
+                        :show-tooltip="false"
+                      />
+                    </div>
+                    <div class="bg-adjust-item">
+                      <span>左右 {{ draft.bg_x }}%</span>
+                      <el-slider
+                        v-model="draft.bg_x"
+                        :min="0"
+                        :max="100"
+                        :step="1"
+                        :show-tooltip="false"
+                      />
+                    </div>
+                    <div class="bg-adjust-item">
+                      <span>上下 {{ draft.bg_y }}%</span>
+                      <el-slider
+                        v-model="draft.bg_y"
+                        :min="0"
+                        :max="100"
+                        :step="1"
+                        :show-tooltip="false"
+                      />
+                    </div>
+                    <div class="bg-adjust-foot">
+                      <el-button link size="small" @click="resetBgAdjust">重置</el-button>
+                    </div>
+                  </div>
+                </el-popover>
                 <el-button v-if="draft.bg_image" size="small" @click="draft.bg_image = null">
                   清除
                 </el-button>
@@ -214,7 +261,10 @@
                 />
               </div>
             </div>
-            <div v-if="draft.bg_image" class="hint">已设置背景图（铺满内容区，随页面固定）</div>
+            <div v-if="draft.bg_image" class="hint">
+              铺满内容区并随页面固定；点「位置与大小」调缩放与取景，拖动时即时预览，
+              满意后按下面的「保存主题」。
+            </div>
             <div v-else class="hint">
               常见格式均可，大图会自动压缩到最长边 2560 再保存
             </div>
@@ -299,9 +349,16 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import http from "../api/http";
-import { isDarkTheme, useThemeStore, type ThemeColors, type ThemeConfig } from "../stores/theme";
+import {
+  clearBgPreview,
+  isDarkTheme,
+  previewBg,
+  useThemeStore,
+  type ThemeColors,
+  type ThemeConfig,
+} from "../stores/theme";
 import { useFontStore, type FontFace } from "../stores/font";
 import { PRESETS } from "../themes/presets";
 import { monetFromImage } from "../themes/monet";
@@ -477,6 +534,11 @@ interface Draft {
   shadow: boolean;
   colors: DraftColors;
   bg_image: string | null;
+  /// 背景图缩放（百分数，100 = 铺满视口）
+  bg_zoom: number;
+  /// 背景图位置（百分数，50 = 居中）
+  bg_x: number;
+  bg_y: number;
 }
 
 function emptyDraft(): Draft {
@@ -486,6 +548,9 @@ function emptyDraft(): Draft {
     shadow: true,
     colors: { primary: null, bg_page: null, bg_card: null, text: null },
     bg_image: null,
+    bg_zoom: 100,
+    bg_x: 50,
+    bg_y: 50,
   };
 }
 
@@ -507,6 +572,9 @@ function fromConfig(cfg: ThemeConfig | null, keepRadius = false) {
     if (typeof cfg.shadow === "boolean") d.shadow = cfg.shadow;
     if (cfg.colors) Object.assign(d.colors, pickColors(cfg.colors));
     if (cfg.bg_image) d.bg_image = cfg.bg_image;
+    if (typeof cfg.bg_zoom === "number") d.bg_zoom = cfg.bg_zoom;
+    if (typeof cfg.bg_x === "number") d.bg_x = cfg.bg_x;
+    if (typeof cfg.bg_y === "number") d.bg_y = cfg.bg_y;
   }
   Object.assign(draft, d);
 }
@@ -527,7 +595,13 @@ function toConfig(): ThemeConfig {
   cfg.shadow = draft.shadow;
   const colors = compact(draft.colors);
   if (Object.keys(colors).length) cfg.colors = colors;
-  if (draft.bg_image) cfg.bg_image = draft.bg_image;
+  if (draft.bg_image) {
+    cfg.bg_image = draft.bg_image;
+    // 位置/缩放只在有图时有意义，跟着图一起写（没图时不留这三个零值字段）
+    cfg.bg_zoom = draft.bg_zoom;
+    cfg.bg_x = draft.bg_x;
+    cfg.bg_y = draft.bg_y;
+  }
   return cfg;
 }
 
@@ -539,6 +613,32 @@ function compact(c: DraftColors): Record<string, string> {
 
 // 主题配置由 AppLayout 异步拉取，到位后同步进编辑态
 watch(() => theme.config, (cfg) => fromConfig(cfg), { immediate: true });
+
+/* 背景图的即时预览。
+ * 颜色/圆角要等「保存主题」才生效，背景的位置与缩放却必须边拖边看 ——
+ * 拖动滑杆时先把这套几何注入页面（不写库），满意了再保存。预览注入的是
+ * 与主题完全相同的算式（stores/theme.ts 的 bgVars），所以「拖的时候看到的」
+ * 就是「保存后生效的」。离开本页时清掉，避免未保存的几何留在页面上。 */
+watch(
+  () => [draft.bg_image, draft.bg_zoom, draft.bg_x, draft.bg_y],
+  () =>
+    previewBg({
+      version: 1,
+      bg_image: draft.bg_image ?? undefined,
+      bg_zoom: draft.bg_zoom,
+      bg_x: draft.bg_x,
+      bg_y: draft.bg_y,
+    }),
+  { immediate: true },
+);
+onBeforeUnmount(clearBgPreview);
+
+/// 位置与缩放回到出厂值（图片本身不动）
+function resetBgAdjust() {
+  draft.bg_zoom = 100;
+  draft.bg_x = 50;
+  draft.bg_y = 50;
+}
 
 function applyPreset(id: string) {
   const p = PRESETS.find((x) => x.id === id);
@@ -1017,5 +1117,31 @@ onMounted(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--panel-mono);
+}
+</style>
+
+<!-- 气泡里的内容被 EP 传送到 body，scoped 样式够不到，只能另起一个
+     不加 scoped 的块；`.bg-adjust` 是这段的唯一入口类名，不污染别处。 -->
+<style>
+.bg-adjust-pop {
+  padding: var(--sp-3) var(--sp-4);
+}
+.bg-adjust-item + .bg-adjust-item {
+  margin-top: var(--sp-1);
+}
+.bg-adjust-item > span {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  font-variant-numeric: tabular-nums;
+}
+/* 滑杆上下各留 6：EP 默认给 6px，加上下面那条鞋垫线共 18px，
+   三条并排时气泡会显得很空，收成 2px 让三组读起来是一块 */
+.bg-adjust-item .el-slider {
+  margin: 2px 0;
+}
+.bg-adjust-foot {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--sp-1);
 }
 </style>
