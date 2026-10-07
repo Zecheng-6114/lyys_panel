@@ -285,6 +285,28 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: var(--sp-4);
+  /* 撑满 .content：三块面板的高度都从这 100% 里分配。
+     原先不写高度、由内容自然撑开，三块加起来比可用高度多 10px，
+     .content（overflow-y:auto）就稳稳地多出一条整页滚动 —— 实测
+     scrollHeight 824 / clientHeight 814，正好差这 10px。 */
+  height: 100%;
+  min-height: 0;
+}
+/* 前两块按内容占高：SMART 表的行数取决于机器上几块盘，unit 文件是只读输出，
+   都没有「该占多高」的先验；第三块（容器日志流）吃掉剩下的全部高度 ——
+   日志是这一页唯一越多越有用的输出，让它的可视区跟着视口走，
+   比写死 320px 更合理，也顺手把上面那 10px 的溢出收干净。 */
+.ops > .panel:last-child {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.ops > .panel:last-child .log-pane {
+  flex: 1 1 auto;
+  /* 矮屏兜底：再挤也留住几行日志，宁可让 .content 出现内部滚动 */
+  min-height: 120px;
+  height: auto;
 }
 .panel {
   background: var(--el-bg-color);
