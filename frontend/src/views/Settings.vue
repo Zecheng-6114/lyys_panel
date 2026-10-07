@@ -859,12 +859,66 @@ onMounted(() => {
 </script>
 
 <style scoped>
+/* 🔴 设置页撑满 .content，让滚动收进页签主体 —— 与列表页同一套
+   「框架不滚、内容滚」的语言（见 theme.css 里那条 :has() 规则）。
+   不加这三条的话，页签内容一旦高出可用高度，长高的就是 .settings
+   自己，撑破 .content 的内容盒、在整块内容区右侧多出一条滚动条，
+   顶栏下的整页跟着滚 —— 而除仪表盘外，面板其余页面都不滚，这是刻意
+   留出的直观感（设置页是唯一的例外，此前一直漏了这层约束）。 */
+.settings {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.settings :deep(.el-tabs) {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* 页签栏按内容占高、卡片区吃剩下的高度：窗口再矮也只滚卡片区，
+   页签栏保持不动。内容装得下时这里不出滚动条。 */
+.settings :deep(.el-tabs__content) {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
 .card {
   background: var(--el-bg-color);
   border-radius: var(--radius, 8px);
-  padding: var(--sp-4) var(--sp-5);
+  padding: var(--sp-3) var(--sp-5);
   /* 与仪表盘卡片同一档：全站「白块浮在底色上」的语言只此一套 */
   box-shadow: var(--panel-shadow-1);
+  /* 栅格子项默认 min-width:auto，长文件名一类的不可折内容会把卡片撑破 */
+  min-width: 0;
+}
+/* 每个页签里的卡片走响应式栅格：窄屏一列堆叠，宽屏并排。
+   此前卡片是相邻的块级元素、彼此没有外边距，两块白底直接贴在一起，
+   只靠投影勉强分界；宽屏时右侧还空着一大片。改为按内容最小宽自动分列后，
+   既有明确间隔，也把横向空间用起来。 */
+.settings :deep(.el-tab-pane) {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+  gap: var(--sp-4);
+  /* 不拉平高度：宁可两块高度不一，也不要短卡片被撑出大片空白 */
+  align-items: start;
+}
+/* 纵向节奏收紧一档：设置页是面板里最长的一页表单，字段数量多，
+   Element Plus 默认的表单项/页签栏间距是按通用页面给的，堆在这里
+   正好把内容顶出视口。字段之间的呼吸感靠标签与内距已经够了，
+   把富余的间距让出去，两屏内容才落得进一屏。 */
+.settings :deep(.el-tabs__header) {
+  margin-bottom: var(--sp-3);
+}
+.settings :deep(.el-form-item) {
+  margin-bottom: var(--sp-3);
+}
+/* 顶置标签的 22px 行高是固定的，EP 默认再往下补 8px；标签与它自己的
+   输入框本来就贴在一起读，这 8 全是富余，收一档。 */
+.settings :deep(.el-form-item__label) {
+  margin-bottom: var(--sp-1);
 }
 .card-title {
   font-size: 15px;
@@ -874,11 +928,11 @@ onMounted(() => {
 .card-sub {
   font-size: 12px;
   color: var(--el-text-color-secondary);
-  margin-bottom: 16px;
+  margin-bottom: var(--sp-2);
   line-height: 1.6;
 }
 .form {
-  margin-top: 8px;
+  margin-top: 0;
 }
 /* 卡片占满内容区，但输入控件保持可读宽度 */
 .settings :deep(.el-form-item__content) {
