@@ -431,20 +431,17 @@ async function logout() {
   --el-menu-item-height: 32px;
   --el-menu-base-level-padding: 12px;
 }
-/* 侧栏滚动条做得极窄且默认透明：导航区不该常驻一条深色竖条，
-   只在鼠标移入侧栏时才显形提示可滚动 */
+/* 侧栏滚动条彻底隐去：导航区不该出现任何竖条，常驻的、移入才显形的都不要。
+   条目多于屏高时仍能用滚轮/触控板滚动 —— 不能改成 overflow: hidden，
+   矮屏下底部分组会被裁掉且无法触达。
+   scrollbar-width: none 覆盖 Firefox；Chromium 认下这条标准属性后就不再走
+   下面的 webkit 伪元素，两边结果一致（都是没有滚动条），不会互相打架。 */
+.side-menu {
+  scrollbar-width: none;
+}
 .side-menu::-webkit-scrollbar {
-  width: 4px;
-}
-.side-menu::-webkit-scrollbar-track {
-  background: transparent;
-}
-.side-menu::-webkit-scrollbar-thumb {
-  background: transparent;
-  border-radius: var(--radius);
-}
-.side-menu:hover::-webkit-scrollbar-thumb {
-  background: var(--el-fill-color-darker);
+  width: 0;
+  height: 0;
 }
 /* 分组标题：小字 + 宽字距，只靠字号与颜色分层 —— 主题约定无边框，
    所以不用分隔线，分组感由标题留白承担 */
