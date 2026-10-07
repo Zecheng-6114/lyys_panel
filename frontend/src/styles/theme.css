@@ -548,6 +548,10 @@ body {
  * 高对比主题（radius 0）靠线条分层，那边的表格线由该主题自己补回来。 */
 .el-table {
   background: var(--el-bg-color);
+  /* 字号：EP 的 size="small" 给的是 12px，中文在这个字号下笔画糊成一团，
+     整张表比旁边的卡片「轻」一档 —— 列表页的主内容反而最不清楚。
+     抬到 13px，列内距不动（仍是 8px 纵向），一屏照样 20 行上下。 */
+  font-size: 13px;
 }
 .el-table .el-table__inner-wrapper::before {
   display: none;
@@ -560,8 +564,11 @@ body {
 }
 .el-table .el-table__header th.el-table__cell {
   background: var(--el-fill-color);
-  color: var(--el-text-color-secondary);
-  font-weight: 500;
+  /* 抬头色：原来是 --el-text-color-secondary，实测落在表头底色上只有
+     2.9:1 —— 比表体的正文还淡，一眼看过去表头是糊的。换成 regular
+     （约 6:1）并加粗到 600，小字号下才立得住。 */
+  color: var(--el-text-color-regular);
+  font-weight: 600;
 }
 
 /* ---------- 标签（实例卡上的「容器」「服务」）：去掉描边，靠底色分层 ----------
