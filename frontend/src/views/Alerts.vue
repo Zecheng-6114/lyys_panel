@@ -11,7 +11,7 @@
     <div class="block block-rules">
       <div class="section-title">告警规则</div>
       <el-table v-loading="loading" :data="rules" size="small">
-        <el-table-column label="指标" v-bind="col(120)">
+        <el-table-column label="指标" v-bind="col(120, true)">
           <template #default="{ row }">{{ metricLabel(row.metric) }}</template>
         </el-table-column>
         <el-table-column label="阈值" v-bind="col(100)">
