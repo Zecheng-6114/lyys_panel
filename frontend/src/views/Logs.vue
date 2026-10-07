@@ -206,7 +206,7 @@ onMounted(async () => {
   border-radius: var(--radius);
   /* 与卡片 / 表格同档：整块白底从页面底色上托起，否则日志区一片白贴着底色 */
   box-shadow: var(--panel-shadow-1);
-  padding: 12px 16px;
+  padding: var(--sp-3) var(--sp-4);
   height: var(--panel-table-height);
   overflow: auto;
   font-family: var(--panel-mono);

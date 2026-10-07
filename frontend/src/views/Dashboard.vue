@@ -799,7 +799,7 @@ onBeforeUnmount(() => {
 .dash {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-3);
+  gap: var(--sp-4);
 }
 .cards {
   display: grid;
@@ -808,15 +808,18 @@ onBeforeUnmount(() => {
      列数和卡片跨度必须出自同一处，否则 span 会大于列数、撑出隐式轨道。 */
   grid-template-columns: repeat(4, 1fr);
   /* 行高固定：卡片可以跨 2 行，拖拽缩放时要靠它把像素位移换算成行数
-     （脚本里的 ROW_H 常量必须与这个值一致）。88 = 内距 12×2 + 标签 19
-     + 数值 20 + 进度条 4 ≈ 81，留 7px 余量给换行与缩放，够贴又不会溢出。 */
+     （脚本里的 ROW_H 常量必须与这个值一致）。88 = 内距 16×2 + 标签 19
+     + 数值 20 + 数值上下外距 8 + 进度条 4 ≈ 83，内距从 12 提到 16 后仍留
+     5px 余量，够贴又不会把卡内内容裁掉；行高不必跟着调。 */
   grid-auto-rows: 88px;
+  /* 栅格间距是拖拽缩放的换算基准：stores/dashboard.ts 的 GAP 必须与它一致
+     （脚本用 GAP 把像素位移换算成格数）。改这里会连带改那个常量，故保持 --sp-3。 */
   gap: var(--sp-3);
 }
 .card {
   background: var(--el-bg-color);
   border-radius: var(--radius);
-  padding: var(--sp-3);
+  padding: var(--sp-4) var(--sp-5);
   /* 与 .el-card 同档的一层投影：仪表盘卡片是 div 不吃 EP 变量，
      这里显式给一次，全站「卡片浮在底色上」的语言才是同一套。
      拖拽时 .card--dragging 会把透明度压到 0.7，投影跟着一起淡，
@@ -1022,7 +1025,7 @@ onBeforeUnmount(() => {
 .custom-btns {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-2);
 }
 /* 尺寸下拉：够放下「小 / 宽 / 大 / 整宽 / 通栏」两个字即可 */
 .size-select {

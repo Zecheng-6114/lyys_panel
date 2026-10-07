@@ -104,7 +104,7 @@
           <el-button :loading="pulling" @click="pullImage">拉取</el-button>
           <el-button @click="loadImages">刷新</el-button>
         </div>
-        <el-table :data="images" height="calc(100vh - 240px)" size="small">
+        <el-table :data="images" height="var(--inst-table-height)" size="small">
           <el-table-column prop="repository" label="仓库" v-bind="col(180, true)" />
           <el-table-column prop="tag" label="标签" v-bind="col(120)" />
           <el-table-column prop="id" label="镜像 ID" v-bind="col(140)" v-if="!hideColP2" />
@@ -126,7 +126,7 @@
           </span>
           <el-button @click="loadCompose">刷新</el-button>
         </div>
-        <el-table :data="projects" height="calc(100vh - 240px)" size="small">
+        <el-table :data="projects" height="var(--inst-table-height)" size="small">
           <el-table-column prop="name" label="项目" v-bind="col(180, true)" />
           <el-table-column prop="status" label="状态" v-bind="col(180)" />
           <el-table-column prop="containers" label="容器数" v-bind="col(90)" v-if="!hideColP2" />
@@ -424,6 +424,14 @@ onMounted(async () => {
 </script>
 
 <style scoped>
+/* 镜像 / Compose 两个列表在页签内，不吃 theme.css 那条「.content 直接子项」的
+   弹性规则，高度只能从全局常数派生：页签表头(40) + 其下外边距(15) − .inst-tabs
+   上负偏移(8) ≈ 47，按标尺取 --sp-6×2（48，留 1px 安全量）。原来写的
+   calc(100vh - 240px) 与顶栏/内容内距脱钩，标尺一变这里就错位。
+   Docker 提示面板出现时页签被禁用、两者不共存，不必为它留高。 */
+.inst {
+  --inst-table-height: calc(var(--panel-table-height) - var(--sp-6) * 2);
+}
 .panel {
   padding: var(--sp-4) var(--sp-5);
   border-radius: var(--radius);
@@ -431,7 +439,7 @@ onMounted(async () => {
   margin-bottom: var(--sp-4);
 }
 .panel-title {
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 600;
   margin-bottom: var(--sp-2);
 }
@@ -456,13 +464,13 @@ onMounted(async () => {
 .inst-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 12px;
+  gap: var(--sp-4);
 }
 .inst-card {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 14px 16px;
+  gap: var(--sp-2);
+  padding: var(--sp-4) var(--sp-5);
   border: 1px solid var(--el-border-color-lighter);
   border-radius: var(--radius);
   background: var(--el-bg-color);
@@ -472,7 +480,7 @@ onMounted(async () => {
 .inst-head {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--sp-2);
 }
 .inst-name {
   flex: 1;
@@ -491,7 +499,7 @@ onMounted(async () => {
 .inst-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px;
+  gap: var(--sp-3);
   font-size: 12px;
   color: var(--el-text-color-regular);
 }
@@ -504,9 +512,9 @@ onMounted(async () => {
 .inst-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
-  margin-top: 2px;
-  padding-top: 8px;
+  gap: var(--sp-1);
+  margin-top: var(--sp-1);
+  padding-top: var(--sp-2);
   border-top: 1px solid var(--el-border-color-lighter);
 }
 </style>

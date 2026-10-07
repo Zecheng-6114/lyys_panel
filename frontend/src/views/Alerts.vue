@@ -607,7 +607,7 @@ onUnmounted(() => {
 .block {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-2);
+  gap: var(--sp-4);
   min-height: 0;
 }
 .block-rules {
@@ -626,7 +626,7 @@ onUnmounted(() => {
 .probe-head {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--sp-3);
   flex: none;
   flex-wrap: wrap;
 }
@@ -650,19 +650,20 @@ onUnmounted(() => {
 .hint {
   font-size: 12px;
   color: var(--el-text-color-secondary);
-  margin-left: 4px;
+  margin-left: var(--sp-1);
 }
 .section-title {
   font-size: 14px;
-  font-weight: 500;
-  /* 原来 20px 上下外距，在 flex 列里会和 gap 叠成双倍间距 */
-  margin: 0;
+  font-weight: 600;
+  /* 原来 20px 上下外距，在 flex 列里会和 gap 叠成双倍间距，故上外距归 0；
+     下外距按区块标题统一口径取标尺的 --sp-2。 */
+  margin: 0 0 var(--sp-2);
   flex: none;
 }
 .webhook-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--sp-3);
   flex: none;
   flex-wrap: wrap;
 }
@@ -672,6 +673,6 @@ onUnmounted(() => {
 .dot-wrap {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-2);
 }
 </style>

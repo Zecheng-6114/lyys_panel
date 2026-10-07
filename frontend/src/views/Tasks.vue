@@ -241,12 +241,8 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-.toolbar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 10px;
-}
+/* 工具栏间距统一交给全局 .toolbar（gap 8 / margin-bottom 12），
+   这里不再局部覆写 —— 局部改法会让同一类工具栏在页面之间松紧不一致。 */
 .hint {
   color: var(--el-text-color-secondary);
   font-size: 12px;
@@ -254,13 +250,13 @@ onBeforeUnmount(() => {
 .detail {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--sp-3);
   height: 100%;
 }
 .detail-meta {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--sp-3);
   font-size: 12px;
   color: var(--el-text-color-secondary);
 }
@@ -268,13 +264,13 @@ onBeforeUnmount(() => {
   flex: 1;
   margin: 0;
   overflow: auto;
-  padding: 10px;
+  padding: var(--sp-3) var(--sp-4);
   border-radius: 6px;
   background: var(--el-fill-color-light);
   color: var(--el-text-color-primary);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
-  line-height: 1.5;
+  line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-all;
 }

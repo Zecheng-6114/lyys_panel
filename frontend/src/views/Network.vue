@@ -158,18 +158,18 @@ onMounted(load);
 .fam {
   font-size: 11px;
   color: var(--el-text-color-secondary);
-  margin-left: 4px;
+  margin-left: var(--sp-1);
 }
 .dnsbox {
   background: var(--el-bg-color);
   border-radius: var(--radius);
-  padding: 12px 16px;
+  padding: var(--sp-3) var(--sp-4);
 }
 .dnsrow {
   font-family: var(--panel-mono);
   font-variant-numeric: tabular-nums;
   font-size: 13px;
-  padding: 4px 0;
+  padding: var(--sp-1) 0;
 }
 .empty {
   color: var(--el-text-color-secondary);

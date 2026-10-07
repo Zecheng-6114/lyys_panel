@@ -1079,7 +1079,7 @@ function applyTool(m: Msg, t: any) {
   font-size: 12px;
   background: var(--el-fill-color);
   border-radius: 3px;
-  padding: 1px 4px;
+  padding: 1px var(--sp-1);
 }
 .md :deep(.md-pre) {
   margin: 0 0 var(--sp-2);

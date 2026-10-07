@@ -104,7 +104,7 @@
         type="textarea"
         :rows="10"
         placeholder="文件内容（可为空）"
-        style="margin-top: 10px"
+        class="newfile-body"
       />
       <template #footer>
         <el-button @click="showNewFile = false">取消</el-button>
@@ -515,9 +515,13 @@ onMounted(() => {
   overflow: hidden;
   white-space: nowrap;
 }
+/* 与上方输入框拉开一档：原先是模板里的内联 margin，收进样式表统一走标尺 */
+.newfile-body {
+  margin-top: var(--sp-3);
+}
 .crumb {
   cursor: pointer;
-  padding: 3px 2px;
+  padding: var(--sp-1) 2px;
   border-radius: var(--radius);
   color: var(--el-text-color-regular);
 }
@@ -532,7 +536,7 @@ onMounted(() => {
 .upload-progress {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--sp-2);
   font-size: 12px;
   color: var(--el-text-color-secondary);
   white-space: nowrap;
@@ -547,7 +551,7 @@ onMounted(() => {
   cursor: pointer;
 }
 .linkmark {
-  margin-left: 4px;
+  margin-left: var(--sp-1);
   color: var(--el-text-color-secondary);
 }
 .editor :deep(.el-textarea__inner) {

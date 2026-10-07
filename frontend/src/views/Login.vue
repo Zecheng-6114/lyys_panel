@@ -85,13 +85,14 @@ async function submit() {
   box-sizing: border-box;
   background: var(--el-bg-color);
   border-radius: var(--radius);
-  padding: var(--sp-5);
+  padding: var(--sp-4) var(--sp-5);
   /* 与全站卡片同一档投影：登录卡浮在页面底色上，边界一眼就交代清楚 */
   box-shadow: var(--panel-card-shadow);
 }
 @media (max-width: 768px) {
   .login-card {
-    padding: var(--sp-4) var(--sp-5);
+    /* 窄屏比基准再收一档：320px 宽的屏上少占一圈留白 */
+    padding: var(--sp-3) var(--sp-4);
   }
 }
 .login-brand {

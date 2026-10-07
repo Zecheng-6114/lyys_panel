@@ -7,14 +7,13 @@
       <template v-if="activeTab">
         <el-button
           v-if="!activeTab.connected"
-          size="small"
           type="primary"
           :loading="activeTab.connecting"
           @click="connect(activeTab)"
         >
           连接
         </el-button>
-        <el-button v-else size="small" @click="disconnect(activeTab)">断开</el-button>
+        <el-button v-else @click="disconnect(activeTab)">断开</el-button>
       </template>
     </div>
 
@@ -357,10 +356,10 @@ onBeforeUnmount(() => {
 .tab {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-2);
   flex: none;
   height: 26px;
-  padding: 0 2px 0 10px;
+  padding: 0 var(--sp-1) 0 var(--sp-3);
   border-radius: var(--radius);
   background: var(--el-fill-color-light);
   color: var(--el-text-color-regular);
@@ -377,6 +376,9 @@ onBeforeUnmount(() => {
   background: var(--el-fill-color-darker);
   color: var(--el-text-color-primary);
 }
+/* 本地保留，不改用全局 .dot 工具类：全局是「实心=开 / 空心环=关」，
+   这里以 placeholder 灰 → success 色表示连接态、且尺寸更小（6px，随标签栏 26px 高），
+   语义与尺寸都不同；换成全局会改变外观，超出间距统一范围。 */
 .dot {
   width: 6px;
   height: 6px;
@@ -437,7 +439,7 @@ onBeforeUnmount(() => {
   background: var(--el-bg-color);
   border-radius: var(--radius);
   box-shadow: var(--panel-shadow-1);
-  padding: 8px 10px;
+  padding: var(--sp-2) var(--sp-3);
   overflow: hidden;
   min-height: 0;
 }

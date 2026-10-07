@@ -255,23 +255,10 @@ onMounted(load);
 </script>
 
 <style scoped>
+/* .dot / .dot-on / .dot-off 走全局工具类（styles/theme.css），
+   本地这份与全局逐条重复，删掉以免两处各自漂移 */
 .hint {
   font-size: 12px;
   color: var(--el-text-color-secondary);
-}
-.dot {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  margin-right: 6px;
-  vertical-align: middle;
-}
-.dot-on {
-  background: var(--el-text-color-primary);
-}
-.dot-off {
-  background: transparent;
-  box-shadow: inset 0 0 0 1.5px var(--el-text-color-secondary);
 }
 </style>

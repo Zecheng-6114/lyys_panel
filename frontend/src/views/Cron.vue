@@ -409,36 +409,37 @@ onMounted(() => {
 .hint {
   font-size: 12px;
   color: var(--el-text-color-secondary);
-  margin-left: 4px;
+  margin-left: var(--sp-1);
 }
 .sched {
   display: flex;
-  gap: 6px;
+  gap: var(--sp-2);
   width: 100%;
 }
 .presets {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-2);
   font-size: 12px;
   color: var(--el-text-color-secondary);
   padding-left: 64px;
 }
 .section-title {
   font-size: 14px;
-  font-weight: 500;
-  margin: 20px 0 12px;
+  font-weight: 600;
+  /* 父容器不是带 gap 的 flex，标题上方留白得自己带（R4） */
+  margin: var(--sp-4) 0 var(--sp-2);
 }
 .dot-wrap {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-2);
 }
 .logbox {
   background: var(--el-bg-color);
   border-radius: var(--radius);
   box-shadow: var(--panel-shadow-1);
-  padding: 12px 16px;
+  padding: var(--sp-3) var(--sp-4);
   max-height: 420px;
   overflow: auto;
   font-family: var(--panel-mono);

@@ -888,7 +888,7 @@ onMounted(() => {
 .card {
   background: var(--el-bg-color);
   border-radius: var(--radius, 8px);
-  padding: var(--sp-3) var(--sp-5);
+  padding: var(--sp-4) var(--sp-5);
   /* 与仪表盘卡片同一档：全站「白块浮在底色上」的语言只此一套 */
   box-shadow: var(--panel-shadow-1);
   /* 栅格子项默认 min-width:auto，长文件名一类的不可折内容会把卡片撑破 */
@@ -921,9 +921,9 @@ onMounted(() => {
   margin-bottom: var(--sp-1);
 }
 .card-title {
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
-  margin-bottom: 4px;
+  margin-bottom: var(--sp-3);
 }
 .card-sub {
   font-size: 12px;
@@ -941,17 +941,17 @@ onMounted(() => {
 .key-hint {
   font-size: 12px;
   color: var(--el-text-color-secondary);
-  margin-top: 4px;
+  margin-top: var(--sp-1);
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--sp-2);
 }
 /* 界面设置表单行 */
 .settings .form .row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 12px;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
   max-width: 480px;
 }
 .settings .form .row > label {
@@ -968,18 +968,18 @@ onMounted(() => {
 }
 .btns {
   display: flex;
-  gap: 8px;
+  gap: var(--sp-2);
 }
 .group {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--el-text-color-primary);
-  margin: 4px 0 12px;
+  margin: var(--sp-1) 0 var(--sp-3);
 }
 .hint {
   font-size: 12px;
   color: var(--el-text-color-secondary);
-  margin-bottom: 12px;
+  margin-bottom: var(--sp-3);
 }
 .hidden-file {
   display: none;
@@ -987,19 +987,19 @@ onMounted(() => {
 /* 已上传的字重文件列表 */
 .face-list {
   max-width: 480px;
-  margin-bottom: 12px;
+  margin-bottom: var(--sp-3);
 }
 .face-row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 6px 10px;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
   border-radius: var(--radius, 6px);
   background: var(--el-fill-color-light);
   font-size: 12px;
 }
 .face-row + .face-row {
-  margin-top: 4px;
+  margin-top: var(--sp-1);
 }
 .face-weight {
   flex: none;

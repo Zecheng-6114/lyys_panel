@@ -432,18 +432,18 @@ onMounted(load);
 .empty {
   background: var(--el-bg-color);
   border-radius: var(--radius);
-  padding: 28px 20px;
+  padding: var(--sp-6) var(--sp-5);
   text-align: center;
 }
 .empty-title {
   font-size: 14px;
-  margin-bottom: 8px;
+  margin-bottom: var(--sp-2);
 }
 .empty-desc {
   font-size: 13px;
   color: var(--el-text-color-secondary);
   line-height: 1.7;
-  margin-bottom: 16px;
+  margin-bottom: var(--sp-4);
 }
 .hint {
   font-size: 12px;
@@ -453,11 +453,11 @@ onMounted(load);
 .hint code {
   font-family: var(--panel-mono);
   background: var(--el-fill-color-light);
-  padding: 1px 5px;
+  padding: 1px var(--sp-1);
   border-radius: 4px;
 }
 .inline-hint {
-  margin-left: 10px;
+  margin-left: var(--sp-3);
   font-size: 12px;
   color: var(--el-text-color-secondary);
 }

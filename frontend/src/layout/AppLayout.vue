@@ -429,7 +429,7 @@ async function logout() {
   overflow-y: auto;
   /* 紧凑菜单项：按钮间留足间距，文字贴紧按钮 */
   --el-menu-item-height: 32px;
-  --el-menu-base-level-padding: 12px;
+  --el-menu-base-level-padding: var(--sp-3);
 }
 /* 侧栏滚动条彻底隐去：导航区不该出现任何竖条，常驻的、移入才显形的都不要。
    条目多于屏高时仍能用滚轮/触控板滚动 —— 不能改成 overflow: hidden，
@@ -614,7 +614,7 @@ async function logout() {
   }
   .top-actions .mini-btn {
     min-height: 44px;
-    padding: 0 8px;
+    padding: 0 var(--sp-2);
   }
   .top-actions .icon-btn {
     /* 纯图标按钮在窄屏做成 44px 见方，触摸区域与右侧文字按钮等高 */
@@ -625,7 +625,7 @@ async function logout() {
      分组后条目总数未变但多了 5 个组标题，抽屉必然要滚动 ——
      这里只是把滚出去的条目数从 5 个减到 3 个，让「系统」组不至于整组看不见。 */
   .side-menu :deep(.el-menu-item-group__title) {
-    padding: 10px 12px 2px;
+    padding: var(--sp-2) var(--sp-3) var(--sp-1);
   }
   .side-menu :deep(.el-menu-item) {
     margin: 1px 0;

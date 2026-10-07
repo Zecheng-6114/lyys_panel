@@ -74,7 +74,7 @@
       size="small"
       row-key="name"
       class="ptable"
-      height="var(--panel-table-height)"
+      height="var(--pkg-table-height)"
       :empty-text="emptyText"
       @selection-change="(v: Pkg[]) => (selected = v)"
     >
@@ -390,21 +390,26 @@ onMounted(async () => {
 
 <style scoped>
 .packages {
-  /* 比全局多出一行状态条的高度 */
-  --panel-table-height: calc(100vh - 196px);
+  /* 本页比普通列表页多出「状态行 + 分页条」两块，表格可用高度从全局值派生扣除
+     （两行按标尺各折一档）。原来写的 calc(100vh - 196px) 与顶栏 / 内容内距脱钩，
+     标尺一变这里就跟着错位。 */
+  --pkg-table-height: calc(
+    var(--panel-table-height) - var(--sp-6) * 2 - var(--sp-5)
+  );
 }
 
 .statusline {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin: -4px 0 8px;
+  gap: var(--sp-2);
+  /* 上边负偏移吃掉工具栏下边距的双份留白，属刻意为之，保留 */
+  margin: -4px 0 var(--sp-2);
   font-size: 12px;
   color: var(--el-text-color-secondary);
 }
 
 .opt {
-  margin-left: 4px;
+  margin-left: var(--sp-1);
 }
 
 /* 分页条：贴右对齐，与表格同宽 */
@@ -420,7 +425,7 @@ onMounted(async () => {
 }
 
 .arrow {
-  margin: 0 6px;
+  margin: 0 var(--sp-2);
   color: var(--el-text-color-secondary);
 }
 
@@ -437,8 +442,8 @@ onMounted(async () => {
 .tag-done,
 .tag-todo {
   display: inline-block;
-  margin-left: 8px;
-  padding: 0 6px;
+  margin-left: var(--sp-2);
+  padding: 0 var(--sp-2);
   border-radius: var(--radius);
   font-size: 11px;
   line-height: 18px;

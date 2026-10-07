@@ -284,26 +284,26 @@ onBeforeUnmount(() => {
 .ops {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--sp-4);
 }
 .panel {
   background: var(--el-bg-color);
   border-radius: var(--radius);
   /* 与卡片 / 表格同档：三块面板都是白底实心块，不加影就整片贴在页面底色上 */
   box-shadow: var(--panel-shadow-1);
-  padding: 16px;
+  padding: var(--sp-4) var(--sp-5);
 }
 .panel-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 8px;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
 }
 .section-title {
   font-size: 14px;
-  font-weight: 500;
-  margin-bottom: 8px;
+  font-weight: 600;
+  margin: 0 0 var(--sp-2);
 }
 .panel-head .section-title {
   margin-bottom: 0;
@@ -311,7 +311,7 @@ onBeforeUnmount(() => {
 .unit-bar {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--sp-2);
   flex-wrap: wrap;
 }
 .unit-select {
@@ -327,7 +327,7 @@ onBeforeUnmount(() => {
   background: var(--el-fill-color-light);
   color: var(--el-text-color-primary);
   border-radius: var(--radius);
-  padding: 6px 12px;
+  /* 内距不在这里覆写：统一走全局 .mini-btn 的 --sp-1/--sp-3 口径（R9） */
   font-size: 12px;
   cursor: pointer;
   flex: none;
@@ -340,8 +340,8 @@ onBeforeUnmount(() => {
   cursor: not-allowed;
 }
 .unit-pre {
-  margin: 8px 0 0;
-  padding: 12px;
+  margin: var(--sp-2) 0 0;
+  padding: var(--sp-3) var(--sp-4);
   background: var(--el-fill-color-lighter);
   border-radius: var(--radius);
   /* 与 .log-pane 同款：白 panel 内的浅灰输出块，靠同一档投影与父块分层 */
@@ -354,8 +354,8 @@ onBeforeUnmount(() => {
   word-break: break-all;
 }
 .log-pane {
-  margin-top: 8px;
-  padding: 12px;
+  margin-top: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
   height: 320px;
   overflow: auto;
   background: var(--el-fill-color-lighter);
@@ -370,15 +370,18 @@ onBeforeUnmount(() => {
   word-break: break-all;
 }
 .hint {
-  margin-top: 8px;
+  margin-top: var(--sp-2);
   font-size: 12px;
   color: var(--el-text-color-secondary);
 }
 .dot-wrap {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-2);
 }
+/* 本地保留，不改用全局 .dot 工具类：全局用「实心=开 / 空心环=关」表达状态，
+   这里按 success/danger 语义色区分开关，语义不同（本主题下两色都归一为 #111，
+   但那是主题灰度化的事，不是本组件的语义）。换成全局会改变外观，超出间距统一范围。 */
 .dot {
   width: 8px;
   height: 8px;

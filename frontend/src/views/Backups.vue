@@ -361,6 +361,6 @@ onMounted(() => {
 .hint {
   font-size: 12px;
   color: var(--el-text-color-secondary);
-  margin-left: 4px;
+  margin-left: var(--sp-1);
 }
 </style>

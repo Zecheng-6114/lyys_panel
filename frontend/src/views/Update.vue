@@ -169,22 +169,22 @@ async function upload() {
 </script>
 
 <style scoped>
-/* 间距统一：区块间 20px、块内 12px、行内 8px 三档 */
+/* 间距统一：区块间 16px、块内 12px、行内 8px 三档 */
 .status-block {
   background: var(--el-bg-color);
   border-radius: var(--radius);
   /* 白底实心块，与卡片 / 表格同档（不加影就整片贴在页面底色上） */
   box-shadow: var(--panel-shadow-1);
-  padding: 16px;
+  padding: var(--sp-4) var(--sp-5);
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  margin-bottom: 20px;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
 }
 .status-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--sp-2);
   font-size: 13px;
 }
 .label {
@@ -199,23 +199,24 @@ async function upload() {
 .dot-wrap {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-2);
 }
 .actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--sp-2);
 }
 .section-title {
   font-size: 14px;
-  font-weight: 500;
-  margin-bottom: 12px;
+  font-weight: 600;
+  /* 父容器不是带 gap 的 flex，标题上方留白得自己带（R4） */
+  margin: var(--sp-4) 0 var(--sp-2);
 }
 .upload-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 12px;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
 }
 .filename {
   font-size: 12px;
