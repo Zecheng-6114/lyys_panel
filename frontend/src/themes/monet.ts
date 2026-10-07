@@ -34,6 +34,20 @@ export interface MonetResult {
 /// 毫秒级。这个值也是 material-color-utilities 自带示例用的值。
 const SAMPLE_EDGE = 128;
 
+/// 页面/卡片底色专用的彩度，以及它们各自的明度档。
+///
+/// 🔴 为什么不能沿用 n1（彩度 4）+ tone 95/99：tone 99 已经在 sRGB 色域的最顶上，
+/// 那里容不下任何彩度，色相会被整个挤掉。实测色相 350 / 20 / 250 三种、彩度
+/// 4 / 8 / 16 / 32 四档，tone 99 一律得到 #fffbff（浅）——也就是说换任何背景图，
+/// 「卡片底色」都停在近纯白，莫奈取色对它等于没生效（页面底色的 tone 95 还没顶到
+/// 色域边界，所以它一直是好的，卡片却不是）。
+/// 这里把彩度提到 8、明度往下让出两档（95/99 → 94/97），色相才留得住：
+/// 同一个色相下卡片底色这才真的跟着图片走，而「卡片比页面亮一档」的层次不变。
+/// 深色档的 6/12 本来就落在色域内，不动。
+const SURFACE_CHROMA = 8;
+const SURFACE_TONE_PAGE = 94;
+const SURFACE_TONE_CARD = 97;
+
 /// Sentry for "image has no usable accent color".
 ///
 /// Score 在**所有**颜色都被筛掉时会退回它内置的兜底色（Google Blue）——对着
@@ -45,9 +59,8 @@ const ACHROMATIC_SENTINEL = 0xff010203;
 export async function monetFromImage(dataUrl: string, dark: boolean): Promise<MonetResult> {
   // 动态引入：这套算法（量化器 + HCT + 几个 scheme）只在点取色时才用得上，
   // 不该压在首屏体积里；manualChunks 里给它单独分了 monet chunk。
-  const { CorePalette, QuantizerCelebi, Score, argbFromRgb, hexFromArgb } = await import(
-    "@material/material-color-utilities"
-  );
+  const { CorePalette, QuantizerCelebi, Score, TonalPalette, argbFromRgb, hexFromArgb } =
+    await import("@material/material-color-utilities");
 
   const data = await samplePixels(dataUrl);
   const pixels: number[] = [];
@@ -66,20 +79,30 @@ export async function monetFromImage(dataUrl: string, dark: boolean): Promise<Mo
   const palette = CorePalette.of(source);
   const hex = (argb: number) => hexFromArgb(argb).toLowerCase();
 
-  // 中性色盘：与源色同色相、彩度压到 4 的一支，用它铺页面/卡片/正文，
+  // 中性色盘：与源色同色相、彩度压到 4 的一支，用它铺正文，
   // 整体会带上图片的色调又不会喧宾夺主（这就是「莫奈」的观感来源）。
   const n = palette.n1;
 
+  // 页面/卡片的底色另起一支色板：与 n 同色相，但浅色档把彩度提到 8、
+  // 明度档从 95/99 下调到 94/97 —— 沿用 n 的 tone 99 会顶到 sRGB 色域边界，
+  // 彩度被整个挤掉，换任何图卡片底色都停在近纯白（详见 SURFACE_CHROMA）。
+  // 灰度图没有色相可依，退回零彩度，得到一套干净的中性主题。
+  const surface = TonalPalette.fromHueAndChroma(n.hue, achromatic ? 0 : SURFACE_CHROMA);
+  // 深色档（6/12）本来就落在色域内、色相留得住，不动它，仍走 n。
+  const surfacePal = dark ? n : surface;
+  const bgPage = hex(surfacePal.tone(dark ? 6 : SURFACE_TONE_PAGE));
+  const bgCard = hex(surfacePal.tone(dark ? 12 : SURFACE_TONE_CARD));
+
   if (achromatic) {
     // 灰度图没有能当主色的颜色。主色退回面板自己的黑白灰口径（浅色近黑、
-    // 深色近白），另外三色仍按这张图的灰度展开 —— 得到一套干净的中性主题，
+    // 深色近白），底色仍按这张图展开 —— 得到一套干净的中性主题，
     // 而不是凭空冒出来的蓝色。
     return {
       achromatic: true,
       colors: {
         primary: hex(n.tone(dark ? 90 : 10)),
-        bg_page: hex(n.tone(dark ? 6 : 95)),
-        bg_card: hex(n.tone(dark ? 12 : 99)),
+        bg_page: bgPage,
+        bg_card: bgCard,
         text: hex(n.tone(dark ? 90 : 10)),
       },
     };
@@ -91,8 +114,8 @@ export async function monetFromImage(dataUrl: string, dark: boolean): Promise<Mo
       // 主色取 Material 的常规档位：浅色 40（够深，反色块上的浅字压得住）、
       // 深色 80（够亮，深字压得住）
       primary: hex(palette.a1.tone(dark ? 80 : 40)),
-      bg_page: hex(n.tone(dark ? 6 : 95)),
-      bg_card: hex(n.tone(dark ? 12 : 99)),
+      bg_page: bgPage,
+      bg_card: bgCard,
       text: hex(n.tone(dark ? 90 : 10)),
     },
   };
