@@ -52,42 +52,67 @@
     >
       <el-table-column label="名称" v-bind="col(260, true)">
         <template #default="{ row }">
-          <span :class="row.is_dir ? 'dirname' : ''">{{ row.name }}</span>
-          <span v-if="row.is_symlink" class="linkmark">@</span>
+          <span class="fname">
+            <el-icon class="ficon" :class="{ 'is-dir': row.is_dir }">
+              <component :is="fileIcon(row)" />
+            </el-icon>
+            <span :class="row.is_dir ? 'dirname' : ''">{{ row.name }}</span>
+            <span v-if="row.is_symlink" class="linkmark">@</span>
+          </span>
         </template>
       </el-table-column>
-      <el-table-column label="大小" v-bind="col(110)" align="right">
-        <template #default="{ row }">{{ row.is_dir ? "-" : fmtSize(row.size) }}</template>
-      </el-table-column>
       <el-table-column label="权限" v-bind="col(90)" v-if="!hideColP3">
-        <template #default="{ row }">{{ row.mode }}</template>
+        <template #default="{ row }">
+          <span class="mono">{{ fmtMode(row.mode) }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column
+        label="用户/用户组"
+        v-bind="col(130)"
+        v-if="!hideColP3"
+        show-overflow-tooltip
+      >
+        <template #default="{ row }">{{ row.owner || "-" }} / {{ row.group || "-" }}</template>
+      </el-table-column>
+      <el-table-column label="大小" v-bind="col(110)" align="right">
+        <template #default="{ row }">
+          <span class="mono">{{ row.is_dir ? "-" : fmtSize(row.size) }}</span>
+        </template>
       </el-table-column>
       <el-table-column label="修改时间" v-bind="col(170)" v-if="!hideColP2">
-        <template #default="{ row }">{{ fmtTime(row.mtime) }}</template>
-      </el-table-column>
-      <el-table-column label="操作" v-bind="col(300)" align="right">
         <template #default="{ row }">
-          <el-button v-if="!row.is_dir" link size="small" @click="editFile(row)">
-            {{ isContainer ? "查看" : "编辑" }}
-          </el-button>
-          <template v-if="!isContainer">
-            <el-button v-if="!row.is_dir" link size="small" @click="downloadFile(row)">下载</el-button>
-            <el-dropdown trigger="click" @command="(c: string) => onMore(c, row)">
-              <el-button link size="small">更多</el-button>
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item command="compress">压缩</el-dropdown-item>
-                  <el-dropdown-item v-if="isArchive(row)" command="extract">解压</el-dropdown-item>
-                  <el-dropdown-item command="perm" divided>权限 / 属主</el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
-            <el-button link size="small" @click="startRename(row)">重命名</el-button>
-            <el-button link size="small" @click="removeEntry(row)">删除</el-button>
-          </template>
+          <span class="mono">{{ fmtTime(row.mtime) }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="操作" v-bind="col(120)" align="right">
+        <template #default="{ row }">
+          <el-button link size="small" @click="primaryAction(row)">{{ primaryLabel(row) }}</el-button>
+          <!-- 二级操作收进「更多」：行内只留最常用的那一个，避免一列按钮把表格挤窄 -->
+          <el-dropdown v-if="!isContainer" trigger="click" @command="(c: string) => onMore(c, row)">
+            <el-button link size="small">更多</el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item v-if="!row.is_dir" command="download">下载</el-dropdown-item>
+                <el-dropdown-item command="compress">压缩</el-dropdown-item>
+                <el-dropdown-item v-if="isArchive(row)" command="extract">解压</el-dropdown-item>
+                <el-dropdown-item command="perm" divided>权限 / 属主</el-dropdown-item>
+                <el-dropdown-item command="rename">重命名</el-dropdown-item>
+                <el-dropdown-item command="delete">删除</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
         </template>
       </el-table-column>
     </el-table>
+
+    <!-- 目录统计：一眼看清这一屏里文件夹与文件各有多少（1Panel 式底栏） -->
+    <div class="statusbar">
+      <span>共 {{ entries.length }} 项</span>
+      <span class="dot">·</span>
+      <span>{{ dirCount }} 个文件夹</span>
+      <span class="dot">·</span>
+      <span>{{ fileCount }} 个文件</span>
+    </div>
 
     <el-dialog v-model="showMkdir" title="新建目录" width="440px">
       <el-input v-model="mkdirName" placeholder="目录名（当前目录下）" @keyup.enter="doMkdir" />
@@ -151,8 +176,9 @@
 
 <script setup lang="ts">
 import { col, hideColP2, hideColP3 } from "../composables/useResponsive";
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref, watch, type Component } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import { Box, Document, Folder, Headset, Link, Picture, VideoCamera } from "@element-plus/icons-vue";
 import http from "../api/http";
 
 interface FEntry {
@@ -162,6 +188,8 @@ interface FEntry {
   is_symlink: boolean;
   size: number;
   mode: string;
+  owner: string;
+  group: string;
   mtime: number;
 }
 
@@ -206,6 +234,10 @@ const uploadDone = ref(0);
 const uploadPercent = ref(0);
 
 const segments = computed(() => current.value.split("/").filter((s) => s.length > 0));
+
+/** 底栏统计：只数当前这一层，符号链接按它指向的类型计入 */
+const dirCount = computed(() => entries.value.filter((e) => e.is_dir).length);
+const fileCount = computed(() => entries.value.length - dirCount.value);
 
 function joinPath(dir: string, name: string) {
   return dir === "/" ? `/${name}` : `${dir}/${name}`;
@@ -258,6 +290,40 @@ function onRowClick(row: FEntry, _col: unknown, event: PointerEvent) {
   if (!row.is_dir) return;
   if ((event.target as HTMLElement).closest("button")) return;
   load(row.path);
+}
+
+// 名称列图标：后缀粗分成几类，够一眼分辨即可，不做 MIME 精确判定
+const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "ico", "avif"]);
+const VIDEO_EXT = new Set(["mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "m4v"]);
+const AUDIO_EXT = new Set(["mp3", "wav", "flac", "aac", "ogg", "m4a", "wma", "opus"]);
+
+function fileIcon(row: FEntry): Component {
+  if (row.is_dir) return Folder;
+  if (row.is_symlink) return Link;
+  // `lastIndexOf` 落在 0（.bashrc 这类隐藏文件）时没有后缀，按普通文件处理
+  const dot = row.name.lastIndexOf(".");
+  const ext = dot > 0 ? row.name.slice(dot + 1).toLowerCase() : "";
+  if (IMAGE_EXT.has(ext)) return Picture;
+  if (VIDEO_EXT.has(ext)) return VideoCamera;
+  if (AUDIO_EXT.has(ext)) return Headset;
+  if (isArchive(row)) return Box;
+  return Document;
+}
+
+/** 权限补足四位（0755 / 2755），与面板其他地方展示的口径一致 */
+function fmtMode(mode: string): string {
+  return mode ? mode.padStart(4, "0") : "-";
+}
+
+/** 行内主操作：目录进入、文件打开编辑器（容器只读，只能看） */
+function primaryAction(row: FEntry) {
+  if (row.is_dir) load(row.path);
+  else editFile(row);
+}
+
+function primaryLabel(row: FEntry): string {
+  if (row.is_dir) return "打开";
+  return isContainer.value ? "查看" : "编辑";
 }
 
 function fmtSize(n: number): string {
@@ -379,8 +445,11 @@ function isArchive(row: FEntry) {
 
 /** 行内「更多」菜单分发 */
 function onMore(cmd: string, row: FEntry) {
-  if (cmd === "compress") compressEntry(row);
+  if (cmd === "download") downloadFile(row);
+  else if (cmd === "compress") compressEntry(row);
   else if (cmd === "extract") extractEntry(row);
+  else if (cmd === "rename") startRename(row);
+  else if (cmd === "delete") removeEntry(row);
   else if (cmd === "perm") {
     perm.value = { name: row.name, path: row.path, mode: row.mode, owner: "", group: "" };
     showPerm.value = true;
@@ -544,8 +613,35 @@ onMounted(() => {
 .upload-bar {
   width: 140px;
 }
+/* 名称列：图标 + 名称靠左对齐成一体，长名字不把图标挤走 */
+.fname {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.ficon {
+  flex: none;
+  color: var(--el-text-color-secondary);
+}
+/* 目录图标压深一档：与加粗的目录名一起构成层级，不额外引入颜色 */
+.ficon.is-dir {
+  color: var(--el-text-color-primary);
+}
 .dirname {
   font-weight: 500;
+}
+/* 底栏统计：贴在表格下方，与工具栏同一档小字号 */
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.statusbar .dot {
+  color: var(--el-text-color-placeholder);
 }
 .ftable :deep(.dir-row) {
   cursor: pointer;

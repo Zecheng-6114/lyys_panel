@@ -8,8 +8,13 @@ use tokio::process::Command;
 
 use crate::cmd::{self, Budget};
 
+// 属主 / 属组的名字解析与缓存只有 Unix 分支用得上（见 owner_group）
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::collections::HashMap;
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+#[cfg(unix)]
+use std::sync::Mutex;
 
 /// 读取文件内容的最大字节数（1MB），超过则拒绝
 const MAX_READ_SIZE: u64 = 1024 * 1024;
@@ -71,6 +76,10 @@ pub struct Entry {
     pub size: u64,
     /// 权限位（八进制字符串，如 "755"）
     pub mode: String,
+    /// 属主名（uid 在本机 NSS 里查不到名字时退回数字形式）
+    pub owner: String,
+    /// 属组名（gid 同上）
+    pub group: String,
     /// 修改时间（Unix 秒）
     pub mtime: i64,
 }
@@ -145,6 +154,90 @@ fn file_mode(meta: &std::fs::Metadata) -> String {
     }
 }
 
+/// uid → 属主名、gid → 属组名的缓存。
+///
+/// 一个目录里绝大多数条目的属主是同一个（多为 root），逐条去查 NSS ——
+/// 机器接了 LDAP / sssd 时每次都是网络往返 —— 会让大目录明显变慢。
+/// 映射在进程生命周期内视为稳定，所以缓存只增不删。
+#[cfg(unix)]
+static USER_CACHE: OnceLock<Mutex<HashMap<u32, String>>> = OnceLock::new();
+#[cfg(unix)]
+static GROUP_CACHE: OnceLock<Mutex<HashMap<u32, String>>> = OnceLock::new();
+
+/// 先查缓存、再走 NSS；两边都拿不到名字时退回数字形式
+/// （从别的机器带过来的 uid 未必在本机 passwd 里）。
+#[cfg(unix)]
+fn cached_name(
+    cache: &OnceLock<Mutex<HashMap<u32, String>>>,
+    id: u32,
+    lookup: impl Fn(u32) -> Option<String>,
+) -> String {
+    let map = cache.get_or_init(Default::default);
+    if let Some(name) = map.lock().ok().and_then(|m| m.get(&id).cloned()) {
+        return name;
+    }
+    let name = lookup(id).unwrap_or_else(|| id.to_string());
+    if let Ok(mut m) = map.lock() {
+        m.insert(id, name.clone());
+    }
+    name
+}
+
+/// uid → 用户名（`getpwuid_r`，线程安全变体）。
+///
+/// 用 libc 而不是直接读 /etc/passwd：uid 可能来自 LDAP / sssd 等 NSS 源，
+/// 只有走 libc 才解析得到；libc 已作为终端功能的依赖在依赖树里，不新增体积。
+#[cfg(unix)]
+fn user_name(uid: u32) -> Option<String> {
+    let mut buf = vec![0 as libc::c_char; 1024];
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: 结构体与缓冲区都由本函数持有，getpwuid_r 只往里面写；
+    // 返回值非 0 或 result 为空都表示没查到，下面直接返回 None。
+    let rc = unsafe { libc::getpwuid_r(uid, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut result) };
+    if rc != 0 || result.is_null() {
+        return None;
+    }
+    // SAFETY: 查到名字时 pw_name 指向 buf 内以 NUL 结尾的字符串，缓冲区在本函数内一直存活
+    unsafe { std::ffi::CStr::from_ptr(pwd.pw_name) }
+        .to_str()
+        .ok()
+        .map(str::to_string)
+}
+
+/// gid → 组名（`getgrgid_r`），选择 libc 的理由同 [`user_name`]
+#[cfg(unix)]
+fn group_name(gid: u32) -> Option<String> {
+    let mut buf = vec![0 as libc::c_char; 1024];
+    let mut grp: libc::group = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::group = std::ptr::null_mut();
+    // SAFETY: 同 user_name
+    let rc = unsafe { libc::getgrgid_r(gid, &mut grp, buf.as_mut_ptr(), buf.len(), &mut result) };
+    if rc != 0 || result.is_null() {
+        return None;
+    }
+    // SAFETY: 同 user_name
+    unsafe { std::ffi::CStr::from_ptr(grp.gr_name) }
+        .to_str()
+        .ok()
+        .map(str::to_string)
+}
+
+/// 取目录项的属主名与属组名
+#[cfg(unix)]
+fn owner_group(meta: &std::fs::Metadata) -> (String, String) {
+    (
+        cached_name(&USER_CACHE, meta.uid(), user_name),
+        cached_name(&GROUP_CACHE, meta.gid(), group_name),
+    )
+}
+
+/// Windows 没有 uid/gid，回退为空串（部署目标是 Linux，这里只为本机能编译）
+#[cfg(not(unix))]
+fn owner_group(_meta: &std::fs::Metadata) -> (String, String) {
+    (String::new(), String::new())
+}
+
 fn build_entry(e: &std::fs::DirEntry) -> Option<Entry> {
     let name = e.file_name().to_string_lossy().into_owned();
     // Unix 下 DirEntry::metadata() 不跟随符号链接（相当于 lstat）
@@ -157,6 +250,8 @@ fn build_entry(e: &std::fs::DirEntry) -> Option<Entry> {
         sym.clone()
     };
     let full = to_string_path(&e.path());
+    // 属主取链接自身的（sym 即 lstat 结果），与 mode 的口径一致
+    let (owner, group) = owner_group(&sym);
     Some(Entry {
         name,
         path: full,
@@ -164,6 +259,8 @@ fn build_entry(e: &std::fs::DirEntry) -> Option<Entry> {
         is_symlink,
         size: meta.len(),
         mode: file_mode(&sym),
+        owner,
+        group,
         mtime: meta
             .modified()
             .ok()

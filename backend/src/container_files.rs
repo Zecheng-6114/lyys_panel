@@ -48,13 +48,23 @@ fn take_field<'a>(rest: &mut &'a str) -> Option<&'a str> {
     Some(field)
 }
 
-/// 解析一行 `ls -lA` 输出，返回 (权限串, 大小, 修改时间, 名称)。
+/// 一行 `ls -lA` 解析出的各字段
+struct LsLine<'a> {
+    perms: &'a str,
+    size: u64,
+    mtime: i64,
+    name: String,
+    owner: String,
+    group: String,
+}
+
+/// 解析一行 `ls -lA` 输出。
 ///
 /// `epoch` 为真表示命令带了 `--time-style=+%s`（GNU coreutils），时间占一个字段且
 /// 是 Unix 秒；为假则按 POSIX 三段式（月 日 时间）跳过，此时拿不到秒数，返回 0。
 ///
 /// 按字段个数而不是固定字符位置解析：`ls -l` 的列宽随内容浮动，靠位置切会错位。
-fn parse_ls_line(line: &str, epoch: bool) -> Option<(&str, u64, i64, String)> {
+fn parse_ls_line(line: &str, epoch: bool) -> Option<LsLine<'_>> {
     let mut rest = line.trim_end();
 
     let perms = take_field(&mut rest)?;
@@ -64,8 +74,9 @@ fn parse_ls_line(line: &str, epoch: bool) -> Option<(&str, u64, i64, String)> {
     }
 
     let _links = take_field(&mut rest)?;
-    let _owner = take_field(&mut rest)?;
-    let _group = take_field(&mut rest)?;
+    // 属主 / 属组照原样透出：容器里的 ls 已经给了名字，uid 没有对应名字时是数字
+    let owner = take_field(&mut rest)?.to_string();
+    let group = take_field(&mut rest)?.to_string();
     let size: u64 = take_field(&mut rest).and_then(|s| s.parse().ok()).unwrap_or(0);
 
     let mtime: i64 = if epoch {
@@ -84,7 +95,14 @@ fn parse_ls_line(line: &str, epoch: bool) -> Option<(&str, u64, i64, String)> {
     // 符号链接显示为 `名字 -> 目标`，面板只呈现名字本身
     let name = name.split(" -> ").next().unwrap_or(name).to_string();
 
-    Some((perms, size, mtime, name))
+    Some(LsLine {
+        perms,
+        size,
+        mtime,
+        name,
+        owner,
+        group,
+    })
 }
 
 /// `drwxr-xr-x` → `"755"`：三组 rwx 分别按位求和，与宿主机文件页的八进制表示一致
@@ -130,14 +148,16 @@ fn parse_ls_output(text: &str, epoch: bool, base: &str) -> Vec<Entry> {
     let mut entries: Vec<Entry> = text
         .lines()
         .filter_map(|line| parse_ls_line(line, epoch))
-        .map(|(perms, size, mtime, name)| Entry {
-            path: join(base, &name),
-            is_dir: perms.starts_with('d'),
-            is_symlink: perms.starts_with('l'),
-            mode: mode_from_perms(perms),
-            size,
-            mtime,
-            name,
+        .map(|l| Entry {
+            path: join(base, &l.name),
+            is_dir: l.perms.starts_with('d'),
+            is_symlink: l.perms.starts_with('l'),
+            mode: mode_from_perms(l.perms),
+            size: l.size,
+            owner: l.owner,
+            group: l.group,
+            mtime: l.mtime,
+            name: l.name,
         })
         .collect();
 
@@ -202,33 +222,35 @@ mod tests {
 
     #[test]
     fn parses_gnu_epoch_lines() {
-        let (perms, size, mtime, name) =
-            parse_ls_line("drwxr-xr-x 2 root root 4096 1759393200 bin", true).expect("应解析成功");
-        assert_eq!(perms, "drwxr-xr-x");
-        assert_eq!(size, 4096);
-        assert_eq!(mtime, 1_759_393_200);
-        assert_eq!(name, "bin");
+        let l = parse_ls_line("drwxr-xr-x 2 root root 4096 1759393200 bin", true)
+            .expect("应解析成功");
+        assert_eq!(l.perms, "drwxr-xr-x");
+        assert_eq!(l.size, 4096);
+        assert_eq!(l.mtime, 1_759_393_200);
+        assert_eq!(l.name, "bin");
+        assert_eq!(l.owner, "root");
+        assert_eq!(l.group, "root");
     }
 
     #[test]
     fn parses_posix_lines_without_mtime() {
         // busybox 的 ls 不认 --time-style，时间占三段且拿不到 Unix 秒
-        let (perms, size, mtime, name) =
-            parse_ls_line("-rw-r--r-- 1 root root 123 Oct  2 11:00 notes.txt", false)
-                .expect("应解析成功");
-        assert_eq!(perms, "-rw-r--r--");
-        assert_eq!(size, 123);
-        assert_eq!(mtime, 0, "取不到时间时置 0，由前端显示为未知");
-        assert_eq!(name, "notes.txt");
+        let l = parse_ls_line("-rw-r--r-- 1 root root 123 Oct  2 11:00 notes.txt", false)
+            .expect("应解析成功");
+        assert_eq!(l.perms, "-rw-r--r--");
+        assert_eq!(l.size, 123);
+        assert_eq!(l.mtime, 0, "取不到时间时置 0，由前端显示为未知");
+        assert_eq!(l.name, "notes.txt");
+        assert_eq!(l.owner, "root");
+        assert_eq!(l.group, "root");
     }
 
     #[test]
     fn keeps_spaces_in_names_and_strips_symlink_target() {
-        let (perms, _, _, name) =
-            parse_ls_line("lrwxrwxrwx 1 root root 7 Oct  2 11:00 my link -> /usr/bin/x", false)
-                .expect("应解析成功");
-        assert_eq!(perms, "lrwxrwxrwx");
-        assert_eq!(name, "my link", "文件名里的空格要保留，`-> 目标` 要剥掉");
+        let l = parse_ls_line("lrwxrwxrwx 1 root root 7 Oct  2 11:00 my link -> /usr/bin/x", false)
+            .expect("应解析成功");
+        assert_eq!(l.perms, "lrwxrwxrwx");
+        assert_eq!(l.name, "my link", "文件名里的空格要保留，`-> 目标` 要剥掉");
     }
 
     #[test]
