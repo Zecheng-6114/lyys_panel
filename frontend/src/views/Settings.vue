@@ -888,7 +888,9 @@ onMounted(() => {
 .card {
   background: var(--el-bg-color);
   border-radius: var(--radius, 8px);
-  padding: var(--sp-4) var(--sp-5);
+  /* 纵向内距比全局卡片再紧一档：设置页两列卡片里总有一列特别长，
+     这里省下的 8px 直接决定底部那颗按钮落不落在折线上。 */
+  padding: var(--sp-3) var(--sp-5);
   /* 与仪表盘卡片同一档：全站「白块浮在底色上」的语言只此一套 */
   box-shadow: var(--panel-shadow-1);
   /* 栅格子项默认 min-width:auto，长文件名一类的不可折内容会把卡片撑破 */
@@ -905,15 +907,16 @@ onMounted(() => {
   /* 不拉平高度：宁可两块高度不一，也不要短卡片被撑出大片空白 */
   align-items: start;
 }
-/* 纵向节奏收紧一档：设置页是面板里最长的一页表单，字段数量多，
-   Element Plus 默认的表单项/页签栏间距是按通用页面给的，堆在这里
-   正好把内容顶出视口。字段之间的呼吸感靠标签与内距已经够了，
-   把富余的间距让出去，两屏内容才落得进一屏。 */
+/* 纵向节奏再收紧一档（--sp-3 → --sp-2）：设置页是面板里最长的一页表单，
+   字段数量多；Element Plus 默认的表单项/页签栏间距是按通用页面给的。
+   上一版收到 --sp-3 时刚好落进一屏，之后外框留白（--frame-gap × 3 = 30px）
+   从内容区拿走了一截，两个页签又双双多出 ~35px、底部的按钮正好压在折线上。
+   字段之间的呼吸感靠标签与内距已经够了，这一档让出去才重新合上一屏。 */
 .settings :deep(.el-tabs__header) {
-  margin-bottom: var(--sp-3);
+  margin-bottom: var(--sp-2);
 }
 .settings :deep(.el-form-item) {
-  margin-bottom: var(--sp-3);
+  margin-bottom: var(--sp-2);
 }
 /* 顶置标签的 22px 行高是固定的，EP 默认再往下补 8px；标签与它自己的
    输入框本来就贴在一起读，这 8 全是富余，收一档。 */
@@ -946,12 +949,13 @@ onMounted(() => {
   align-items: center;
   gap: var(--sp-2);
 }
-/* 界面设置表单行 */
+/* 界面设置表单行（横向 gap 保持 --sp-3：标签与控件之间的距离；
+   纵向下边距与上面两处一起收到 --sp-2，两个页签才同时合得上一屏） */
 .settings .form .row {
   display: flex;
   align-items: center;
   gap: var(--sp-3);
-  margin-bottom: var(--sp-3);
+  margin-bottom: var(--sp-2);
   max-width: 480px;
 }
 .settings .form .row > label {

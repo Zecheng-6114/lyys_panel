@@ -215,6 +215,13 @@
      而表格高度的定义在全局样式里，读不到 AppLayout scoped 块里的局部变量。 */
   --panel-topbar-h: 52px;
 
+  /* 外框留白：侧栏 / 顶栏 / 内容三块各自成圆角面板浮在页面底色上，
+     四周与彼此之间的缝都取这一档。改变它只需改这一个数 ——
+     表格高度那份反推读的是同一个变量，见下。
+     窄屏在 AppLayout 的媒体查询里收到 --sp-2（屏幕本来就窄，10px 的
+     边距按比例太占地方）。 */
+  --frame-gap: 10px;
+
   /* 贴面卡的投影就是上面的 --panel-shadow-1；--panel-card-shadow 是它的
      历史别名（.el-card / Dashboard 的 .card / 登录卡 / AI 面板内各处写的是这个名字）。
      浮层与模态请改用 --panel-shadow-2 / -3。 */
@@ -234,9 +241,12 @@
      从实际占位反推：顶栏 52 + 内容区上下内距 16×2 + 工具栏 44 = 128。
      早先按「顶栏 56 + 内距 24×2 + 余量」估了一个 164，比实际多出近 70px，
      表格被压矮一圈、底部凭空多一条缝；改成从标尺算之后，顶栏高度或内距
-     一变这里自动跟上，不再需要记得手动改数字。 */
+     一变这里自动跟上，不再需要记得手动改数字。
+     外框留白那 3 份也要扣掉：上下一圈各 1，顶栏与内容之间那条缝 1 ——
+     漏算的表现和当年一样，每个列表页稳稳多滚一截。 */
   --panel-table-height: calc(
-    100vh - var(--panel-topbar-h) - var(--sp-4) * 2 - var(--panel-toolbar-h)
+    100vh - var(--panel-topbar-h) - var(--sp-4) * 2 - var(--panel-toolbar-h) -
+      var(--frame-gap) * 3
   );
 
   /* 单元格纵向内距回到 8：长表格（进程/日志/软件）一屏要塞 20 行以上，
@@ -247,11 +257,13 @@
 
 /* 手机档内容区四周内距从 16 收到 8（规则在 AppLayout.vue，那里写在 .content
    之后才压得住），表格高度这一份反推跟着换用 --sp-2，否则表格会比可用空间
-   矮 16px、底部凭空空出一条。 */
+   矮 16px、底部凭空空出一条。外框留白同时收到 --sp-2（见 AppLayout 媒体查询），
+   这里读的是同一个变量，自动跟上。 */
 @media (max-width: 768px) {
   :root {
     --panel-table-height: calc(
-      100vh - var(--panel-topbar-h) - var(--sp-2) * 2 - var(--panel-toolbar-h)
+      100vh - var(--panel-topbar-h) - var(--sp-2) * 2 - var(--panel-toolbar-h) -
+        var(--frame-gap) * 3
     );
   }
 }

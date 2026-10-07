@@ -391,11 +391,31 @@ async function logout() {
      196 → 184：加宽是为了「计划任务」「深度运维」这类四字条目不被切，
      但每宽 1px 内容区就窄 1px，1366 的屏上已经会少掉半张仪表盘卡片。 */
   --sidebar-w: 184px;
-  /* 内凹圆角露出的底色 = 侧边栏/顶栏的面板色，用 .layout 自己的背景承载。 */
-  background: var(--el-bg-color);
+  /* 四周留出外框留白：三块面板浮在页面底板上，不再贴死浏览器边缘。
+     底板不在这里画 —— 见下面的 ::before。 */
+  padding: var(--frame-gap);
   /* 兜底裁剪：任何页面把内容顶出视口时，裁在这里而不是让 document 长出
      滚动条。真要滚的只有 .content（它自带 min-height:0 + overflow:auto）。 */
   overflow: hidden;
+}
+/* 页面底板：把 --panel-bg-image 高斯模糊一遍铺满整屏，垫在三块面板最底下。
+   原先这里是一层纯色底（--el-bg-color-page），深色主题下它和侧栏/顶栏的
+   卡片底色只差 3% 明度 —— 外框那圈缝几乎看不出，浮动面板立不起来。
+   换成背景图自己的模糊延伸之后，缝里透出的是有颜色的模糊光晕，
+   内容区那张清晰图也像是「从背景里浮出来的一块清晰窗口」而不是贴上去的图片。
+   inset 取负值向外扩：高斯模糊会把图像边缘糊成半透明，扩出去的这一圈
+   正好落在视口之外，免得四周糊出一圈发虚的亮边。
+   z-index:-1 把它压到所有面板之下。这里不能用 background 简写直接铺在
+   .layout 自己身上 —— filter 会把面板内容一起糊掉。 */
+.layout::before {
+  content: "";
+  position: fixed;
+  inset: -64px;
+  background-image: var(--panel-bg-image, none);
+  background-size: cover;
+  background-position: center;
+  filter: blur(48px);
+  z-index: -1;
 }
 .sidebar {
   width: var(--sidebar-w);
@@ -403,12 +423,12 @@ async function logout() {
   display: flex;
   flex-direction: column;
   background: var(--el-bg-color);
+  /* 自己成一块圆角面板，与右邻的内容区之间只隔着外框那条缝 */
+  border-radius: var(--radius);
   /* 右边留 16px：与 .content 的 padding 对齐，使菜单项与内容区左边线成一条竖线。 */
   padding: var(--sp-3) var(--sp-4) var(--sp-3) var(--sp-3);
 }
-/* 交汇处的内凹圆角 = .content 的 border-top-left-radius，见下方 .content 规则。
-   曾经用「额外 span + 径向渐变」实现，绕了十几轮且反复出错；
-   .content 自带圆角一步到位，模板里这个 span 已删除。 */
+/* 侧栏与内容区之间不再有内凹圆角：两块各成圆角面板，中间隔着外框那条缝 */
 .brand {
   font-size: 15px;
   font-weight: 600;
@@ -577,6 +597,8 @@ async function logout() {
     transform: translateX(-100%);
     transition: transform 0.22s ease;
     box-sizing: border-box;
+    /* 抽屉是贴边拉出来的整幅面板，不参与「浮动面板」那套圆角 */
+    border-radius: 0;
   }
   .layout.menu-open .sidebar {
     transform: translateX(0);
@@ -636,6 +658,11 @@ async function logout() {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  /* 与左侧栏之间那条缝（用 margin 而不是给 .layout 加 gap：
+     .layout 里还有遮罩与 AI 球两个兄弟，gap 会一并作用到它们身上） */
+  margin-left: var(--frame-gap);
+  /* 顶栏与内容区也各自成块，中间留同一条缝 */
+  gap: var(--frame-gap);
   /* .main 是 .layout（横向 flex）的子项，主轴是横向，min-height 不参与
      自动最小尺寸，理论上可以省；但一旦以后 .layout 改成纵向，缺了它
      .topbar + .content 会把 .main 顶高，又变回整页滚。写死更稳。 */
@@ -649,6 +676,8 @@ async function logout() {
   justify-content: space-between;
   padding: 0 var(--sp-4);
   background: var(--el-bg-color);
+  /* 顶栏自己一块圆角面板，不再和内容区连成一体 */
+  border-radius: var(--radius);
 }
 .page-head {
   display: flex;
@@ -712,15 +741,13 @@ async function logout() {
      这条竖线的作用是让「侧栏边缘」和「内容边缘」各自成立，不是强制对齐。
      再放上去会显空：16 的一圈已经够把页面从灰底上托起来。 */
   padding: var(--sp-4);
-  /* 侧边栏右边界 × 顶栏下沿交汇处的内凹圆角 —— 就这一行。
-     .content 的左上角正好压在交汇点上，把它磨圆，露出的就是下层面板色
-     （.layout 背景 / .sidebar），交汇处自然沿圆弧内凹。
-     不需要额外控件、渐变、伪元素或 SVG。 */
-  border-top-left-radius: var(--radius);
+  /* 内容区自己一块圆角面板：四角同档圆角（不再是只磨左上角的内凹），
+     与顶栏、侧栏之间靠外框那条缝分开。 */
+  border-radius: var(--radius);
   background-color: var(--el-bg-color-page);
-  /* 顶栏下沿与侧栏右沿的接缝影。内容区正是这两条缝共同的接收面，所以压在
-     自己的内侧；给顶栏/侧栏加外投影反而会被这里的背景盖掉（见 theme.css）。 */
-  box-shadow: var(--panel-shadow-seam);
+  /* 与卡片/按钮同一档的贴面投影 —— 三块面板都浮在页面底色上，
+     靠这层影把内容区从底色上托起来（原来那对内凹接缝影已随内凹圆角一起去掉）。 */
+  box-shadow: var(--panel-shadow-1);
 }
 
 /* 手机档内容区四周从 16 缩到标尺的 8。表格列宽是按容器算的，省下的这 8×2
@@ -732,13 +759,18 @@ async function logout() {
    `.content{padding: --sp-3; border-top-left-radius: 0}`，因为写在基础规则之前，
    内距从来没生效过、圆角也从来没归零 —— 两处意图一并收到这里，才真正落地。 */
 @media (max-width: 768px) {
+  /* 窄屏把外框留白收到 --sp-2：360 视口下 10px 的一圈太占地方。
+     theme.css 里那份表格高度反推读的是同一个变量，自动跟着换。 */
+  .layout {
+    --frame-gap: var(--sp-2);
+  }
+  /* 侧栏已脱离文档流，主区不再需要为它留缝（外框留白本身已经给了内缩）。
+     🔴 必须写在这里：前面那个媒体块里的同名规则会被上面的基础 .main 原样盖掉 */
+  .main {
+    margin-left: 0;
+  }
   .content {
     padding: var(--sp-2);
-    /* 内凹圆角是为「侧边栏右边界 × 顶栏下沿」设计的。窄屏侧边栏不再常驻，
-       交汇点不存在，留着会在左上角留下一个无来由的缺口。 */
-    border-top-left-radius: 0;
-    /* 同理：竖的那条缝（侧栏右沿）不存在了，只留顶栏下沿那一横 */
-    box-shadow: var(--panel-shadow-seam-top);
   }
 }
 </style>
