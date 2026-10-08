@@ -1876,13 +1876,23 @@ const THEME_MAX_BYTES: usize = 3 * 1024 * 1024;
 /// 主题字段白名单校验（P1-2）：前端会在应用前再校验一次，这里做服务端闸门，
 /// 防止把恶意值存进库后经主题 CSS 注入攻击浏览器。
 ///
-/// - 允许字段：version / name / radius / shadow / colors{primary,bg_page,bg_card,text} / bg_image
+/// - 允许字段：version / name / radius / shadow / colors{primary,bg_page,bg_card,text} /
+///   bg_image / bg_zoom / bg_x / bg_y / card_opacity / card_blur
 /// - 颜色：必须为 `#rrggbb`（6 位十六进制，带 #）
 /// - radius：数值 0..=64
 /// - shadow：布尔，false = 关闭贴面卡片/内容块的投影（缺省视为 true）；
 ///   只作用于贴面那一档，对话框与下拉菜单等浮层的投影不受它控制
 /// - bg_image：必须以 `data:image/` 开头，且不含引号/括号/反斜杠/控制字符
 ///   （这些字符可闭合 CSS 的 `url("...")` 字符串，构成样式注入逃逸）
+/// - card_opacity：仪表盘卡片底色的不透明度（百分数）30..=100；
+///   只影响仪表盘那张卡片产出的 `--panel-card-bg`，其余面板不受它控制
+/// - card_blur：仪表盘卡片的高斯模糊半径（px）0..=40，产出 `--panel-card-blur`
+///   （backdrop-filter 的磨砂玻璃）
+///
+/// 观感只有两个字段：不透明度（card_opacity）与模糊（card_blur）。两者都作用于
+/// 整套界面表面 —— 仪表盘卡片与应用外壳（侧栏 / 顶栏 / 内容区底板）共用同一个
+/// `--panel-card-bg` 与 `--panel-card-blur`，不额外提供「只改外壳」的开关。
+/// 曾短暂存在的 chrome_opacity 已移除：多一个独立旋钮只会做出割裂的层次。
 fn validate_theme(cfg: &serde_json::Value) -> Result<(), String> {
     let obj = cfg
         .as_object()
@@ -1948,6 +1958,20 @@ fn validate_theme(cfg: &serde_json::Value) -> Result<(), String> {
                 let n = v.as_f64().ok_or(format!("{k} 必须是数字"))?;
                 if !(0.0..=100.0).contains(&n) {
                     return Err(format!("{k} 必须在 0..100 之间"));
+                }
+            }
+            "card_opacity" => {
+                let n = v.as_f64().ok_or("card_opacity 必须是数字")?;
+                // 下限 30：再低卡片与它下面的背景图糊成一片，卡上读数失去依托
+                if !(30.0..=100.0).contains(&n) {
+                    return Err("card_opacity 必须在 30..100 之间".into());
+                }
+            }
+            "card_blur" => {
+                let n = v.as_f64().ok_or("card_blur 必须是数字")?;
+                // 上限 40：采样半径超过卡片短边后只剩一片均匀色块，磨砂感反而没了
+                if !(0.0..=40.0).contains(&n) {
+                    return Err("card_blur 必须在 0..40 之间".into());
                 }
             }
             _ => return Err(format!("未知字段：{k}")),
@@ -3919,7 +3943,9 @@ mod tests {
                 "bg_card": "#1F1F1F",
                 "text": "#ffffff"
             },
-            "bg_image": "data:image/png;base64,iVBORw0KGgo="
+            "bg_image": "data:image/png;base64,iVBORw0KGgo=",
+            "card_opacity": 80,
+            "card_blur": 12
         })
     }
 
@@ -3981,6 +4007,43 @@ mod tests {
         assert!(validate_theme(&json!({ "radius": true })).is_err());
         // NaN/Infinity 在 JSON 里无法表达，但极大值同样越界
         assert!(validate_theme(&json!({ "radius": 1e10 })).is_err());
+    }
+
+    /// card_opacity：数值 30..=100 闭区间（仪表盘卡片底色不透明度）；
+    /// 再透就与卡片下的背景图糊成一片，故下限不是 0
+    #[test]
+    fn theme_card_opacity_bounds() {
+        assert!(validate_theme(&json!({ "card_opacity": 30 })).is_ok());
+        assert!(validate_theme(&json!({ "card_opacity": 100 })).is_ok());
+        assert!(validate_theme(&json!({ "card_opacity": 65 })).is_ok());
+        assert!(validate_theme(&json!({ "card_opacity": 29 })).is_err());
+        assert!(validate_theme(&json!({ "card_opacity": 0 })).is_err());
+        assert!(validate_theme(&json!({ "card_opacity": 101 })).is_err());
+        // 类型必须对：字符串/布尔虽可转成数字也不当数值用
+        assert!(validate_theme(&json!({ "card_opacity": "80" })).is_err());
+        assert!(validate_theme(&json!({ "card_opacity": true })).is_err());
+    }
+
+    /// card_blur：数值 0..=40 闭区间（仪表盘卡片的磨砂玻璃半径）。
+    /// 0 合法（等于不模糊）；上限 40 之外只剩一片均匀色块，磨砂感反而消失
+    #[test]
+    fn theme_card_blur_bounds() {
+        assert!(validate_theme(&json!({ "card_blur": 0 })).is_ok());
+        assert!(validate_theme(&json!({ "card_blur": 12 })).is_ok());
+        assert!(validate_theme(&json!({ "card_blur": 40 })).is_ok());
+        assert!(validate_theme(&json!({ "card_blur": -1 })).is_err());
+        assert!(validate_theme(&json!({ "card_blur": 41 })).is_err());
+        // 类型必须对：字符串/布尔不当数值用（否则可注入任意 CSS 值）
+        assert!(validate_theme(&json!({ "card_blur": "12px" })).is_err());
+        assert!(validate_theme(&json!({ "card_blur": true })).is_err());
+    }
+
+    /// 观感只有两个字段。曾经短暂存在的 chrome_opacity（外壳独立不透明度）已移除，
+    /// 必须按未知字段被拒绝 —— 留在白名单里等于继续接受一个不产生任何效果的旋钮
+    #[test]
+    fn theme_removed_chrome_opacity_rejected() {
+        assert!(validate_theme(&json!({ "chrome_opacity": 90 })).is_err());
+        assert!(validate_theme(&json!({ "chrome_opacity": 100 })).is_err());
     }
 
     /// bg_image：仅 data:image/ 前缀；含引号/括号/反斜杠/控制字符

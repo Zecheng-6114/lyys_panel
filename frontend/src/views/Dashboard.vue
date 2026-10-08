@@ -817,7 +817,18 @@ onBeforeUnmount(() => {
   gap: var(--sp-3);
 }
 .card {
-  background: var(--el-bg-color);
+  /* 半透卡片：--panel-card-bg 只在主题把卡片不透明度调到 100 以下时才存在
+     （见 stores/theme.ts 的 cardBgVar），缺省回退到完全不透明的 --el-bg-color，
+     与未定制主题完全一致。半透之后背景图 / 模糊光晕从卡片后面透出来，
+     卡上读数仍靠投影立边界（.card--drop 那层落点底也照旧透得出来）。 */
+  background: var(--panel-card-bg, var(--el-bg-color));
+  /* 毛玻璃：把卡片「背后」那层背景糊掉（backdrop-filter 影响的是元素背后的
+     内容，不影响卡片自己的文字与图表）。半径来自主题的 --panel-card-blur。
+     🔴 这两条只在变量存在时生效 —— 不支持 backdrop-filter 的浏览器会把未注册的
+     自定义属性当作无效值，从而忽略整条声明，卡片退回「仅半透」。
+     不写 @supports：那样得把规则拆成两份，反而不如变量自带的降级干净。 */
+  -webkit-backdrop-filter: var(--panel-card-blur);
+  backdrop-filter: var(--panel-card-blur);
   border-radius: var(--radius);
   padding: var(--sp-4) var(--sp-5);
   /* 与 .el-card 同档的一层投影：仪表盘卡片是 div 不吃 EP 变量，
@@ -936,13 +947,25 @@ onBeforeUnmount(() => {
   /* 无论卡片是 1 行还是 2 行高，进度条都贴底 */
   margin-top: auto;
   border-radius: var(--radius);
-  background: var(--el-fill-color);
+  /* 进度条槽：与卡片上其它控件同档，摊开主题的不透明度（缺省 100% = 原值） */
+  background: color-mix(
+    in srgb,
+    var(--el-fill-color) var(--panel-surface-opacity, 100%),
+    transparent
+  );
+  -webkit-backdrop-filter: var(--panel-card-blur, blur(0px));
+  backdrop-filter: var(--panel-card-blur, blur(0px));
   overflow: hidden;
 }
 /* 没有上限的指标（速率 / 计数 / 静态信息）不画槽，只留 4px 占位：
-   整块去掉会让同一行卡片的内容高度参差，凭空多出对不齐的留白 */
+   整块去掉会让同一行卡片的内容高度参差，凭空多出对不齐的留白。
+   🔴 这里必须把 backdrop-filter 也一并关掉：底色虽然透明，但「透明元素 + backdrop-filter」
+   仍会在圆角边缘露出一圈可见痕迹（实测是一条横贯卡片的暗线，看着就像「没有进度的
+   卡片却有一条进度条」）。空占位就该是纯占位 —— 不画底、也不参与合成。 */
 .bar--none {
   background: transparent;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 .bar i {
   display: block;

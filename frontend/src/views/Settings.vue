@@ -153,6 +153,21 @@
             </div>
 
             <div class="row">
+              <label>不透明度 {{ draft.card_opacity }}%</label>
+              <el-slider v-model="draft.card_opacity" :min="30" :max="100" :step="5" />
+            </div>
+            <div class="row">
+              <label>模糊 {{ draft.card_blur }}px</label>
+              <el-slider v-model="draft.card_blur" :min="0" :max="40" :step="2" />
+            </div>
+            <div class="hint">
+              磨砂玻璃由「透多少 + 糊不糊」两项决定，两者都作用于整套界面表面 ——
+              左侧菜单栏、上方控件、内容区底板与仪表盘卡片：<b>不透明度</b>调到 100% 以下
+              让背景图透上来，<b>模糊</b>再把透出来的背景糊掉（0 即不糊）。建议
+              70% 左右配 10~20px 模糊。拖动即时预览，满意后按下面的「保存主题」。
+            </div>
+
+            <div class="row">
               <label>阴影</label>
               <el-checkbox v-model="draft.shadow">卡片使用投影</el-checkbox>
             </div>
@@ -352,9 +367,9 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import http from "../api/http";
 import {
-  clearBgPreview,
+  clearThemePreview,
   isDarkTheme,
-  previewBg,
+  previewTheme,
   useThemeStore,
   type ThemeColors,
   type ThemeConfig,
@@ -539,6 +554,10 @@ interface Draft {
   /// 背景图位置（百分数，50 = 居中）
   bg_x: number;
   bg_y: number;
+  /// 不透明度（百分数，100 = 完全不透明）：卡片与应用外壳共用
+  card_opacity: number;
+  /// 高斯模糊半径（px，0 = 不模糊）：同上作用于全部表面
+  card_blur: number;
 }
 
 function emptyDraft(): Draft {
@@ -551,6 +570,8 @@ function emptyDraft(): Draft {
     bg_zoom: 100,
     bg_x: 50,
     bg_y: 50,
+    card_opacity: 100,
+    card_blur: 0,
   };
 }
 
@@ -575,6 +596,10 @@ function fromConfig(cfg: ThemeConfig | null, keepRadius = false) {
     if (typeof cfg.bg_zoom === "number") d.bg_zoom = cfg.bg_zoom;
     if (typeof cfg.bg_x === "number") d.bg_x = cfg.bg_x;
     if (typeof cfg.bg_y === "number") d.bg_y = cfg.bg_y;
+    // 缺省 100（完全不透明）：老主题包没有这个字段，行为应与从前一致
+    if (typeof cfg.card_opacity === "number") d.card_opacity = cfg.card_opacity;
+    // 缺省 0（不模糊）：同上
+    if (typeof cfg.card_blur === "number") d.card_blur = cfg.card_blur;
   }
   Object.assign(draft, d);
 }
@@ -593,6 +618,10 @@ function toConfig(): ThemeConfig {
   const cfg: ThemeConfig = { version: 1, name: draft.name.trim() || "自定义主题" };
   cfg.radius = draft.radius;
   cfg.shadow = draft.shadow;
+  // 100 = 完全不透明 = 与「没定制过」等价，不写进配置（与 bg_zoom 只在有图时
+  // 才写同一个道理：不留一堆等于默认值的字段，主题包与库里的 JSON 都干净）
+  if (draft.card_opacity < 100) cfg.card_opacity = draft.card_opacity;
+  if (draft.card_blur > 0) cfg.card_blur = draft.card_blur;
   const colors = compact(draft.colors);
   if (Object.keys(colors).length) cfg.colors = colors;
   if (draft.bg_image) {
@@ -614,24 +643,26 @@ function compact(c: DraftColors): Record<string, string> {
 // 主题配置由 AppLayout 异步拉取，到位后同步进编辑态
 watch(() => theme.config, (cfg) => fromConfig(cfg), { immediate: true });
 
-/* 背景图的即时预览。
- * 颜色/圆角要等「保存主题」才生效，背景的位置与缩放却必须边拖边看 ——
- * 拖动滑杆时先把这套几何注入页面（不写库），满意了再保存。预览注入的是
- * 与主题完全相同的算式（stores/theme.ts 的 bgVars），所以「拖的时候看到的」
+/* 背景图几何与卡片不透明度的即时预览。
+ * 颜色/圆角要等「保存主题」才生效，背景的位置与缩放、卡片透多少却必须边拖边看 ——
+ * 拖动滑杆时先把这几项注入页面（不写库），满意了再保存。预览注入的是与主题
+ * 完全相同的算式（stores/theme.ts 的 bgVars / cardBgVar），所以「拖的时候看到的」
  * 就是「保存后生效的」。离开本页时清掉，避免未保存的几何留在页面上。 */
 watch(
-  () => [draft.bg_image, draft.bg_zoom, draft.bg_x, draft.bg_y],
+  () => [draft.bg_image, draft.bg_zoom, draft.bg_x, draft.bg_y, draft.card_opacity, draft.card_blur],
   () =>
-    previewBg({
+    previewTheme({
       version: 1,
       bg_image: draft.bg_image ?? undefined,
       bg_zoom: draft.bg_zoom,
       bg_x: draft.bg_x,
       bg_y: draft.bg_y,
+      card_opacity: draft.card_opacity,
+      card_blur: draft.card_blur,
     }),
   { immediate: true },
 );
-onBeforeUnmount(clearBgPreview);
+onBeforeUnmount(clearThemePreview);
 
 /// 位置与缩放回到出厂值（图片本身不动）
 function resetBgAdjust() {
@@ -986,7 +1017,7 @@ onMounted(() => {
 }
 
 .card {
-  background: var(--el-bg-color);
+  background: var(--panel-card-bg, var(--el-bg-color));
   border-radius: var(--radius, 8px);
   /* 纵向内距比全局卡片再紧一档：设置页两列卡片里总有一列特别长，
      这里省下的 8px 直接决定底部那颗按钮落不落在折线上。 */
@@ -1099,7 +1130,14 @@ onMounted(() => {
   gap: var(--sp-3);
   padding: var(--sp-2) var(--sp-3);
   border-radius: var(--radius, 6px);
-  background: var(--el-fill-color-light);
+  /* 与面板同一种玻璃：摊开主题的不透明度 + 同一份模糊（缺省 100% 时等价原值） */
+  background: color-mix(
+    in srgb,
+    var(--el-fill-color-light) var(--panel-surface-opacity, 100%),
+    transparent
+  );
+  -webkit-backdrop-filter: var(--panel-card-blur, blur(0px));
+  backdrop-filter: var(--panel-card-blur, blur(0px));
   font-size: 12px;
 }
 .face-row + .face-row {

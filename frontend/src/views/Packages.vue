@@ -1,7 +1,7 @@
 <template>
   <div class="packages">
     <div class="toolbar">
-      <el-radio-group v-model="mode">
+      <el-radio-group v-model="mode" ref="modeGroup">
         <el-radio-button value="installed">已安装</el-radio-button>
         <!-- Arch 系是滚动更新发行版，没有「可升级」这个中间态 -->
         <el-radio-button value="upgradable">{{ rolling ? "滚动更新" : "可升级" }}</el-radio-button>
@@ -131,6 +131,7 @@
 
 <script setup lang="ts">
 import { col, hideColP2, hideColP3 } from "../composables/useResponsive";
+import { useSegmentIndicator } from "../composables/useSegmentIndicator";
 import { computed, onMounted, ref, watch } from "vue";
 import http from "../api/http";
 import { pkgMetaSafe, type PkgMeta } from "../api/meta";
@@ -155,6 +156,9 @@ const PAGE_SIZES = [50, 100, 200, 500];
 const jobWatch = useJobsStore();
 
 const mode = ref<"installed" | "upgradable" | "search">("installed");
+/// 分段单选的滑动指示块（详见 composable）
+const modeGroup = ref<HTMLElement | null>(null);
+useSegmentIndicator(modeGroup);
 const keyword = ref("");
 const rows = ref<Pkg[]>([]);
 const selected = ref<Pkg[]>([]);

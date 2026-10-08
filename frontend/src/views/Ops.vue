@@ -309,7 +309,7 @@ onBeforeUnmount(() => {
   height: auto;
 }
 .panel {
-  background: var(--el-bg-color);
+  background: var(--panel-card-bg, var(--el-bg-color));
   border-radius: var(--radius);
   /* 与卡片 / 表格同档：三块面板都是白底实心块，不加影就整片贴在页面底色上 */
   box-shadow: var(--panel-shadow-1);
@@ -364,7 +364,10 @@ onBeforeUnmount(() => {
 .unit-pre {
   margin: var(--sp-2) 0 0;
   padding: var(--sp-3) var(--sp-4);
-  background: var(--el-fill-color-lighter);
+  /* 与父级 .panel 用同一个半透底色：父块变半透之后，原先「比父块亮一档」的
+     实色输出块会反过来变成一块不透明的补丁（父块透、子块不透最显突兀）；
+     它与父块的区隔改由同一档投影承担（父块与子块都浮，靠影分层）。 */
+  background: var(--panel-card-bg, var(--el-fill-color-lighter));
   border-radius: var(--radius);
   /* 与 .log-pane 同款：白 panel 内的浅灰输出块，靠同一档投影与父块分层 */
   box-shadow: var(--panel-shadow-1);
@@ -380,7 +383,8 @@ onBeforeUnmount(() => {
   padding: var(--sp-3) var(--sp-4);
   height: 320px;
   overflow: auto;
-  background: var(--el-fill-color-lighter);
+  /* 与 .unit-pre 同理：吃主题的半透底色，不再用「亮一档」的实色 */
+  background: var(--panel-card-bg, var(--el-fill-color-lighter));
   border-radius: var(--radius);
   /* 与 .unit-pre 同款：白 panel 内的浅灰输出块，靠同一档投影与父块分层 */
   box-shadow: var(--panel-shadow-1);

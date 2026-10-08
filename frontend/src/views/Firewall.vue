@@ -219,7 +219,7 @@ onMounted(load);
   padding: var(--sp-2) 2px;
 }
 .empty {
-  background: var(--el-bg-color);
+  background: var(--panel-card-bg, var(--el-bg-color));
   border-radius: var(--radius);
   padding: var(--sp-6) var(--sp-5);
   text-align: center;
@@ -235,7 +235,14 @@ onMounted(load);
 }
 .empty-desc code {
   font-family: var(--panel-mono);
-  background: var(--el-fill-color-light);
+  /* 行内小胶囊（ufw / firewalld 这类）：与标签同档，摊开不透明度 + 磨砂 */
+  background: color-mix(
+    in srgb,
+    var(--el-fill-color-light) var(--panel-surface-opacity, 100%),
+    transparent
+  );
+  -webkit-backdrop-filter: var(--panel-card-blur, blur(0px));
+  backdrop-filter: var(--panel-card-blur, blur(0px));
   padding: 1px var(--sp-1);
   border-radius: 4px;
 }

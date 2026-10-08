@@ -428,7 +428,12 @@ async function logout() {
   flex: none;
   display: flex;
   flex-direction: column;
-  background: var(--el-bg-color);
+  background: var(--panel-card-bg, var(--el-bg-color));
+  /* 与仪表盘卡片同一份磨砂：把侧栏「背后」那层模糊光晕糊掉，半径来自
+     --panel-card-blur。变量不存在（老主题或未设模糊）时整条声明被忽略，
+     退回「只是半透」；变量默认 0px，即不糊。 */
+  -webkit-backdrop-filter: var(--panel-card-blur, blur(0px));
+  backdrop-filter: var(--panel-card-blur, blur(0px));
   /* 自己成一块圆角面板，与右邻的内容区之间只隔着外框那条缝 */
   border-radius: var(--radius);
   /* 右边留 16px：与 .content 的 padding 对齐，使菜单项与内容区左边线成一条竖线。 */
@@ -681,7 +686,10 @@ async function logout() {
   align-items: center;
   justify-content: space-between;
   padding: 0 var(--sp-4);
-  background: var(--el-bg-color);
+  /* 与侧栏同一份半透底色 + 磨砂（见 .sidebar 的说明） */
+  background: var(--panel-card-bg, var(--el-bg-color));
+  -webkit-backdrop-filter: var(--panel-card-blur, blur(0px));
+  backdrop-filter: var(--panel-card-blur, blur(0px));
   /* 顶栏自己一块圆角面板，不再和内容区连成一体 */
   border-radius: var(--radius);
 }
@@ -750,7 +758,21 @@ async function logout() {
   /* 内容区自己一块圆角面板：四角同档圆角（不再是只磨左上角的内凹），
      与顶栏、侧栏之间靠外框那条缝分开。 */
   border-radius: var(--radius);
-  background-color: var(--el-bg-color-page);
+  /* 内容区底板：透多少与卡片/侧栏/顶栏是同一个值（--panel-surface-opacity，由主题
+     按不透明度产出），但摊的是**页面色**而不是卡片色 —— 全站层次本来就靠
+     「页面底色 ← 卡片色」这对色差表达，底板若改用卡片色，页面与卡片会贴成一片、
+     卡片再也立不起来。
+     变量缺省（未定制 / 不透明）时第二个 var() 兜底为 100%，即完全不透明 ——
+     与从前的背景色逐像素一致。
+     底板必须一起半透 + 磨砂：它挡在最前面，若完全遮住底图，顶栏与侧栏虽也带 blur，
+     却与背景图叠成一个平面，看起来仍像没有背景。 */
+  background-color: color-mix(
+    in srgb,
+    var(--el-bg-color-page) var(--panel-surface-opacity, 100%),
+    transparent
+  );
+  -webkit-backdrop-filter: var(--panel-card-blur, blur(0px));
+  backdrop-filter: var(--panel-card-blur, blur(0px));
   /* 与卡片/按钮同一档的贴面投影 —— 三块面板都浮在页面底色上，
      靠这层影把内容区从底色上托起来（原来那对内凹接缝影已随内凹圆角一起去掉）。 */
   box-shadow: var(--panel-shadow-1);

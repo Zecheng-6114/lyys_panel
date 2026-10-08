@@ -412,6 +412,11 @@ body {
 /* 加载遮罩（v-loading）：半透明直角块盖在圆角容器上 */
 .el-loading-mask {
   border-radius: var(--radius);
+  /* 半透面板上，那层 --el-mask-color 的矩形盖住的是「分段单选 / 工具栏」这类
+     成型控件：遮罩只铺到容器的圆角矩形，而里面的控件有自己的圆角与分段边，
+     于是加载的那一瞬间会看到一块方形色块割开控件（实测反馈的「错误分割」）。
+     做法是只留转圈、不铺底 —— 加载指示仍在，控件形状不再被切。 */
+  background-color: transparent;
 }
 /* 表格内滚动条滑块 */
 .el-scrollbar__thumb {
@@ -441,25 +446,100 @@ body {
   background-repeat: no-repeat;
 }
 
+/* 页面内的面板块：与侧栏 / 顶栏 / 仪表盘卡片同一套「磨砂表面」语言。
+ * 这里只统一**模糊**；底色由各页面自己的规则读 --panel-card-bg 给出
+ * （`.logbox` / `.panel` / `.termbox` / `.dnsbox` / `.status-block` /
+ * `.inst-card` / `.settings .card` 等各写一行 `var(--panel-card-bg, --el-bg-color)`）。
+ * 为什么不在这一条里一并改底色：各页面的规则是 scoped 的
+ * （`.logbox[data-v-xxx]`），特异性高于这里的 `.logbox` —— 全局写 background
+ * 会被它们原样盖掉，只能让各处自己读变量（当初实测：filter 生效、底色没生效）。
+ *
+ * 只列这几个类，不做通配：容器是各页面自建的，类名就是这里的契约。
+ * 刻意**不**收录透明容器与嵌套块：透明的东西（如设置页的行容器、网络页的 .fam）
+ * 没有底色可摊、本就在透底图；嵌在别的实心块里的子块背后是父块而非背景图，
+ * 再糊一层既看不见又白付一次合成开销。按钮 / 输入框等小控件同理 —— 它们靠
+ * 底色差与投影分层，投影已经给出「浮起」的读法，糊背景对它们是负收益。 */
+.logbox,
+.termbox,
+.panel,
+.log-pane,
+.unit-pre,
+.dnsbox,
+.status-block,
+.inst-card,
+.output,
+.empty,
+.el-table,
+.el-table__header th.el-table__cell,
+.el-button--default,
+.mini-btn,
+.el-pager li,
+.el-input-number__decrease,
+.el-input-number__increase {
+  /* 与外壳共用一个半径（--panel-card-blur，缺省 0px 即不糊） */
+  -webkit-backdrop-filter: var(--panel-card-blur, blur(0px));
+  backdrop-filter: var(--panel-card-blur, blur(0px));
+}
+/* xterm 自己的两层底（viewport 与它画进 canvas 的背景）都会盖住 .termbox 的磨砂：
+   viewport 那层实色在这里压掉，canvas 那层由 Terminal.vue 的 theme.background
+   = transparent + allowTransparency 关掉 —— 两边缺一不可。 */
+.xterm-viewport {
+  background-color: transparent !important;
+}
+.xterm-screen canvas {
+  /* 画布本身不吃 backdrop-filter，这里只是确保它不额外铺底 */
+  background-color: transparent;
+}
+/* 仪表盘卡片与设置页卡片走各自的 scoped 规则，这里补一份给同名块兜底 */
+.card {
+  -webkit-backdrop-filter: var(--panel-card-blur, blur(0px));
+  backdrop-filter: var(--panel-card-blur, blur(0px));
+}
+
 /* 无边框设计：靠背景色/阴影表达层次 */
 /* 输入框：用浅灰背景替代边框，并吃与卡片 / 表格 / 按钮同一档的贴面投影 ——
  * 它同样是「有底色的实体块」，同一张表单里不该只有它贴着底色。
  * 🔴 这里的 !important 必须留着：EP 用 box-shadow 画聚焦环与错误环
  * （`.el-input__wrapper.is-focus` / `.is-error` 等），不用 !important 压不住，
- * 聚焦时这条投影会被换成 EP 自己的 inset 环 —— 又回到描边那套口径去了。 */
+ * 聚焦时这条投影会被换成 EP 自己的 inset 环 —— 又回到描边那套口径去了。
+ *
+ * 表单控件是「页面面板块」里最后一个还留着实色的类别（实测全站审计就剩它与
+ * 文本域）：它们坐在半透面板上，一块纯色底显得与整体不搭。这里把同一档不透明度
+ * 摊到控件底色上，并给它们同一份 backdrop-filter —— 与卡片 / 表格 / 面板同一种
+ * 磨砂语言，且缺省（--panel-surface-opacity 未生成 = 100%）时表达式等价于原值。
+ * 用 background-color? 不行：原值本身就是「底色向文本色混一点」的派生色，
+ * 与卡片色并不相同，所以这里摊的是 --el-fill-color-light / --el-fill-color 本身
+ * 而不是容器变量 —— 控件仍比所在面板亮一档，层次不变、只是半透。 */
 .el-input__wrapper,
 .el-textarea__inner {
-  background-color: var(--el-fill-color-light);
+  background-color: color-mix(
+    in srgb,
+    var(--el-fill-color-light) var(--panel-surface-opacity, 100%),
+    transparent
+  );
   box-shadow: var(--panel-shadow-1) !important;
+  -webkit-backdrop-filter: var(--panel-card-blur, blur(0px));
+  backdrop-filter: var(--panel-card-blur, blur(0px));
 }
 .el-input__wrapper.is-focus,
 .el-textarea__inner:focus {
-  background-color: var(--el-fill-color);
+  background-color: color-mix(
+    in srgb,
+    var(--el-fill-color) var(--panel-surface-opacity, 100%),
+    transparent
+  );
 }
-/* 下拉选择器 / 日期选择器：与输入框是同一类控件块，投影必须同档，
+/* 下拉选择器 / 日期选择器：与输入框是同一类控件块，底色与投影都必须同档，
  * 否则同一张表单里输入框浮着、下拉贴着。 */
 .el-select__wrapper {
+  background-color: color-mix(
+    in srgb,
+    var(--el-fill-color-light) var(--panel-surface-opacity, 100%),
+    transparent
+  );
   box-shadow: var(--panel-shadow-1) !important;
+  -webkit-backdrop-filter: var(--panel-card-blur, blur(0px));
+  backdrop-filter: var(--panel-card-blur, blur(0px));
 }
 /* 默认按钮：浅灰背景，无边框。
  * 🔴 各状态的边框变量要一起置空，只写 border-color 不够：EP 把 border-color 声明在
@@ -467,13 +547,61 @@ body {
  * 这类带伪类的选择器特异性高于上面那条 `.el-button` —— 指针一碰上去就补回一圈 1px 的
  * --el-color-primary-light-7 描边（深色主题下实测 #464646 落在 #171717 底上，明暗差 47 级，
  * 比按钮自己的投影还抢眼；浅色下是 #b8b8b8 落在 #e7e7e7 上，同样看得见）。
- * 变量置空后 hover / active / disabled 所有状态恒为透明。 */
+ * 变量置空后 hover / active / disabled 所有状态恒为透明。
+ *
+ * 底色同理走**变量**而不是元素级 background-color：无修饰类的 `<el-button>`
+ * 并不带 --default 修饰类，它的底来自 EP 的 `--el-button-bg-color`
+ * （默认取 --el-fill-color-blank，而主题把 blank 设成了卡片色，于是每个按钮
+ * 都带回一层不透明底）。改在 .el-button 上，四个状态变量一次到位，
+ * 也不必跟 EP 的样式块抢级联顺序 —— 实测元素级覆盖会被后加载的 EP 盖掉。
+ * 摊的是 --el-fill-color-light（与输入框/表头同档的浅底），不是卡片色：
+ * 按钮仍比所在面板亮一档，层次不变、只是半透。 */
 .el-button {
   border-color: transparent;
   --el-button-border-color: transparent;
   --el-button-hover-border-color: transparent;
   --el-button-active-border-color: transparent;
   --el-button-disabled-border-color: transparent;
+  --el-button-bg-color: color-mix(
+    in srgb,
+    var(--el-fill-color-light) var(--panel-surface-opacity, 100%),
+    transparent
+  );
+  --el-button-hover-bg-color: color-mix(
+    in srgb,
+    var(--el-fill-color) var(--panel-surface-opacity, 100%),
+    transparent
+  );
+  --el-button-active-bg-color: color-mix(
+    in srgb,
+    var(--el-fill-color-dark) var(--panel-surface-opacity, 100%),
+    transparent
+  );
+  --el-button-disabled-bg-color: color-mix(
+    in srgb,
+    var(--el-fill-color-light) var(--panel-surface-opacity, 100%),
+    transparent
+  );
+}
+/* 按钮 / 页码 / 步进器 / 复选框这些小块同样吃同一份模糊（缺省 0px）。
+ * ⚠️ 分页的上一页/下一页要写 `.el-pagination` 那一层：它们是分页容器的直接
+ * 子元素，不在 `.el-pager` 里（实测漏过：底色改了、模糊没跟上）。
+ * 🔴 这里**不含 `.el-radio-button__inner`**：分段控件的小块底是透明的，
+ * 「透明元素 + backdrop-filter」仍会合成出一块看得见的矩形 —— 那正是
+ * 用户反馈的「莫名其妙多出来的模糊矩形」（实测三段各自带 blur(40px)）。
+ * 组 `.el-radio-group` 自己已经有模糊，段本体不需要、也不该有。 */
+.el-button:not(.is-link):not(.is-text),
+.el-pager li,
+.el-pagination .btn-prev,
+.el-pagination .btn-next,
+.el-pager .btn-prev,
+.el-pager .btn-next,
+.el-input-number__decrease,
+.el-input-number__increase,
+.el-checkbox__inner,
+.el-radio__inner {
+  -webkit-backdrop-filter: var(--panel-card-blur, blur(0px));
+  backdrop-filter: var(--panel-card-blur, blur(0px));
 }
 /* 按钮与卡片共用同一套「浮起」语言：凡是有底色的实体块（卡片 / 表格 / 按钮）
  * 都带贴面档投影 —— 否则同一个页面上有的浮着、有的贴着，层次不成体系。
@@ -481,11 +609,123 @@ body {
 .el-button:not(.is-link):not(.is-text) {
   box-shadow: var(--panel-shadow-1);
 }
+/* 状态标签（任务状态 / 实例类型 / 会话 / 网站）：底是 --el-fill-color-light，
+ * 半透面板上它是一小块纯色 —— 同样摊开。普通与 plain 两种形态都要写：
+ * 只覆盖 --plain 那条实测漏掉了带语义色的那些。 */
+.el-tag,
+.el-tag--plain {
+  background-color: color-mix(
+    in srgb,
+    var(--el-fill-color-light) var(--panel-surface-opacity, 100%),
+    transparent
+  ) !important;
+}
+/* 模态（消息盒 / 对话框 / 抽屉）：按需求也吃同一份磨砂 —— 底色摊开主题的
+ * 不透明度 + 同一份模糊（缺省 100% 时等价原值）。它们面积大、且遮罩已把
+ * 背景压暗一层，透一点不伤读数；遮罩本身不做处理（它是纯色黑，本就是压暗层）。 */
+.el-message-box,
+.el-dialog,
+.el-drawer {
+  background-color: color-mix(
+    in srgb,
+    var(--el-bg-color) var(--panel-surface-opacity, 100%),
+    transparent
+  ) !important;
+  -webkit-backdrop-filter: var(--panel-card-blur, blur(0px));
+  backdrop-filter: var(--panel-card-blur, blur(0px));
+}
+/* 抽屉 / 对话框的内容区若自带底色（EP 个别版本会给 body 一层），一并压平，
+ * 否则它又会把模态那层磨砂盖住 —— 与终端、AI 面板踩过的是同一个坑。 */
+.el-dialog__body,
+.el-drawer__body {
+  background-color: transparent;
+}
+.el-message {
+  background-color: color-mix(
+    in srgb,
+    var(--el-bg-color) var(--panel-surface-opacity, 100%),
+    transparent
+  ) !important;
+}
+/* 进度条（仪表盘进度条走的是 el-progress 的槽与内条）：
+ * 槽是 --el-fill-color，内条是主色（主色保留实底，同 primary 按钮）。 */
+.el-progress-bar__outer {
+  background-color: color-mix(
+    in srgb,
+    var(--el-fill-color) var(--panel-surface-opacity, 100%),
+    transparent
+  ) !important;
+}
+/* 折叠面板 / 描述列表 / 树：这三类容器在设置页与实例页可能出现，
+ * 底色同样取自 --el-fill-color-blank（已托底），这里只补模糊。 */
+.el-collapse-item__header,
+.el-collapse-item__content,
+.el-descriptions__body,
+.el-tree {
+  -webkit-backdrop-filter: var(--panel-card-blur, blur(0px));
+  backdrop-filter: var(--panel-card-blur, blur(0px));
+}
+
+/* 默认按钮 / 小按钮 / 分段单选 / 分页 / 数字步进器：这些「有底色的控件」与
+ * 输入框是同一类实体块，原来只有投影与卡片对齐、底色仍是实色 —— 在半透面板上
+ * 就成了仅剩的几处死色块（实测全站审计扫出来的就是它们与表头）。
+ * 统一改成「同一档不透明度摊开 + 同一份模糊」。
+ *
+ * 🔴 这些底色覆盖必须带 `!important`：EP 的样式块是入口之后的独立请求
+ * （`element-plus-*.css` 排在应用样式之后），同特异性下后写的赢 —— 实测
+ * `.el-button--default{background-color: …}` 会被 EP 自己的
+ * `background-color: var(--el-button-bg-color)` 原样盖掉（表头、页码同理；
+ * 同一个坑 `.el-table` 早就踩过，它一直带着 !important）。
+ * 缺省（未生成 --panel-surface-opacity = 100%）时表达式等价于原值。
+ * ⚠️ 只摊带底色的样式：primary 按钮是主色实底（品牌色，本就该实），link / text
+ * 没有底色，都不在其中。 */
 .el-button--default {
-  background-color: var(--el-fill-color-light);
+  background-color: color-mix(
+    in srgb,
+    var(--el-fill-color-light) var(--panel-surface-opacity, 100%),
+    transparent
+  ) !important;
 }
 .el-button--default:hover {
-  background-color: var(--el-fill-color);
+  background-color: color-mix(
+    in srgb,
+    var(--el-fill-color) var(--panel-surface-opacity, 100%),
+    transparent
+  ) !important;
+}
+/* 表头单元格：底色比表体亮一档（--el-fill-color-light），摊开后与半透表体是
+ * 同一张玻璃 —— 不摊的话表头会是一整条实色，正好在表格最上沿最显眼。 */
+.el-table .el-table__header th.el-table__cell {
+  background-color: color-mix(
+    in srgb,
+    var(--el-fill-color-light) var(--panel-surface-opacity, 100%),
+    transparent
+  ) !important;
+}
+/* 数字步进器的加减按钮：EP 给的是 --el-fill-color-light，与输入框同档摊开。
+ * （分段单选的段底不在这里给：它由上面的 .el-radio-group 统一供给，
+ *  段本体保持透明 —— 见那条规则的说明。） */
+.el-input-number__decrease,
+.el-input-number__increase {
+  background-color: color-mix(
+    in srgb,
+    var(--el-fill-color-light) var(--panel-surface-opacity, 100%),
+    transparent
+  ) !important;
+}
+/* 分页：未选中页码与上一页/下一页是 --el-fill-color-light，选中页是主色实底（保留）。
+ * 🔴 上一页/下一页是**分页容器的直接子元素**（不是 .el-pager 的后代），
+ * 所以两条路径都要写；只写 .el-pager 那一条实测漏掉了这两个。 */
+.el-pager li,
+.el-pagination .btn-prev,
+.el-pagination .btn-next,
+.el-pager .btn-prev,
+.el-pager .btn-next {
+  background-color: color-mix(
+    in srgb,
+    var(--el-fill-color-light) var(--panel-surface-opacity, 100%),
+    transparent
+  ) !important;
 }
 /* 分段单选按钮组（日志 / 软件 / 网络页的模式切换）：与按钮同属「有底色的控件」，
  * 用同一档投影。影只加在组容器上一次 —— 逐段加会在段与段之间叠出阶梯状的影。 */
@@ -516,9 +756,10 @@ body {
  * 🔴 EP 给它的边界是「1px 描边 + 零投影」，而这条描边**不取自 --el-border-color** ——
  * 它走 --el-message-border-color = --el-color-<type>-light-8，所以全局把 --el-border-color*
  * 统统置空根本管不到它（实测仍在：浅色 #cccccc 落在 #ebebeb 上、深色 #2e2e2e 落在 #171717 上，
- * 都是一圈看得见的线）。无边框约定下在这里单独收掉，只留「不透明底 + 浮层档投影」，
+ * 都是一圈看得见的线）。无边框约定下在这里单独收掉，只留「半透底 + 浮层档投影」，
  * 与作业通知同一套交代方式。用 border-color 而不是 border:none，保留 1px 盒以免尺寸跳变。
- * 它也不吃 --el-box-shadow* 那四个变量（别以为改了 light 就管到它），投影同样在这里单独给。 */
+ * 它也不吃 --el-box-shadow* 那四个变量（别以为改了 light 就管到它），投影同样在这里单独给。
+ * 底色在稍前那条规则里摊开了主题的不透明度（见「顶部消息」那段）。 */
 .el-message {
   box-shadow: var(--panel-shadow-2);
   border-color: transparent;
@@ -553,11 +794,43 @@ body {
      抬到 13px，列内距不动（仍是 8px 纵向），一屏照样 20 行上下。 */
   font-size: 13px;
 }
+/* 表格是同一种「页面面板块」：7 个列表页的主内容都是它，若它不透明，
+   上面那条外壳规则在这些页面上等于白做（实测就是这个现象：日志页看得见磨砂，
+   软件/进程/服务页看不到 —— 整块被表格的实底盖住）。
+   所以这里与各页面自建块用同一套写法：底色取主题的 --panel-card-bg，
+   再吃同一份模糊。
+   🔴 必须带 !important：EP 把 --el-table-bg-color / --el-table-tr-bg-color
+   定义在 .el-table 自身（值取 --el-fill-color-blank），cells 的背景走那几个变量，
+   而这里的元素级 background 又直接写在 .el-table 上 —— 不加 !important 压不住
+   （同选择器、源顺序在后也仍旧被 EP 的变量赋值链盖掉，实测表体恒为实色）。 */
+.el-table {
+  background: var(--panel-card-bg, var(--el-bg-color)) !important;
+  -webkit-backdrop-filter: var(--panel-card-blur, blur(0px));
+  backdrop-filter: var(--panel-card-blur, blur(0px));
+}
+/* 表头原本是 --el-fill-color（比表体亮一档），半透表体下这一档正好把表头与表体
+   分开，保持原样即可 —— 不必另给底色。 */
 .el-table .el-table__inner-wrapper::before {
   display: none;
 }
 .el-table .el-table__row {
   background: transparent;
+}
+/* EP 把行底色写在 `.el-table tr{background-color:var(--el-table-tr-bg-color)}` 上，
+ * 特异性(0,1,1)高于上面那条 `.el-table .el-table__row`(0,2,0)？不 —— 是**值**的问题：
+ * 主题把 --el-fill-color-blank 设成了卡片色，于是每个 tr 都带回一层不透明底。
+ * 直接点名 `.el-table tr` 压成透明，让整张表的底只由 .el-table 那一层（半透 + 模糊）提供。 */
+.el-table tr {
+  background-color: transparent;
+}
+/* 分页的上一页 / 下一页按钮：EP 给的是 --el-fill-color-light，和页码同档 */
+.el-pager .btn-prev,
+.el-pager .btn-next {
+  background-color: color-mix(
+    in srgb,
+    var(--el-fill-color-light) var(--panel-surface-opacity, 100%),
+    transparent
+  );
 }
 .el-table .el-table__body tr:hover > td.el-table__cell {
   background: rgba(var(--el-color-primary-rgb), 0.12);
@@ -615,15 +888,130 @@ body {
 .el-radio-button {
   --el-radio-button-checked-text-color: var(--el-bg-color);
 }
+/* 未选中段的文字色。
+ * 🔴 EP 的 `.el-radio-button__inner` 取 `var(--el-button-text-color, var(--el-text-color-regular))` ——
+ * 也就是说它**蹭按钮的文字色变量**。主题在主按钮那条规则里把 --el-button-text-color
+ * 设成了「底色」（反色块方案：浅底深字），而这个变量会从 :root 继承到分段单选上，
+ * 于是未选中的段变成深灰字。面板半透之后背景不再是干净底色，深灰字直接读不出来
+ * （实测的就是这个：三个段里未选中的两个发灰发暗）。
+ * 这里显式钉回常规文本色；hover 也一并给出（EP 默认 hover 变主色，在半透底上同样偏淡）。
+ * 选中态不受影响：它走 --el-radio-button-checked-text-color（上面那条已设为底色）。 */
+/* ---------- 分段单选：一层连续的底 + 同心圆角的选中块 ----------
+ * 观感回到「有底色」的版本（这是既有的、也是用户认可的样式），
+ * 但把两处「莫名其妙的矩形」修掉：
+ *   ① EP 默认是**每段各自一块底**，段间留缝；面板半透后缝里透出背景
+ *      → 底上移到 .el-radio-group，段本体透明，分组内部没有接缝。
+ *   ② 选中块原来与组边缘齐平、圆角又不同值，看着像贴上去的一块矩形
+ *      → 组留 2px 内边距 + overflow:hidden 裁切，选中块圆角与组同值，
+ *        四角与组外沿完全重合，读作「这张玻璃上的一枚滑块」。
+ * 底色一律用主题的不透明度摊开（缺省 100% 时等价原值）。 */
+.el-radio-group {
+  background: color-mix(
+    in srgb,
+    var(--el-fill-color-light) var(--panel-surface-opacity, 100%),
+    transparent
+  );
+  -webkit-backdrop-filter: var(--panel-card-blur, blur(0px));
+  backdrop-filter: var(--panel-card-blur, blur(0px));
+  padding: 2px;
+  gap: 2px;
+  /* 🔴 必须裁切：内缩 2px 的选中块若伸出组的圆角，两者圆角就不「同心」，
+     交界处会露出一圈错位的边 —— 那正是「莫名其妙多出一块矩形」的来源。 */
+  overflow: hidden;
+  /* 滑动指示块（::before）以本组为定位基准 */
+  position: relative;
+}
+/* 滑动指示块：一块主色的圆角滑块，位置与宽度由「选中项的实际几何」决定
+ * （--radio-x / --radio-w，由 useSegmentIndicator 写入）。
+ * 用 transform 平移而不是改 left/width —— 只动合成层，不触发布局，
+ * 切换时是「滑过去」而不是「跳过去」。left 取 0：--radio-x 已经是相对组内容区
+ * （含内边距）的偏移，两者相加正好落在选中段的左沿。 */
+.el-radio-group::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: 0;
+  width: var(--radio-w, 0px);
+  border-radius: var(--radius);
+  background: var(--el-color-primary);
+  transform: translateX(var(--radio-x, 0px));
+  /* 300ms + 前段平缓的缓动（cubic-bezier(0.4, 0, 0.2, 1) 是 Material 的标准曲线，
+     起步与收尾都有可见的加速/减速段）。
+     实测过更快的版本（220ms + 前段极陡的曲线）：位移在头 30ms 就冲掉 80%，
+     而「系统日志 → 操作审计」还会同时把整块内容从日志框换成表格 ——
+     两者叠在一起，滑块看起来就是「没有动画、直接跳过去」。 */
+  transition: transform 300ms cubic-bezier(0.4, 0, 0.2, 1), width 300ms cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: none;
+  z-index: 0;
+}
+/* 段本体：底色透明，只保留文字层（压在指示块之上） */
+.el-radio-button {
+  position: relative;
+  z-index: 1;
+}
+.el-radio-button__inner {
+  background: transparent !important;
+  border-radius: 0 !important;
+  color: var(--el-text-color-primary);
+  transition: color 220ms ease;
+}
+/* 选中段：不再自己画块（块由 ::before 滑动提供），只切换文字色。
+ * ⚠️ 文字色用「主色」而不是反色：滑块同一时刻只在一段下面，其余段仍浮在组底上，
+ * 反色（深字）会与其它段冲突；主色文字压在浅色主色块上对比度约 4:1，够读。 */
+.el-radio-button.is-active .el-radio-button__original-radio:not(:disabled) + .el-radio-button__inner {
+  background-color: transparent !important;
+  color: var(--el-bg-color) !important;
+  box-shadow: none !important;
+}
+.el-radio-button__inner:hover {
+  color: var(--el-text-color-primary);
+}
+/* 悬停反馈：未选中段悬停时补一层浅底（不抢滑块的位置，只是一层提示） */
+.el-radio-button:not(.is-active) .el-radio-button__inner:hover {
+  background-color: color-mix(
+    in srgb,
+    var(--el-fill-color) var(--panel-surface-opacity, 100%),
+    transparent
+  ) !important;
+}
+/* 尊重系统的「减少动态效果」：关掉滑块位移与文字色过渡。
+ * 与 .content 的 page-in 同一套约定（见文件末尾那条媒体查询）。 */
+@media (prefers-reduced-motion: reduce) {
+  .el-radio-group::before,
+  .el-radio-button__inner {
+    transition: none !important;
+  }
+}
+/* 相邻段的 1px 分隔线：EP 用 `box-shadow: -1px 0 0 0 <边框色>` 画（选中态那条更亮）。
+ * 无边框约定下这条线本该收掉，但它的取值是 --el-button-border-color（= transparent），
+ * 选中态那条却被显式写成主色，于是在两段之间露出一条纯色竖线 —— 实测就是它。
+ * 统一置空：段与段之间靠底色差区分，不画线。 */
+.el-radio-button__inner,
+.el-radio-button.is-active .el-radio-button__original-radio:not(:disabled) + .el-radio-button__inner {
+  box-shadow: none;
+}
 /* 复选框勾选符号与半选横杠（软件页表格多选列） */
 .el-checkbox {
   --el-checkbox-checked-icon-color: var(--el-bg-color);
 }
-/* 主按钮（登录、对话框确认等） */
+/* 主按钮（登录、对话框确认等）
+ * 文字色走反色：暗色主题主色近白 → 深字；亮色主题主色为黑 → 浅字。
+ * 🔴 底色必须在这里**全部还原成主色**：上面 `.el-button` 那条为了做半透，
+ * 把 bg / hover-bg / active-bg / disabled-bg 四个变量都设成了中性填充色，
+ * 而 EP 的 primary 只覆盖 `--el-button-bg-color` 一个 —— hover / active 仍从
+ * `.el-button` 继承，于是「悬停时按钮变中性灰、深色文字压在上面」读不出来
+ * （实测色值：底 color-mix(#282a3c 30%)、字 #1c1e30）。
+ * 主按钮本就是主色实底（品牌色），不参与半透，所以四个变量一次性钉回主色。 */
 .el-button--primary {
+  --el-button-bg-color: var(--el-color-primary);
+  --el-button-hover-bg-color: var(--el-color-primary-light-3);
+  --el-button-active-bg-color: var(--el-color-primary-dark-2);
+  --el-button-disabled-bg-color: var(--el-color-primary-light-5);
   --el-button-text-color: var(--el-bg-color);
   --el-button-hover-text-color: var(--el-bg-color);
   --el-button-active-text-color: var(--el-bg-color);
+  --el-button-disabled-text-color: var(--el-bg-color);
 }
 /* 开关滑块圆点（选中态轨道为反色块） */
 .el-switch.is-checked .el-switch__action {
@@ -689,7 +1077,13 @@ body {
   font: inherit;
   font-size: 13px;
   color: var(--el-text-color-primary);
-  background: var(--el-fill-color-light);
+  /* 与默认按钮同一档：摊开主题的不透明度（缺省 100% = 原值）。
+     !important 的理由同 .el-button--default —— EP 样式块在后面。 */
+  background: color-mix(
+    in srgb,
+    var(--el-fill-color-light) var(--panel-surface-opacity, 100%),
+    transparent
+  ) !important;
   border: none;
   border-radius: var(--radius);
   padding: var(--sp-1) var(--sp-3);
@@ -700,7 +1094,11 @@ body {
   white-space: nowrap;
 }
 .mini-btn:hover {
-  background: var(--el-fill-color);
+  background: color-mix(
+    in srgb,
+    var(--el-fill-color) var(--panel-surface-opacity, 100%),
+    transparent
+  ) !important;
 }
 /* 紧凑尺寸（趋势图时间窗、对话框内等空间受限场景） */
 .mini-btn--sm {

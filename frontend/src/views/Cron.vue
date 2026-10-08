@@ -460,7 +460,7 @@ onMounted(() => {
   gap: var(--sp-2);
 }
 .logbox {
-  background: var(--el-bg-color);
+  background: var(--panel-card-bg, var(--el-bg-color));
   border-radius: var(--radius);
   box-shadow: var(--panel-shadow-1);
   padding: var(--sp-3) var(--sp-4);

@@ -2,7 +2,7 @@
   <div class="logs">
     <div class="toolbar">
       <!-- 从实例卡片跳进来时只有一种日志来源，不再给切换项 -->
-      <el-radio-group v-if="!scoped" v-model="mode">
+      <el-radio-group v-if="!scoped" ref="modeGroup" v-model="mode">
         <el-radio-button value="journal">系统日志</el-radio-button>
         <el-radio-button value="file">文件日志</el-radio-button>
         <el-radio-button v-if="auth.isAdmin()" value="audit">操作审计</el-radio-button>
@@ -56,6 +56,7 @@
 
 <script setup lang="ts">
 import { col, hideColP2, hideColP3 } from "../composables/useResponsive";
+import { useSegmentIndicator } from "../composables/useSegmentIndicator";
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import http from "../api/http";
@@ -74,6 +75,10 @@ interface AuditRow {
 const route = useRoute();
 const router = useRouter();
 const auth = useAuthStore();
+
+/// 分段单选的滑动指示块：把「第几段选中的 / 段多宽」写成 CSS 变量（详见 composable）
+const modeGroup = ref<HTMLElement | null>(null);
+useSegmentIndicator(modeGroup);
 
 /** 从实例卡片跳进来时带的实例 id（形如 container:<短ID> / service:<单元名>） */
 const instance = ref(String(route.query.instance ?? ""));
@@ -202,7 +207,7 @@ onMounted(async () => {
 
 <style scoped>
 .logbox {
-  background: var(--el-bg-color);
+  background: var(--panel-card-bg, var(--el-bg-color));
   border-radius: var(--radius);
   /* 与卡片 / 表格同档：整块白底从页面底色上托起，否则日志区一片白贴着底色 */
   box-shadow: var(--panel-shadow-1);

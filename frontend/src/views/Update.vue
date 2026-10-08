@@ -171,7 +171,7 @@ async function upload() {
 <style scoped>
 /* 间距统一：区块间 16px、块内 12px、行内 8px 三档 */
 .status-block {
-  background: var(--el-bg-color);
+  background: var(--panel-card-bg, var(--el-bg-color));
   border-radius: var(--radius);
   /* 白底实心块，与卡片 / 表格同档（不加影就整片贴在页面底色上） */
   box-shadow: var(--panel-shadow-1);

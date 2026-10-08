@@ -22,6 +22,15 @@ export interface ThemeConfig {
   /// 只在缩放后仍有多余量的那个方向上起作用（铺满的方向没有可移动的余量）。
   bg_x?: number;
   bg_y?: number;
+  /// 不透明度（百分数）：100 = 完全不透明，30 = 最透。**一个值管两处** ——
+  /// 仪表盘卡片（--panel-card-bg）与应用外壳（左侧菜单栏、上方控件、内容区底板）。
+  /// 面板是「整屏浮在背景图上」的一套表面，卡片与外壳共用一个值才不会出现
+  /// 「卡片透了、外壳还闷着」的割裂感。
+  card_opacity?: number;
+  /// 高斯模糊半径（px，`backdrop-filter: blur()`）：卡片与外壳背后那层背景被糊掉
+  /// —— 磨砂玻璃观感。0 = 不模糊。与不透明度是两件事：不透明度决定「透多少」，
+  /// 模糊决定「透出来的是不是糊的」。
+  card_blur?: number;
 }
 
 export interface ThemeColors {
@@ -132,6 +141,49 @@ function safeZoom(v: unknown): number | null {
 function safePos(v: unknown): number | null {
   if (typeof v !== "number" || !Number.isFinite(v)) return null;
   return Math.min(100, Math.max(0, v));
+}
+
+/// 不透明度白名单（P1-2）：有限数 clamp 到 30..100（百分数）。
+/// 下限锁在 30：再低卡片与外壳就连同底下的背景图糊成一片，其上的读数与投影
+/// 都失去依托（与背景缩放下限锁 100 是同一个理由 —— 越界即无意义）。
+function safeOpacity(v: unknown): number | null {
+  if (typeof v !== "number" || !Number.isFinite(v)) return null;
+  return Math.min(100, Math.max(30, v));
+}
+
+/// 模糊半径白名单（P1-2）：有限数 clamp 到 0..40（px）。
+/// 上限 40：再往上 blur 的采样半径超过卡片自身的短边，卡片背面就只剩一团
+/// 均匀色块，磨砂感反而消失，只剩一片脏灰。
+function safeBlur(v: unknown): number | null {
+  if (typeof v !== "number" || !Number.isFinite(v)) return null;
+  return Math.min(40, Math.max(0, v));
+}
+
+/// 半透底色：把主体色按不透明度摊开，产出全站唯一的 --panel-card-bg。
+/// 卡片与外壳（侧栏 / 顶栏 / 内容区底板）共用这一个变量 —— 它们本就是
+/// 「整屏浮在背景图上」的同一套表面，各给一个值只会做出割裂的层次。
+/// 只有 100（完全不透明）返回 null —— 此时不生成变量，让 CSS 侧回退到
+/// 原来的 `var(--el-bg-color)`，与未定制主题逐像素一致。
+/// 底色缺失时不返回 null 而是引用 --el-bg-color：只有生成了某个
+/// --el-bg-color* 时主题才会改掉这个色，故缺省时直接引用它就是当时的默认色。
+function cardBgVar(hex: string | null, opacity: number | null): string | null {
+  if (opacity === null || opacity >= 100) return null;
+  const rgb = hex ? hexToRgb(hex) : null;
+  const base = rgb ? `rgb(${rgb.join(" ")})` : "var(--el-bg-color)";
+  return `--panel-card-bg: color-mix(in srgb, ${base} ${opacity}%, transparent);`;
+}
+
+/// 卡片的高斯模糊（毛玻璃）变量：卡片用 backdrop-filter 把**背后**那层背景
+/// 糊掉。0 返回 null —— 不生成变量，CSS 侧就没有任何滤镜，与从前逐像素一致。
+///
+/// 只需 `--panel-card-blur` 一个值：CSS 侧同一条规则里既写标准属性也写
+/// `-webkit-` 前缀，所以这里给的 `blur(Npx)` 两边通用，不会再派生一份。
+/// 变量存在与否同时充当 CSS 的 `@supports` 降级信号 —— 不支持 backdrop-filter
+/// 的浏览器会忽略这个未注册的自定义属性，从而忽略引用它的整条声明，
+/// 卡片自然退回「只是半透」而不是变成没有滤镜的透明底板。
+function cardBlurVar(blur: number | null): string | null {
+  if (blur === null || blur <= 0) return null;
+  return `--panel-card-blur: blur(${blur}px);`;
 }
 
 /// 背景图长宽比（宽 ÷ 高）。buildThemeCss 是同步的、解码是异步的，所以这里
@@ -250,8 +302,17 @@ export function buildThemeCss(cfg: ThemeConfig): string {
 
   if (bgCard) {
     lines.push(`--el-bg-color: ${bgCard};`);
+    // 浮层仍用不透明底：下拉菜单 / 对话框 / 气泡常常悬在文字之上，
+    // 透出背后的正文会让弹层内容难读 —— 这是刻意保留的一处实底。
     lines.push(`--el-bg-color-overlay: ${bgCard};`);
-    lines.push(`--el-fill-color-blank: ${bgCard};`);
+    // 白底变量：EP 的「空白表面」令牌，十几个组件变量都从它取值
+    // （复选框 --el-checkbox-bg-color、按钮、卡片、菜单、分页、单选框、
+    // 表格、标签、树、日历…）。它默认取 --el-fill-color-blank 的实色，
+    // 于是这些控件全成了纯色块 —— 这正是「还有纯色控件」的根因。
+    // 按其不透明度摊开，一处托底；缺省 100% 时等价于原来的卡片色。
+    lines.push(
+      `--el-fill-color-blank: color-mix(in srgb, ${bgCard} var(--panel-surface-opacity, 100%), transparent);`,
+    );
   }
   if (bgPage) {
     lines.push(`--el-bg-color-page: ${bgPage};`);
@@ -259,6 +320,20 @@ export function buildThemeCss(cfg: ThemeConfig): string {
     // 没单独给页面底色时，从卡片色向文本色微微偏移派生
     lines.push(`--el-bg-color-page: ${mix(bgCard, text, 0.04)};`);
   }
+  // 半透底色：卡片与外壳共用同一个变量。放在底色之后 —— 它要引用的正是上面
+  // 这两条（bg_card 缺省时由 color-mix 直接引用 --el-bg-color 兜底）。
+  const opacity = safeOpacity(cfg.card_opacity);
+  const cardBg = cardBgVar(bgCard, opacity);
+  if (cardBg) {
+    lines.push(cardBg);
+    // 内容区底板与表单控件（输入框/文本域/下拉）也读这同一个不透明度 ——
+    // 面板没有各自的滑杆，它们摊的颜色不同、透的档位相同。
+    // 值为裸百分数：CSS 侧直接塞进 color-mix() 的百分比槽位。
+    lines.push(`--panel-surface-opacity: ${opacity}%;`);
+  }
+  // 毛玻璃：与上面的半透底色是一对 —— 透出来的东西要糊掉才叫磨砂玻璃
+  const cardBlur = cardBlurVar(safeBlur(cfg.card_blur));
+  if (cardBlur) lines.push(cardBlur);
   if (text) {
     lines.push(`--el-text-color-primary: ${text};`);
     // 派生文本层级（regular/secondary/placeholder/disabled）：
@@ -312,11 +387,29 @@ function injectStyle(css: string, id = "panel-theme") {
   el.textContent = css;
 }
 
-/// 设置页正在预览的那份背景配置（null = 没在预览）
+/// 设置页正在预览的那份配置（null = 没在预览）。字段可能只有背景图几何、
+/// 也可能只有卡片不透明度 —— 预览是「当前正在拖的那一项」，不是整份主题。
 let previewCfg: ThemeConfig | null = null;
 
 function renderPreview() {
   const vars = previewCfg ? bgVars(previewCfg) : [];
+  if (previewCfg) {
+    // 仪表盘卡片不透明度：滑杆拖到哪就透到哪。100 时显式压回完全不透明，
+    // 否则已经保存进主题的旧值会留在画面上，看着像滑杆没生效。
+    const opacity = safeOpacity(previewCfg.card_opacity);
+    if (opacity !== null) {
+      const v = cardBgVar(isHexColor(previewCfg.colors?.bg_card) ? previewCfg.colors.bg_card : null, opacity);
+      vars.push(v ?? "--panel-card-bg: var(--el-bg-color);");
+      // 内容区底板读的是同一个不透明度（摊的是页面色），预览里也要一起给，
+      // 否则拖滑杆时只有卡片在动、底板不动
+      vars.push(`--panel-surface-opacity: ${opacity}%;`);
+    }
+    // 模糊滑杆拖到哪就糊到哪；0 时显式压回 none，否则已保存的旧值会留在画面上
+    const blur = safeBlur(previewCfg.card_blur);
+    if (blur !== null) {
+      vars.push(cardBlurVar(blur) ?? "--panel-card-blur: none;");
+    }
+  }
   // 预览态下「没有背景图」也要显式压成 none：主题样式里可能还留着已保存的那张，
   // 不压的话点「清除」后画面上还是旧图，看着像没生效。
   if (previewCfg && !safeBgImage(previewCfg.bg_image)) {
@@ -325,12 +418,13 @@ function renderPreview() {
   injectStyle(vars.length ? `:root {\n${vars.join("\n")}\n}` : "", "panel-bg-preview");
 }
 
-/// 背景图几何的即时预览（不写库）：设置页拖动缩放/位置滑杆、换图时先落到页面上。
+/// 主题变量的即时预览（不写库）：设置页拖动背景缩放/位置、不透明度与模糊滑杆、
+/// 换图时先落到页面上。
 ///
 /// 单独一条 <style>，且固定排在主题样式之后 —— 两边都是 :root 规则、特异性
-/// 相同，后出现在文档里的那条胜出。离开设置页（clearBgPreview）或保存主题后
+/// 相同，后出现在文档里的那条胜出。离开设置页（clearThemePreview）或保存主题后
 /// 主题样式重新接管。
-export function previewBg(cfg: ThemeConfig | null) {
+export function previewTheme(cfg: ThemeConfig | null) {
   previewCfg = cfg;
   renderPreview();
   const image = cfg ? safeBgImage(cfg.bg_image) : null;
@@ -343,10 +437,14 @@ export function previewBg(cfg: ThemeConfig | null) {
 }
 
 /// 收起预览，主题样式重新接管
-export function clearBgPreview() {
+export function clearThemePreview() {
   previewCfg = null;
   injectStyle("", "panel-bg-preview");
 }
+
+/// 旧名（背景几何预览）保留为别名，行为与 previewTheme 完全相同
+export const previewBg = previewTheme;
+export const clearBgPreview = clearThemePreview;
 
 // 主题 store：主题定制（颜色/圆角/背景），定制持久化到后端 settings 表
 export const useThemeStore = defineStore("theme", () => {

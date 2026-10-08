@@ -730,7 +730,16 @@ function applyTool(m: Msg, t: any) {
   max-height: calc(100vh - 120px);
   display: flex;
   flex-direction: column;
-  background: var(--el-bg-color-overlay);
+  /* AI 面板按需求也吃同一份磨砂：底色摊开主题的不透明度 + 同一份模糊。
+     它虽是浮层，但面积大（400×620）、下面是自己触发的会话内容，
+     透一点背景不影响读数；缺省（未生成 --panel-surface-opacity）时等价原值。 */
+  background: color-mix(
+    in srgb,
+    var(--el-bg-color-overlay) var(--panel-surface-opacity, 100%),
+    transparent
+  );
+  -webkit-backdrop-filter: var(--panel-card-blur, blur(0px));
+  backdrop-filter: var(--panel-card-blur, blur(0px));
   border-radius: var(--radius);
   box-shadow: var(--panel-shadow-2);
   overflow: hidden;
@@ -814,7 +823,15 @@ function applyTool(m: Msg, t: any) {
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
-  background: var(--el-bg-color-page);
+  /* 会话区是面板内最大的一块底：它若保持不透明页面色，面板那层磨砂等于白做
+     （整块被它盖住）。同样摊开 —— 但摊的是页面色，保持与面板的层次差。 */
+  background: color-mix(
+    in srgb,
+    var(--el-bg-color-page) var(--panel-surface-opacity, 100%),
+    transparent
+  );
+  -webkit-backdrop-filter: var(--panel-card-blur, blur(0px));
+  backdrop-filter: var(--panel-card-blur, blur(0px));
 }
 
 /* ---------- 空态 ---------- */
@@ -842,7 +859,16 @@ function applyTool(m: Msg, t: any) {
 }
 .chip {
   border: none;
-  background: var(--el-bg-color);
+  /* 面板内的浮起小块（建议词 / 工具卡 / 思考块 / 代码块）统一吃同一份磨砂：
+     底色摊开主题的不透明度 + 同一份模糊 —— 面板本身半透之后，这些实色小块
+     反而最扎眼。缺省（未生成 --panel-surface-opacity）时等价原值。 */
+  background: color-mix(
+    in srgb,
+    var(--el-bg-color) var(--panel-surface-opacity, 100%),
+    transparent
+  );
+  -webkit-backdrop-filter: var(--panel-card-blur, blur(0px));
+  backdrop-filter: var(--panel-card-blur, blur(0px));
   color: var(--el-text-color-primary);
   font: inherit;
   font-size: 12px;
@@ -857,6 +883,48 @@ function applyTool(m: Msg, t: any) {
 /* 直接坐在消息区（--el-bg-color-page）上的浮起面：底色取 --el-bg-color 再配标准投影。
    若用 --el-fill-color-light，浅色主题下它与页底只差 3 个色阶（#f5f7fa vs #f2f3f5），
    "块"几乎不成形 —— .tool / .chip 早就是用 --el-bg-color + 投影，两种主题都清楚。 */
+/* 面板内所有「坐在消息区上的实色小块」：一律按同一档半透 + 磨砂（见 .chip 的说明）。
+   逐条列选择器而不是给一个通配：这些块分属不同语义（提示 / 报错 / 思考 / 工具 / 代码），
+   底色约定也不完全相同（tcode 用 --el-fill-color-light），合并会改变层次。 */
+.notice,
+.err,
+.think-body,
+.tool {
+  background: color-mix(
+    in srgb,
+    var(--el-bg-color) var(--panel-surface-opacity, 100%),
+    transparent
+  );
+  -webkit-backdrop-filter: var(--panel-card-blur, blur(0px));
+  backdrop-filter: var(--panel-card-blur, blur(0px));
+}
+.tcode {
+  background: color-mix(
+    in srgb,
+    var(--el-fill-color-light) var(--panel-surface-opacity, 100%),
+    transparent
+  );
+  -webkit-backdrop-filter: var(--panel-card-blur, blur(0px));
+  backdrop-filter: var(--panel-card-blur, blur(0px));
+}
+.md :deep(.md-pre),
+.md :deep(blockquote) {
+  background: color-mix(
+    in srgb,
+    var(--el-bg-color) var(--panel-surface-opacity, 100%),
+    transparent
+  );
+  -webkit-backdrop-filter: var(--panel-card-blur, blur(0px));
+  backdrop-filter: var(--panel-card-blur, blur(0px));
+}
+/* 正文里的行内 code：底色同档摊开（保留主色文字） */
+.md :deep(code) {
+  background: color-mix(
+    in srgb,
+    var(--el-fill-color-light) var(--panel-surface-opacity, 100%),
+    transparent
+  );
+}
 .notice {
   margin-top: var(--sp-4);
   font-size: 12px;

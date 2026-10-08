@@ -1,7 +1,7 @@
 <template>
   <div class="network">
     <div class="toolbar">
-      <el-radio-group v-model="tab">
+      <el-radio-group v-model="tab" ref="tabGroup">
         <el-radio-button value="interfaces">接口</el-radio-button>
         <el-radio-button value="connections">连接</el-radio-button>
         <el-radio-button value="routes">路由</el-radio-button>
@@ -89,6 +89,7 @@
 
 <script setup lang="ts">
 import { col, hideColP2, hideColP3 } from "../composables/useResponsive";
+import { useSegmentIndicator } from "../composables/useSegmentIndicator";
 import { onMounted, ref } from "vue";
 import http from "../api/http";
 
@@ -117,6 +118,9 @@ interface Route {
 }
 
 const tab = ref<"interfaces" | "connections" | "routes" | "dns">("interfaces");
+/// 分段单选的滑动指示块（详见 composable）
+const tabGroup = ref<HTMLElement | null>(null);
+useSegmentIndicator(tabGroup);
 const loading = ref(false);
 const ifaces = ref<Iface[]>([]);
 const conns = ref<Conn[]>([]);
@@ -161,7 +165,7 @@ onMounted(load);
   margin-left: var(--sp-1);
 }
 .dnsbox {
-  background: var(--el-bg-color);
+  background: var(--panel-card-bg, var(--el-bg-color));
   border-radius: var(--radius);
   padding: var(--sp-3) var(--sp-4);
 }
