@@ -7,52 +7,42 @@
         自定义卡片
       </button>
     </div>
-    <div
-      ref="gridEl"
-      class="cards"
-      :style="{ gridTemplateColumns: `repeat(${cols}, 1fr)` }"
-    >
-      <!-- 4.2 卡片按用户配置的顺序与尺寸渲染（先到先得，自动排列）。
-           按住卡片拖动换位；右下角拖拽改尺寸；松手即存服务端。 -->
+    <div ref="gridEl" class="cards" :style="{ height: `${canvasHeight}px` }">
+      <!-- 自由布局：卡片按**绝对几何**摆放（x/w 是容器宽度的百分数、y/h 是像素）。
+           按住卡身 = 两轴自由移动，右下角 = 自由缩放，松手即存服务端。
+           没有栅格、没有自动成排 —— 留洞、重叠都归用户自己摆（要整齐就用
+           弹窗里的「自动排列」）。 -->
       <div
         v-for="(card, i) in visibleCards"
         :key="card.id"
         class="card"
         :class="{
-          'card--lg': cellH(card) > 1,
           'card--dragging': drag.id === card.id,
           'card--drop': dropIndex === i && drag.id !== null && drag.id !== card.id,
         }"
         :data-index="i"
-        :style="{
-          gridColumn: `span ${cellW(card)}`,
-          gridRow: `span ${cellH(card)}`,
-          // 入场交错：靠内联 delay 而非 CSS 变量，省掉一层自定义属性
-          animationDelay: `${i * 35}ms`,
-          // 拖拽中卡片跟着指针走（不改布局，只做视觉位移）
-          transform:
-            drag.id === card.id ? `translate(${drag.dx}px, ${drag.dy}px)` : undefined,
-        }"
+        :style="posStyle(card, i)"
         @pointerdown="onCardPointerDown($event, i)"
       >
-        <!-- 趋势图卡：头部放标题与时间窗，图表撑满剩余高度 -->
+        <!-- 趋势图卡：头部放标题与该卡自己的时间窗，图表撑满剩余高度。
+             三张卡（负载 / 网络 / 磁盘 I/O）各自一个容器、各自一个时间窗。 -->
         <template v-if="card.isChart">
           <div class="chart-head">
-            <span class="card-label">{{ card.label }}（{{ rangeLabel }}）</span>
+            <span class="card-label">{{ card.label }}（{{ rangeLabelOf(card.id) }}）</span>
             <div class="range-group">
               <button
                 v-for="r in RANGES"
                 :key="r.key"
                 class="mini-btn mini-btn--sm"
-                :class="{ 'mini-btn--on': rangeKey === r.key }"
+                :class="{ 'mini-btn--on': rangeOf(card.id) === r.key }"
                 type="button"
-                @click="setRange(r.key)"
+                @click="setRange(card.id, r.key)"
               >
                 {{ r.label }}
               </button>
             </div>
           </div>
-          <div id="dash-chart" class="chart" />
+          <div :id="chartDomId(card.id)" class="chart" />
         </template>
         <template v-else-if="card.list">
           <!-- 排行榜卡：标题 + 若干行「名次 / 名称 / 数值」。
@@ -72,6 +62,8 @@
           <div class="card-label">{{ card.label }}</div>
           <div class="card-body">
             <div class="card-value">{{ card.value }}</div>
+            <!-- 次级说明（如系统卡里的 CPU 规格）：比数值弱一档，不抢主读数 -->
+            <div v-if="card.hint" class="card-hint">{{ card.hint }}</div>
             <!-- 速率类指标用波形代替进度条（见 .bar--none 的说明） -->
             <div v-if="card.spark" class="spark-box">
               <Sparkline
@@ -92,7 +84,8 @@
           </div>
         </template>
         <!-- 右下角缩放柄。触摸设备上它也是唯一安全的拖拽起点：
-             整卡拖会跟页面滚动抢手势，只有手柄设了 touch-action:none。 -->
+             整卡拖会跟页面滚动抢手势，只有手柄设了 touch-action:none。
+             拖出来的跨度下限/上限由 store 的 sizeLimits 按卡片类型给。 -->
         <div
           class="card-resize"
           role="button"
@@ -109,27 +102,15 @@
         <div v-for="(c, i) in draftCards" :key="c.id" class="custom-row">
           <el-checkbox v-model="draftOn[c.id]" :label="CARD_LABELS[c.id]" />
           <div class="custom-btns">
-            <!-- 尺寸：小 / 宽 / 大 / 整宽 / 通栏。只对勾选中的卡片有意义，未勾选时置灰 -->
-            <el-select
-              :model-value="sizeKey(c)"
-              size="small"
-              class="size-select"
-              :disabled="!draftOn[c.id]"
-              @update:model-value="(v: string) => setSize(i, v)"
-            >
-              <el-option
-                v-for="s in sizesFor(c.id)"
-                :key="s.key"
-                :label="s.label"
-                :value="s.key"
-              />
-            </el-select>
+            <!-- 尺寸下拉已撤：自由布局下尺寸靠**拖**（右下角手柄），
+                 下拉给的"几格"在像素/百分数体系里没有意义。
+                 想一键整齐就用下面的「自动排列」。 -->
             <button
               class="mini-btn mini-btn--sm"
               type="button"
               :disabled="i === 0"
               aria-label="上移"
-              @click="move(i, -1)"
+              @click="moveRow(i, -1)"
             >
               ↑
             </button>
@@ -138,7 +119,7 @@
               type="button"
               :disabled="i === draftCards.length - 1"
               aria-label="下移"
-              @click="move(i, 1)"
+              @click="moveRow(i, 1)"
             >
               ↓
             </button>
@@ -146,9 +127,11 @@
         </div>
       </div>
       <div class="custom-hint">
-        取消勾选即隐藏；↑↓ 调整顺序；右侧选择卡片大小 —— 也可以直接在仪表盘上拖
+        取消勾选即隐藏；↑↓ 调整顺序。卡片直接在仪表盘上拖：按住卡身移动、拖右下角改大小。
+        摆乱了就按「自动排列」按类型重排一遍。
       </div>
       <template #footer>
+        <button class="mini-btn" type="button" @click="autoArrange">自动排列</button>
         <button class="mini-btn" type="button" @click="resetCustom">恢复默认</button>
         <button class="mini-btn" type="button" :disabled="customSaving" @click="saveCustom">
           保存
@@ -176,10 +159,18 @@ import {
   ROW_H,
   GAP,
   MAX_CARD_W,
+  DEFAULT_ORDER,
   maxH,
   sizesFor,
   defaultSize,
+  sizeLabel,
+  spanFor,
+  autoLayout,
+  sizeLimits,
+  CHART_KINDS,
+  chartKindOf,
   type CardConfig,
+  type ChartKind,
   type DashCard,
 } from "../stores/dashboard";
 
@@ -256,9 +247,24 @@ const snap = reactive<Snapshot>({
   distro: "",
   kernel: "",
 });
-const history = ref<MetricPoint[]>([]);
-const chartEl = ref<HTMLElement>();
-let chart: ReturnType<typeof echarts.init> | null = null;
+/// 三种趋势分组各存各的历史与时间窗：**一张卡一个 ECharts 实例、一个时间窗**。
+/// 早先是「一张卡三条横带 + 一个全局时间窗」——那让「网络看 10 分钟、磁盘看
+/// 2 小时」这种读法做不到，也是 CARD_META 里 chartnet / chartdisk 一直没接渲染的
+/// 原因（store 与后端白名单早就声明了这两张卡，视图层却没有对应分支）。
+const histories = reactive<Record<ChartKind, MetricPoint[]>>({
+  load: [],
+  network: [],
+  disk: [],
+});
+const rangeKeys = reactive<Record<ChartKind, RangeKey>>({
+  load: "10m",
+  network: "10m",
+  disk: "10m",
+});
+/// 容器与实例同样按分组存。容器要等卡片渲染出来才存在，
+/// 所以这两张表由 initCharts / destroyCharts 随卡片显隐维护。
+const chartEls: Partial<Record<ChartKind, HTMLElement>> = {};
+const charts: Partial<Record<ChartKind, ReturnType<typeof echarts.init>>> = {};
 let timer: number | undefined;
 
 // 趋势图时间窗：后端按 2 秒采样一条，点数 = 秒数/2，全部落在后端 limit 上限内。
@@ -271,12 +277,27 @@ const RANGES = [
   { key: "2h", label: "2小时", full: "2 小时", secs: 7200, points: 1440 },
 ] as const;
 type RangeKey = (typeof RANGES)[number]["key"];
-const rangeKey = ref<RangeKey>("10m");
-const rangeLabel = computed(
-  () => RANGES.find((r) => r.key === rangeKey.value)?.full ?? "10 分钟",
-);
-function setRange(k: RangeKey) {
-  rangeKey.value = k;
+/// 分组 → 容器 id。每张趋势卡各占一个容器，
+/// 不能像从前那样三张卡共用 #dash-chart（会互相抢同一个 DOM 节点）。
+function chartDomIdOf(kind: ChartKind) {
+  return `dash-chart-${kind}`;
+}
+/// 卡片 → 容器 id（模板绑定用）
+function chartDomId(id: DashCard | string) {
+  return chartDomIdOf(chartKindOf(id) ?? "load");
+}
+/// 该卡所属分组当前选中的时间窗（三个分组各记各的）
+function rangeOf(id: DashCard | string): RangeKey {
+  return rangeKeys[chartKindOf(id) ?? "load"];
+}
+/// 卡片标题里的完整读数（按钮上只放短标签，理由见 RANGES 的说明）
+function rangeLabelOf(id: DashCard | string) {
+  return RANGES.find((r) => r.key === rangeOf(id))?.full ?? "10 分钟";
+}
+function setRange(id: DashCard | string, k: RangeKey) {
+  const kind = chartKindOf(id);
+  if (!kind) return;
+  rangeKeys[kind] = k;
   refreshHistory().catch(() => {});
 }
 
@@ -309,15 +330,27 @@ function fmtUptime(sec: number) {
   return `${m}分`;
 }
 
+/// 交换区读数（「交换 x / y」）——原「交换区」散卡的内容，现已并入「内存」卡
+/// 的明细行。未启用交换区时显示「未启用」，而不是会误导的「0 / 0」。
+function swapText() {
+  return snap.swap_total > 0
+    ? `${fmtBytes(snap.swap_used)} / ${fmtBytes(snap.swap_total)}`
+    : "未启用";
+}
+
 // ---------- 4.2 卡片渲染 ----------
 
 interface CardView {
   id: DashCard;
   label: string;
   value: string;
+  /// 数值下方的次级说明（如系统卡里的 CPU 规格）：比主读数弱一档
+  hint?: string;
   /// 进度条占比 0–100；`null` = 该指标没有上限，不画进度条
   bar: number | null;
-  /// 栅格跨度，来自用户配置
+  /// 绝对几何（见 store 的 CardConfig）：x/w 是容器宽度百分数、y/h 是像素
+  x?: number;
+  y?: number;
   w: number;
   h: number;
   /// 趋势图卡片：渲染 ECharts 容器而不是数值
@@ -352,26 +385,45 @@ const SPARK_POINTS = 60;
 /// Top 5 排行榜取几行
 const TOP_N = 5;
 
+/// 未定制时的默认卡片配置：顺序取自 store 的 DEFAULT_ORDER
+/// （按类型分组，同高元素成排、4 列栅格零空洞），尺寸用各卡的默认尺寸。
+/// 未定制时的默认布局：按类型自动排列一份绝对几何（见 store 的 autoLayout）。
+/// 规则与从前的栅格一致，所以从栅格搬过来看起来没变。
+function defaultConfig(): CardConfig[] {
+  return autoLayout(DEFAULT_ORDER);
+}
+
 /// 展示顺序与尺寸都来自配置；未定制时按默认顺序与各自的默认尺寸。
 /// 内容始终取实时快照。
 const visibleCards = computed<CardView[]>(() => {
-  const cfg: CardConfig[] =
-    dash.cards ?? DASH_CARDS.map((id) => ({ id, ...defaultSize(id) }));
-  return cfg.map(({ id, w, h }) => {
-    const base = { id, label: CARD_LABELS[id], w, h };
+  const cfg: CardConfig[] = dash.cards ?? defaultConfig();
+  return cfg.map(({ id, x, y, w, h }): CardView | null => {
+    const base = { id, label: CARD_LABELS[id], x, y, w, h };
     switch (id) {
       case "cpu":
-        return { ...base, value: `${snap.cpu.toFixed(1)}%`, bar: snap.cpu };
-      case "mem":
+        // 主读数 = 使用率；明细补「核数 · 架构」（原「CPU 规格」散卡的内容）
         return {
           ...base,
-          value: fmtBytes(snap.mem_used),
+          value: `${snap.cpu.toFixed(1)}%`,
+          hint: `${snap.cpu_cores} 核 · ${snap.arch}`,
+          bar: snap.cpu,
+        };
+      case "mem":
+        // 主读数改成百分比（先给「用了多少」）；原「内存」卡的「已用 / 总量」
+        // 下沉为明细，再接原「交换区」散卡的内容（交换 x / y）
+        return {
+          ...base,
+          value: `${pct(snap.mem_used, snap.mem_total)}%`,
+          hint: `${fmtBytes(snap.mem_used)} / ${fmtBytes(snap.mem_total)} · 交换 ${swapText()}`,
           bar: pct(snap.mem_used, snap.mem_total),
         };
       case "disk":
+        // 明细补「最紧张分区 + 已用 / 总量」（原「分区」散卡的内容）；
+        // 分区计数放末尾 —— hint 允许省略号截断，先牺牲它，别牺牲用量数字。
         return {
           ...base,
           value: `${pct(snap.disk_used, snap.disk_total)}%`,
+          hint: `${snap.disk_worst_mount} ${fmtBytes(snap.disk_used)} / ${fmtBytes(snap.disk_total)} · ${snap.disk_partitions} 个分区`,
           bar: pct(snap.disk_used, snap.disk_total),
         };
       case "net":
@@ -392,20 +444,29 @@ const visibleCards = computed<CardView[]>(() => {
           value: `${snap.load1.toFixed(2)} / ${snap.load5.toFixed(2)} / ${snap.load15.toFixed(2)}`,
           bar: pct(snap.load1, snap.cpu_cores),
         };
-      case "uptime":
-        return { ...base, value: fmtUptime(snap.uptime), bar: null };
-      case "swap":
-        return {
-          ...base,
-          value:
-            snap.swap_total > 0
-              ? `${fmtBytes(snap.swap_used)} / ${fmtBytes(snap.swap_total)}`
-              : "未启用",
-          // 未启用交换区时没有「占比」可言，不该画一条空槽
-          bar: snap.swap_total > 0 ? pct(snap.swap_used, snap.swap_total) : null,
-        };
-      case "procs":
-        return { ...base, value: String(snap.procs), bar: null };
+      case "uptime": {
+        // 原「运行时长」散卡：已并入「系统」卡的明细行（… · x天x时 · …）。
+        // 保留原读数便于回溯（原卡无上限，bar 为 null）；不再渲染。
+        const value = fmtUptime(snap.uptime);
+        void value;
+        return null;
+      }
+      case "swap": {
+        // 原「交换区」散卡：读数已并入「内存」卡的明细行（… · 交换 x / y）。
+        // 保留原读数与占比计算便于回溯；不再渲染。
+        const value = swapText();
+        const bar = snap.swap_total > 0 ? pct(snap.swap_used, snap.swap_total) : null;
+        void value;
+        void bar;
+        return null;
+      }
+      case "procs": {
+        // 原「进程」散卡：进程数已并入「系统」卡的明细行（… · N 进程）。
+        // 保留原读数便于回溯（原卡无上限，bar 为 null）；不再渲染。
+        const value = String(snap.procs);
+        void value;
+        return null;
+      }
       case "diskio":
         return {
           ...base,
@@ -418,26 +479,42 @@ const visibleCards = computed<CardView[]>(() => {
             label: "磁盘 I/O 实时波形（上半读、下半写）",
           },
         };
-      case "partitions":
-        return {
-          ...base,
-          // 进度条走最紧张分区的占用率，而不是聚合值
-          value: snap.disk_partitions
-            ? `${snap.disk_partitions} 个 · ${snap.disk_worst_mount} ${Math.round(snap.disk_worst_pct)}%`
-            : "无分区",
-          bar: snap.disk_worst_pct,
-        };
+      case "partitions": {
+        // 原「分区」散卡：最紧张分区已并入「磁盘」卡的明细行。
+        // 保留原读数与占比计算便于回溯；不再渲染。
+        const value = snap.disk_partitions
+          ? `${snap.disk_partitions} 个 · ${snap.disk_worst_mount} ${Math.round(snap.disk_worst_pct)}%`
+          : "无分区";
+        const bar = snap.disk_worst_pct;
+        void value;
+        void bar;
+        return null;
+      }
       case "cores":
-        return { ...base, value: `${snap.cpu_cores} 核 · ${snap.arch}`, bar: null };
+        // 「CPU 规格」已并入「CPU」卡的明细行（核数 + 架构，见 cpu 分支）。
+        // 合并的理由：这张是**进程生命周期内不变的机器信息**，
+        // 各占一格却只有一行字，而实时指标（网络 / 磁盘趋势）更需要空间。
+        // 这里返回 null 由下面过滤掉 —— 老配置里可能还存着 cores，
+        // 必须「不渲染」而不是留下一个空洞。
+        return null;
       case "sysinfo":
+        // 主读数只留发行版；内核主版本（内核串形如
+        // `6.6.66-microsoft-standard-WSL2`，卡片放不下，只取破折号前的数字）、
+        // 运行时长、进程数一起下沉为明细 —— 后两项来自原「运行时长」「进程」
+        // 两张散卡。
         return {
           ...base,
-          // 内核串形如 `6.6.66-microsoft-standard-WSL2`，卡片放不下，
-          // 只取破折号前的主版本号 —— 看内核主要就看这三个数字
-          value: `${snap.distro || "未知"} · ${snap.kernel.split("-")[0] || "—"}`,
+          value: snap.distro || "未知",
+          hint: `${snap.kernel.split("-")[0] || "—"} · ${fmtUptime(snap.uptime)} · ${snap.procs} 进程`,
           bar: null,
         };
+      // 三张趋势图卡：**一张卡只画一组同量纲的指标**（负载 % / 网络速率 / 磁盘速率）。
+      // 早先是一张卡三条横带，靠「各带各自定标」绕开量纲问题；拆成三张之后每组独占
+      // 一张卡，纵轴与时间窗都互不干扰 —— store 与后端白名单本来就是按三张声明的
+      // （chart / chartnet / chartdisk），这里补齐视图层分支。
       case "chart":
+      case "chartnet":
+      case "chartdisk":
         // 图表卡没有数值与进度条，模板会走另一个分支渲染 ECharts 容器
         return { ...base, value: "", bar: null, isChart: true };
       case "topcpu":
@@ -467,8 +544,14 @@ const visibleCards = computed<CardView[]>(() => {
           }));
         return { ...base, value: "", bar: null, list: true, rows };
       }
+      default:
+        // 未在本 switch 里处理的卡片不渲染（如已并入系统卡的 cores）。
+        // 返回 null 而不是 undefined：下面用类型谓词过滤，TS 之后看到的是非空元素。
+        return null;
     }
-  });
+  })
+    // 过滤掉合并/停用的卡片（cores），它们不再占据布局位置
+    .filter((c): c is CardView => c !== null);
 });
 
 /// 从进程表里取 Top N。两个排行榜共用这一处排序逻辑：
@@ -495,12 +578,11 @@ const draftCards = ref<CardConfig[]>([]);
 const draftOn = reactive<Record<string, boolean>>({});
 
 function openCustom() {
-  const cfg: CardConfig[] =
-    dash.cards ?? DASH_CARDS.map((id) => ({ id, ...defaultSize(id) }));
+  const cfg: CardConfig[] = dash.cards ?? defaultConfig();
   const configured = new Set(cfg.map((c) => c.id));
   // 编辑态按"全部卡片"列出：已配置的在前（保持其顺序与尺寸，故要浅拷贝），
   // 未配置的追加在后并用各自默认尺寸
-  const rest: CardConfig[] = DASH_CARDS.filter((id) => !configured.has(id)).map(
+  const rest: CardConfig[] = DEFAULT_ORDER.filter((id) => !configured.has(id)).map(
     (id) => ({ id, ...defaultSize(id) }),
   );
   draftCards.value = [...cfg.map((c) => ({ ...c })), ...rest];
@@ -522,7 +604,15 @@ function setSize(i: number, key: string) {
   draftCards.value[i].h = size.h;
 }
 
-function move(i: number, dir: -1 | 1) {
+/// 「自动排列」：把当前勾选中的卡片按类型重排一遍并立刻保存。
+/// 自由布局下不会自动成排，摆乱了靠它一键归位（数值卡 1 列、排行榜 3 行、趋势图整宽）。
+async function autoArrange() {
+  const ids = draftCards.value.filter((c) => draftOn[c.id]).map((c) => c.id);
+  await saveLayout(autoLayout(ids));
+  customOpen.value = false;
+}
+
+function moveRow(i: number, dir: -1 | 1) {
   const j = i + dir;
   if (j < 0 || j >= draftCards.value.length) return;
   const arr = [...draftCards.value];
@@ -569,9 +659,18 @@ const gridEl = ref<HTMLElement>();
 
 /// 拖拽态：正在拖的卡片 + 相对起点的位移（只做视觉跟随，不改布局）
 const drag = reactive({ id: null as DashCard | null, from: -1, dx: 0, dy: 0 });
-/// 指针悬停到的卡片索引；-1 表示没落在任何卡片上
-const dropIndex = ref(-1);
-/// 缩放态：w/h 是起点值，curW/curH 是拖动过程中的实时预览值
+/// 缩放中的那张卡：起手指针位置 + 起手格数 + 实时格数。
+/// curW/curH 只影响渲染（cellW/cellH 读它们），松手才写进配置。
+/// 移动中的那张卡：起手指针 x0/y0 + 起手几何 fromX（%）/fromY（px）+ 实时 curX/curY
+const move = reactive({
+  id: null as DashCard | null,
+  x0: 0,
+  y0: 0,
+  fromX: 0,
+  fromY: 0,
+  curX: 0,
+  curY: 0,
+});
 const resize = reactive({
   id: null as DashCard | null,
   x: 0,
@@ -581,8 +680,11 @@ const resize = reactive({
   curW: 1,
   curH: 1,
 });
+/// 指针按下时的起点坐标：拖拽位移的换算基准
 let pointerStart = { x: 0, y: 0 };
-
+/// 指针悬停到的卡片索引；-1 表示没落在任何卡片上
+const dropIndex = ref(-1);
+/// 刻度换算助手（列数/格宽计算用）
 function clamp(v: number, lo: number, hi: number) {
   return Math.min(hi, Math.max(lo, v));
 }
@@ -611,53 +713,63 @@ function colWidth(): number {
   return (gridEl.value.clientWidth - GAP * (n - 1)) / n;
 }
 
-/// 渲染用的跨度：正在缩放的那张卡走实时预览值。
-/// 必须钳到当前列数 —— 配置里的跨度是按 4 列存的（趋势图默认 4×2），窄屏只有
-/// 1–2 列时 `grid-column: span 4` 会撑出隐式轨道，整个栅格宽过屏幕、左侧卡片被裁成
-/// 竖条（手机上的仪表盘就是这么坏的）。
-function cellW(c: CardView) {
-  const w = resize.id === c.id ? resize.curW : c.w;
-  return Math.min(w, cols.value);
+/// 卡片的实时几何：拖动/缩放中走预览值，松手才落库。
+/// x/w 的单位是**容器宽度的百分数**、y/h 是**像素**（见 CardConfig 的说明）。
+function geomOf(c: CardView) {
+  const sizing = resize.id === c.id;
+  return {
+    x: move.id === c.id ? move.curX : (c.x ?? 0),
+    y: move.id === c.id ? move.curY : (c.y ?? 0),
+    w: sizing ? resize.curW : (c.w ?? 100),
+    h: sizing ? resize.curH : (c.h ?? 88),
+  };
 }
 
-/// 卡片主体需要的行数：按**实际渲染出来的内容高度**换算，向上取整。
-///
-/// 排行榜卡里是 5 行列表，行数不再是常量。早先的写法是把「几行」写进每张卡的
-/// 尺寸常量里，加一种卡就要重新量一次、还要和 `.card` 的 CSS 内边距对表 ——
-/// 漏一处就是文字溢出卡片、或底部留一大块空白。改成直接量 `.card-body`：
-/// 内容多少就占多少行，CSS 怎么改都不会失配。
-function neededRows(c: CardView): number {
-  const i = visibleCards.value.findIndex((x) => x.id === c.id);
-  if (i < 0) return 1;
-  const body = gridEl.value?.querySelector<HTMLElement>(
-    `[data-index="${i}"] .card-body`,
-  );
-  const h = body?.offsetHeight ?? 0;
-  if (!h) return 1;
-  // +34：标签行 + 卡片上下内边距 + 列表末行的视觉余量。
-  // 实测 26 时排行榜卡的第 5 行会被卡片下沿压住（body 量到的高度不含
-  // 最后一行的行距），这一档必须留够。
-  return Math.max(1, Math.ceil((h + 34 + GAP) / (ROW_H + GAP)));
+/// 卡片的行内样式：**绝对定位 + 自由几何**。
+/// `position` 写在这里而不是 `.card` 那条规则里 —— 一处够用，也不碰那条规则的其它属性。
+function posStyle(c: CardView, i: number) {
+  const g = geomOf(c);
+  return {
+    position: "absolute" as const,
+    left: `${g.x}%`,
+    top: `${g.y}px`,
+    width: `${g.w}%`,
+    height: `${g.h}px`,
+    // 入场交错：靠内联 delay 而非 CSS 变量，省掉一层自定义属性
+    animationDelay: `${i * 35}ms`,
+  };
 }
-function cellH(c: CardView) {
-  if (resize.id === c.id) return resize.curH;
-  // 只增不减：用户手动放大的高度要保留，内容撑出来的额外高度也要吃下
-  return Math.max(c.h, neededRows(c));
-}
+
+/// 画布高度：最靠下那张卡的 y + h，再加一条纵向间距（12 = autoLayout 的行间距）。
+/// 没有它，绝对定位的子元素不会撑开父元素，`.content` 就滚动不到下面的卡片。
+const canvasHeight = computed(
+  () =>
+    visibleCards.value.reduce((m, c) => {
+      const g = geomOf(c);
+      return Math.max(m, g.y + g.h);
+    }, 88) + 12,
+);
 
 /// 当前生效的配置（未定制时按默认顺序 + 各自默认尺寸现生成一份）
 function currentConfig(): CardConfig[] {
   return dash.cards
     ? dash.cards.map((c) => ({ ...c }))
-    : DASH_CARDS.map((id) => ({ id, ...defaultSize(id) }));
+    : defaultConfig();
 }
 
 async function saveLayout(cfg: CardConfig[]) {
+  // 🔴 乐观更新：**先**把新几何落到本地 store，再发请求。
+  // 不这么做的话，松手瞬间卡片会先弹回旧位置（store 里还是旧值），等服务端往返
+  // 回来才跳到位 —— 就是「放下时有短暂偏移」。这句在 `await` 之前同步执行，
+  // 与调用方的 `move.id = null` 落在同一帧，中间那一帧根本不会渲染出旧位置。
+  // ⚠️ 保存失败时本地已经是新值（提示会报错），刷新后回到服务端的值 —— 刻意取舍：
+  // 宁可「看着生效了但没存上」并报错，也不要每次松手都弹一下。
+  dash.cards = cfg.map((c) => ({ ...c }));
   try {
     await dash.save(cfg);
     // 尺寸或顺序变了，图表容器也跟着变，等 DOM 更新后重算画布
     await nextTick();
-    chart?.resize();
+    for (const kind of CHART_KINDS) charts[kind]?.resize();
   } catch (e: unknown) {
     const err = e as { response?: { data?: { error?: string } } };
     ElMessage.error(err.response?.data?.error ?? "保存布局失败");
@@ -675,57 +787,90 @@ function onCardPointerDown(e: PointerEvent, i: number) {
   if (e.pointerType !== "mouse") return;
   if ((e.target as HTMLElement | null)?.closest(INTERACTIVE)) return;
   e.preventDefault();
-  drag.id = visibleCards.value[i].id;
-  drag.from = i;
-  drag.dx = 0;
-  drag.dy = 0;
-  dropIndex.value = i;
+  const c = visibleCards.value[i];
+  if (!c) return;
+  const g = geomOf(c);
+  move.id = c.id;
+  move.x0 = e.clientX;
+  move.y0 = e.clientY;
+  move.fromX = g.x;
+  move.fromY = g.y;
+  move.curX = g.x;
+  move.curY = g.y;
   pointerStart = { x: e.clientX, y: e.clientY };
   window.addEventListener("pointermove", onPointerMove);
   window.addEventListener("pointerup", onPointerUp, { once: true });
 }
 
+/// 右下角手柄的起手：记下起手格数与指针位置，拖动期间只改 curW/curH（不写服务端）。
 function onResizeStart(e: PointerEvent, i: number) {
   e.preventDefault();
   e.stopPropagation();
   const c = visibleCards.value[i];
+  if (!c) return;
+  // 🔴 必须在 `resize.id = c.id` **之前**取几何。
+  // 先设 id 的话，下面的 geomOf 会走进「正在缩放」分支、读到 resize.curW/curH
+  // —— 那是上一次缩放的残留值（首次是初始值），于是按下手柄的一瞬间卡片就跳到
+  // 那个尺寸上（实测表现为「鼠标一按下大小就自己变」）。
+  // 这里直接读配置值，不绕 geomOf。
+  const w0 = c.w ?? 100;
+  const h0 = c.h ?? 88;
   resize.id = c.id;
   resize.x = e.clientX;
   resize.y = e.clientY;
-  resize.w = c.w;
-  resize.h = c.h;
-  resize.curW = c.w;
-  resize.curH = c.h;
+  resize.w = w0;
+  resize.h = h0;
+  resize.curW = w0;
+  resize.curH = h0;
   pointerStart = { x: e.clientX, y: e.clientY };
   window.addEventListener("pointermove", onPointerMove);
   window.addEventListener("pointerup", onPointerUp, { once: true });
 }
 
 function onPointerMove(e: PointerEvent) {
-  if (drag.id !== null) {
-    drag.dx = e.clientX - pointerStart.x;
-    drag.dy = e.clientY - pointerStart.y;
-    // 被拖的卡片设了 pointer-events:none，这里的命中会穿到它下面的卡片
-    const under = document.elementFromPoint(e.clientX, e.clientY);
-    const cardEl = under?.closest<HTMLElement>(".card");
-    const idx = cardEl?.dataset.index;
-    if (idx !== undefined) dropIndex.value = Number(idx);
+  // 自由布局下换算基准只剩一个：画布的**像素宽**（x 是它的百分数）。
+  const cw = gridEl.value?.clientWidth || 1;
+  // 移动：x 走百分数、y 走像素，两轴都自由（钳在画布内，不让卡片拖出视野）
+  if (move.id !== null) {
+    // 🔴 x 的上界是「100 − 这张卡的宽」，不是 100：x 是**左边缘**的百分比，
+    // 钳到 100 的话卡片会整块落到画布右边外面（用户报过「卡片能去右侧区域外」）。
+    const w = visibleCards.value.find((c) => c.id === move.id)?.w ?? 100;
+    move.curX = clamp(
+      move.fromX + ((e.clientX - move.x0) / cw) * 100,
+      0,
+      Math.max(0, 100 - w),
+    );
+    move.curY = Math.max(0, move.fromY + (e.clientY - move.y0));
     return;
   }
+  // 缩放：同一套换算，游标位移直接变成宽（%）与高（px），再受最小尺寸约束
   if (resize.id !== null) {
-    const dw = Math.round((e.clientX - resize.x) / (colWidth() + GAP));
-    const dh = Math.round((e.clientY - resize.y) / (ROW_H + GAP));
-    // 上限与后端校验同源：宽度是栅格列数，高度按卡片类型给
-    // （趋势图 6 行、其余 3 行，见 maxH）；窄屏列数更少，宽度上限跟着列数收
-    resize.curW = clamp(resize.w + dw, 1, Math.min(MAX_CARD_W, cols.value));
-    resize.curH = clamp(resize.h + dh, 1, maxH(resize.id));
+    const lim = sizeLimits(resize.id);
+    // 宽度同样不能把自己顶出右边界：上限取「100 − 这张卡的左边缘」
+    const x0 = visibleCards.value.find((c) => c.id === resize.id)?.x ?? 0;
+    resize.curW = clamp(
+      resize.w + ((e.clientX - resize.x) / cw) * 100,
+      lim.wMin,
+      Math.min(lim.wMax, Math.max(lim.wMin, 100 - x0)),
+    );
+    resize.curH = clamp(resize.h + (e.clientY - resize.y), lim.hMin, lim.hMax);
+    return;
   }
+  if (drag.id === null) return;
+  drag.dx = e.clientX - pointerStart.x;
+  drag.dy = e.clientY - pointerStart.y;
+  // 被拖的卡片设了 pointer-events:none，这里的命中会穿到它下面的卡片
+  const under = document.elementFromPoint(e.clientX, e.clientY);
+  const cardEl = under?.closest<HTMLElement>(".card");
+  const idx = cardEl?.dataset.index;
+  if (idx !== undefined) dropIndex.value = Number(idx);
 }
 
 async function onPointerUp() {
   window.removeEventListener("pointermove", onPointerMove);
 
-  // 拖拽落位：把卡片从原索引搬到落点索引；没挪动就什么都不做
+  // 拖拽落位：把卡片从原索引搬到落点索引；没挪动就什么都不做。
+  // 只改顺序，不改尺寸 —— 尺寸由卡片类型决定（见 store 的 spanFor）。
   if (
     drag.id !== null &&
     drag.from >= 0 &&
@@ -739,15 +884,38 @@ async function onPointerUp() {
     const cfg = currentConfig();
     const [moved] = cfg.splice(from, 1);
     cfg.splice(to, 0, moved);
+    // 换位后按类型重新分组：同高元素必须成排，否则栅格又留洞。
+    // 这里复用 store 的排序（normalize 在每次保存后都会跑一遍）。
     await saveLayout(cfg);
+    return;
+  }
+
+  // 移动落位：位置没变就不必打扰服务端
+  if (move.id !== null) {
+    const id = move.id;
+    const nx = Math.round(move.curX);
+    const ny = Math.round(move.curY);
+    const changed = nx !== move.fromX || ny !== move.fromY;
+    move.id = null;
+    if (changed) {
+      const cfg = currentConfig();
+      const item = cfg.find((c) => c.id === id);
+      if (item) {
+        item.x = nx;
+        item.y = ny;
+        await saveLayout(cfg);
+      }
+    }
     return;
   }
 
   // 缩放落位：尺寸没变就不必打扰服务端
   if (resize.id !== null) {
     const id = resize.id;
-    const nextW = resize.curW;
-    const nextH = resize.curH;
+    // 🔴 落库前**必须取整**：后端只收整数（as_u64），小数会被判「卡片宽度必须是整数」。
+    // 渲染用的 curW/curH 保持小数（拖动才平滑），只有写进配置的这两个值要取整。
+    const nextW = Math.round(resize.curW);
+    const nextH = Math.round(resize.curH);
     const changed = nextW !== resize.w || nextH !== resize.h;
     resize.id = null;
     if (changed) {
@@ -893,18 +1061,39 @@ async function refreshRanks() {
   }
 }
 
+/// 拉历史并重画三张趋势图。
+/// 三张卡的时间窗各记各的，所以按**去重后的时间窗**各拉一次：默认三张都是
+/// 10 分钟 → 只有一个窗口 → 一次请求；谁切到别的窗口才会多出一次。
+/// 用 allSettled：某个窗口拉失败不该把另外两张图一起拖黑。
 async function refreshHistory() {
-  const r = RANGES.find((x) => x.key === rangeKey.value) ?? RANGES[0];
   const now = Math.floor(Date.now() / 1000);
-  const { data } = await http.get("/system/history", {
-    params: { from: now - r.secs, to: now, limit: r.points },
-  });
-  history.value = data;
-  renderChart();
+  const wanted = [...new Set(CHART_KINDS.map((k) => rangeKeys[k]))];
+  await Promise.allSettled(
+    wanted.map(async (key) => {
+      const r = RANGES.find((x) => x.key === key) ?? RANGES[0];
+      const { data } = await http.get("/system/history", {
+        params: { from: now - r.secs, to: now, limit: r.points },
+      });
+      for (const kind of CHART_KINDS) {
+        if (rangeKeys[kind] === key) histories[kind] = data;
+      }
+    }),
+  );
+  renderCharts();
 }
 
-function renderChart() {
-  if (!chart || !chartEl.value) return;
+/// 重画三张趋势图（各画各的实例）
+function renderCharts() {
+  for (const kind of CHART_KINDS) renderChart(kind);
+}
+
+/// 画一张趋势图：一条横带、两根线（主序列实线带面积、次序列虚线）。
+/// 🔴 拆成「一卡一组」之后不再需要多 grid / 多 yAxis / axisPointer.link ——
+/// 那些是「三条带共用一张图」时为补偿量纲差付出的代价。同量纲的两根线
+/// （CPU% 与内存% / 入与出 / 读与写）挤在一根轴上不会互相压平。
+function renderChart(kind: ChartKind) {
+  const chart = charts[kind];
+  if (!chart || !chartEls[kind]) return;
   // 颜色从 CSS 变量运行时读取：主题定制（改主色/文本色/背景）后图表跟随，
   // 不再硬编码默认主题的灰阶值。canvas 不受 CSS 级联影响，只能这样取值。
   const css = getComputedStyle(document.documentElement);
@@ -912,19 +1101,40 @@ function renderChart() {
   const line = v("--el-text-color-primary") || "#111111";
   const sub = v("--el-text-color-secondary") || "#777777";
   const grid = v("--el-fill-color-dark") || "#ebebeb";
-  const cpuData = history.value.map((p) => Number(p.cpu.toFixed(2)));
-  const memData = history.value.map((p) =>
-    snap.mem_total > 0 ? Number(((p.mem_used / snap.mem_total) * 100).toFixed(1)) : 0,
-  );
-  // 带宽类序列（字节/秒）。磁盘两列在旧行上是 null：ECharts 用空值断线，
-  // 正好表达「那段没有采集」，而不是画成贴着 0 的直线。
-  const netInData = history.value.map((p) => p.net_in ?? null);
-  const netOutData = history.value.map((p) => p.net_out ?? null);
-  const diskReadData = history.value.map((p) => p.disk_read ?? null);
-  const diskWriteData = history.value.map((p) => p.disk_write ?? null);
-  // 两条线量级差得远（CPU 常年个位数、内存几十个百分点），共用一根写死 0–100 的轴时
-  // CPU 只能贴着底边走直线 —— 这就是「趋势看不出变化」的主因。各带按**自己那组数据**
-  // 定上限（最大值的 1.2 倍），并留一个下限，免得空数据时轴塌成一条线。
+
+  const hist = histories[kind];
+  const isPercent = kind === "load";
+  // 每组的序列名与取数方式。百分比组靠名字末尾的 `%` 决定 tooltip 单位
+  // （见下面 formatter 的说明），所以那个后缀不能省。
+  const NAMES: Record<ChartKind, [string, string]> = {
+    load: ["CPU %", "内存 %"],
+    network: ["网络 ↓", "网络 ↑"],
+    disk: ["磁盘读", "磁盘写"],
+  };
+  const PAIRS: Record<ChartKind, (p: MetricPoint) => [number | null, number | null]> =
+    {
+      load: (p) => [
+        Number(p.cpu.toFixed(2)),
+        snap.mem_total > 0
+          ? Number(((p.mem_used / snap.mem_total) * 100).toFixed(1))
+          : 0,
+      ],
+      // 带宽类序列（字节/秒）。磁盘两列在旧行上是 null：ECharts 用空值断线，
+      // 正好表达「那段没有采集」，而不是画成贴着 0 的直线。
+      network: (p) => [p.net_in ?? null, p.net_out ?? null],
+      disk: (p) => [p.disk_read ?? null, p.disk_write ?? null],
+    };
+  const first: (number | null)[] = [];
+  const second: (number | null)[] = [];
+  for (const p of hist) {
+    const [a, b] = PAIRS[kind](p);
+    first.push(a);
+    second.push(b);
+  }
+  const [nameA, nameB] = NAMES[kind];
+  // 纵轴上限按**这两根线自己的最大值**定（1.2 倍），并留一个下限，免得空数据时
+  // 轴塌成一条线。刻度写死 0–100 会让 CPU（常年个位数）贴着底边走直线 ——
+  // 这正是从前「趋势看不出变化」的主因。
   //
   // 接收可空序列：磁盘两列在迁移前的历史行上是 null（断线语义），
   // 这里跳过它们即可，不能因为一个 null 就让整根轴退回下限。
@@ -934,23 +1144,9 @@ function renderChart() {
       ? Math.max(floor, Math.ceil(Math.max(...nums) * 1.2 * 10) / 10)
       : floor;
   };
-
-  // ---------- 三横带的布局与数据 ----------
-  //
-  // 每带各占三分之一高度，带间留 10px；图例两行占 38px，底部留 22px 给 X 轴标签。
-  // 高度取容器的实际渲染高度而不是写死像素：这张卡可以从 2 行拖到 6 行，
-  // 写死的话放大后三带之间会留一大片空白。
-  const chartH = chartEl.value?.clientHeight || 0;
-  const legendH = 38;
-  const bottomH = 22;
-  const bandGap = 10;
-  const usable = Math.max(120, chartH - legendH - bottomH);
-  const bandH = Math.max(40, (usable - bandGap * 2) / 3);
-  const timeLabels = history.value.map((p) =>
+  const timeLabels = hist.map((p) =>
     new Date(p.ts * 1000).toLocaleTimeString("zh-CN", { hour12: false }),
   );
-  // 序列名只给图例用（tooltip 用的是自己 param 里的 seriesName，见下）
-  const seriesNames = ["CPU %", "内存 %", "网络 ↓", "网络 ↑", "磁盘读", "磁盘写"];
 
   chart.setOption({
     backgroundColor: "transparent",
@@ -999,73 +1195,49 @@ function renderChart() {
     // 里 top 被注释、改设 bottom），于是图例会压在 x 轴标签上。这里显式钉回顶部，
     // 正好落在 grid.top 预留的空间里；bottom 保留默认值不影响 top 的解析。
     legend: {
-      data: seriesNames,
+      data: [nameA, nameB],
       textStyle: { color: sub },
       top: 0,
       itemWidth: 14,
       itemHeight: 8,
     },
-    // ---------- 三横带：每类指标独占一带 ----------
-    //
-    // 🔴 为什么不是「一张图 + 多根 Y 轴」（先前那版，实测被反馈为意大利面条）：
-    // 单位不同只是表层问题，真正致命的是**同类指标之间量级也差得远** ——
-    // 磁盘写入偶发 7.7M/s，网络常年 0，两者共用一个字节/秒的轴时只能贴地板；
-    // 而 CPU 6.6% 与内存 7.2% 在百分比轴上又挤成一条线。
-    // 拆成三带后每带各自定标（自己那组数据的 1.2 倍上限），
-    // 每条线的起伏都占满自己那一带的高度，读数才有意义。
-    grid: [
-      { left: 46, right: 20, top: legendH, height: bandH },
-      { left: 46, right: 20, top: legendH + bandH + bandGap, height: bandH },
-      { left: 46, right: 20, top: legendH + (bandH + bandGap) * 2, height: bandH },
-    ],
-    // 三条 X 轴共用一个时间刻度：只留最下面那条显示标签，上面两条留空
-    xAxis: [0, 1, 2].map((i) => ({
-      type: "category" as const,
-      gridIndex: i,
-      boundaryGap: false,
-      data: timeLabels,
-      axisLine: { lineStyle: { color: grid } },
-      axisLabel: { color: sub, show: i === 2, fontSize: 10 },
-      axisTick: { show: i === 2 },
-    })),
-    // 每带一根 Y 轴，各自定标、各自带单位（左带 %、另两带 字节/秒）。
-    // 不带单位的刻度在这张图里无法解读 —— 三带的单位并不相同。
-    yAxis: [0, 1, 2].map((i) => ({
-      type: "value" as const,
-      gridIndex: i,
-      min: 0,
-      max: axisMax(
-        i === 0
-          ? [...cpuData, ...memData]
-          : i === 1
-            ? [...netInData, ...netOutData]
-            : [...diskReadData, ...diskWriteData],
-        i === 0 ? 10 : 64 * 1024,
-      ),
-      splitNumber: 2,
-      splitLine: { lineStyle: { color: grid } },
-      axisLabel: {
-        color: i === 0 ? line : sub,
-        fontSize: 10,
-        formatter: (val: number) => (i === 0 ? `${Math.round(val)}%` : fmtRateAxis(val)),
+    // 一条横带铺满卡片：图例占顶部 34px、X 轴标签占底部 22px。
+    // 卡高由 spanFor 固定（趋势卡 4×2 = 188px），所以这里写固定像素即可 ——
+    // 不再需要从前那套「按容器实测高度反算三条带」的换算。
+    grid: [{ left: 46, right: 20, top: 34, bottom: 22 }],
+    xAxis: [
+      {
+        type: "category" as const,
+        boundaryGap: false,
+        data: timeLabels,
+        axisLine: { lineStyle: { color: grid } },
+        axisLabel: { color: sub, fontSize: 10 },
       },
-    })),
-    series: [
-      // 主序列（实线 + 面积）与次序列（虚线）成对出现，配色沿用全站灰阶约定：
-      // 同一带内两条线靠实/虚与主/次文本色区分，不引入彩色。
-      sparkSeries("CPU %", cpuData, 0, line, false),
-      sparkSeries("内存 %", memData, 0, sub, true),
-      sparkSeries("网络 ↓", netInData, 1, line, false),
-      sparkSeries("网络 ↑", netOutData, 1, sub, true),
-      sparkSeries("磁盘读", diskReadData, 2, line, false),
-      sparkSeries("磁盘写", diskWriteData, 2, sub, true),
     ],
-    // 十字准线联动：三带共享同一个时间刻度，指针必须一起动 ——
-    // 否则读数时要在三条带上分别找同一时刻。联动是拆带去量纲的代价补偿。
-    // 标签底色同样交给样式表（同 tooltip，见 theme.css 的 .dash-tooltip 一带规则）
-    axisPointer: {
-      link: [{ xAxisIndex: "all" }],
-    },
+    // 一根 Y 轴：同一张卡里的两根线同量纲，单位随分组（% 或 字节/秒）。
+    // 不带单位的刻度在这张图里无法解读。
+    yAxis: [
+      {
+        type: "value" as const,
+        min: 0,
+        max: axisMax([...first, ...second], isPercent ? 10 : 64 * 1024),
+        splitNumber: 3,
+        splitLine: { lineStyle: { color: grid } },
+        axisLabel: {
+          color: line,
+          fontSize: 10,
+          formatter: (val: number) =>
+            isPercent ? `${Math.round(val)}%` : fmtRateAxis(val),
+        },
+      },
+    ],
+    // 主序列（实线 + 面积）与次序列（虚线）成对出现，配色沿用全站灰阶约定：
+    // 同一张图里两条线靠实/虚与主/次文本色区分，不引入彩色。
+    // （sparkSeries 第三个参数是轴下标，现在每张卡只有一根轴，恒为 0。）
+    series: [
+      sparkSeries(nameA, first, 0, line, false),
+      sparkSeries(nameB, second, 0, sub, true),
+    ],
   });
 }
 
@@ -1095,24 +1267,29 @@ function sparkSeries(
 function onResize() {
   // 跨过断点时列数会变（4 ↔ 2 ↔ 1），跨度钳制与卡片宽度都要跟着重算
   syncCols();
-  chart?.resize();
+  for (const kind of CHART_KINDS) charts[kind]?.resize();
 }
 
 /// 图表容器长在卡片网格里，只有该卡片可见时才存在 ——
 /// 所以初始化/销毁必须跟着显隐走，不能只在 onMounted 里做一次。
-function initChart() {
-  if (chart) return;
-  const el = document.getElementById("dash-chart");
-  if (!el) return;
-  chartEl.value = el;
-  chart = echarts.init(el);
-  renderChart();
+/// 三张趋势卡各建各的实例（三个容器 id），互不影响。
+function initCharts() {
+  for (const kind of CHART_KINDS) {
+    if (charts[kind]) continue;
+    const el = document.getElementById(chartDomIdOf(kind));
+    if (!el) continue;
+    chartEls[kind] = el;
+    charts[kind] = echarts.init(el);
+  }
+  renderCharts();
 }
 
-function destroyChart() {
-  chart?.dispose();
-  chart = null;
-  chartEl.value = undefined;
+function destroyCharts() {
+  for (const kind of CHART_KINDS) {
+    charts[kind]?.dispose();
+    delete charts[kind];
+    delete chartEls[kind];
+  }
 }
 
 onMounted(async () => {
@@ -1120,7 +1297,7 @@ onMounted(async () => {
   // 等卡片按配置渲染出来，图表容器才存在
   await nextTick();
   syncCols();
-  initChart();
+  initCharts();
   refreshRanks().catch(() => {});
   // 卡片与趋势图同频，都是 2 秒 —— 后端采样同样是 2 秒一条，图表跟着它走即可。
   // 早先采样 5 秒 + 图表降到 15 秒拉一次，叠加落库延迟后最新点能滞后 20 秒，
@@ -1138,13 +1315,15 @@ onMounted(async () => {
   window.addEventListener("resize", onResize);
 });
 
-// 卡片显隐会换掉 DOM：趋势图卡从无到有时建实例，从有到无时销毁
+// 卡片显隐会换掉 DOM：趋势图卡从无到有时建实例，从有到无时销毁。
+// 键取「当前在显示的趋势卡 id」而不是 some(...) 的布尔值 ——
+// 三张里去掉一张时布尔值不变，就不会重建，那一张的容器会留下空壳。
 watch(
-  () => visibleCards.value.some((c) => c.isChart),
-  async (has) => {
+  () => visibleCards.value.filter((c) => c.isChart).map((c) => c.id).join(","),
+  async (ids) => {
     await nextTick();
-    if (has) initChart();
-    else destroyChart();
+    if (ids) initCharts();
+    else destroyCharts();
   },
 );
 
@@ -1153,7 +1332,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("resize", onResize);
   // 组件卸载时指针可能仍在拖拽中，把全局监听摘干净
   window.removeEventListener("pointermove", onPointerMove);
-  destroyChart();
+  destroyCharts();
 });
 </script>
 
@@ -1162,21 +1341,28 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: var(--sp-4);
+  /* 画布的定位基准：工具栏要绝对定位在它顶端（见下面的 .toolbar） */
+  position: relative;
+}
+/* 🔴 工具栏**不占行**、浮在画布之上。
+ * 原先它是一个正常的行，于是画布从它下面开始 —— 卡片的 y=0 也就只能落到那一行
+ * 之下，**永远拖不到工具栏那条水平线**（用户报的「卡片无法移动到与自定义卡片
+ * 相同高度」，「自定义卡片」按钮就在这条工具栏上）。
+ * 绝对定位之后画布 = 整个内容区，卡片能拖到最顶上。
+ * 代价：它可能压住右上角那张卡的顶部 —— 把卡挪开就行，这是自由布局该有的取舍。 */
+.toolbar {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 5;
+  margin-bottom: 0;
 }
 .cards {
-  display: grid;
-  /* 实际列数由脚本按屏宽算好、用内联 grid-template-columns 下发（窄屏 1–2 列），
-     这里只是没有脚本时的兜底值。旧的窄屏媒体查询已删除 —— 见 cellW 的注释：
-     列数和卡片跨度必须出自同一处，否则 span 会大于列数、撑出隐式轨道。 */
-  grid-template-columns: repeat(4, 1fr);
-  /* 行高固定：卡片可以跨 2 行，拖拽缩放时要靠它把像素位移换算成行数
-     （脚本里的 ROW_H 常量必须与这个值一致）。88 = 内距 16×2 + 标签 19
-     + 数值 20 + 数值上下外距 8 + 进度条 4 ≈ 83，内距从 12 提到 16 后仍留
-     5px 余量，够贴又不会把卡内内容裁掉；行高不必跟着调。 */
-  grid-auto-rows: 88px;
-  /* 栅格间距是拖拽缩放的换算基准：stores/dashboard.ts 的 GAP 必须与它一致
-     （脚本用 GAP 把像素位移换算成格数）。改这里会连带改那个常量，故保持 --sp-3。 */
-  gap: var(--sp-3);
+  /* 自由布局的画布：卡片都是它的绝对定位子元素，位置与尺寸全部来自配置。
+     高度由脚本按「最靠下那张卡的 y + h」现算，用内联 style 下发。 */
+  position: relative;
+  /* 空配置时不至于塌成 0 */
+  min-height: 88px;
 }
 .card {
   /* 半透卡片：--panel-card-bg 只在主题把卡片不透明度调到 100 以下时才存在
@@ -1192,7 +1378,9 @@ onBeforeUnmount(() => {
   -webkit-backdrop-filter: var(--panel-card-blur);
   backdrop-filter: var(--panel-card-blur);
   border-radius: var(--radius);
-  padding: var(--sp-4) var(--sp-5);
+  /* 内边距取自统一标尺：原来用 --sp-4/--sp-5（四边中最宽的一档），比卡片里
+     其它留白都大一圈，加上字号各写各的，整块看起来就不像同一套组件。 */
+  padding: var(--sp-3);
   /* 与 .el-card 同档的一层投影：仪表盘卡片是 div 不吃 EP 变量，
      这里显式给一次，全站「卡片浮在底色上」的语言才是同一套。
      拖拽时 .card--dragging 会把透明度压到 0.7，投影跟着一起淡，
@@ -1244,16 +1432,39 @@ onBeforeUnmount(() => {
 .card--dragging .card-resize {
   opacity: 1;
 }
-/* 用两条直角边框画手柄，比塞一个图标省事，也更容易对齐 */
+/* 用两条直角边框画手柄，比塞一个图标省事，也更容易对齐。
+ * 尺寸从 7 提到 10、颜色从 placeholder 提到 secondary：原来的标记太小太淡，
+ * 用户反馈「根本找不到/不好拖」。
+ * 右下角取 --radius 圆角：全站不留直角，两条边在这里接成一段与卡片圆角同心的弧。
+ * 盒子 9px = 半径 6 + 描边 2 + 1px 余量；再小就只剩弧、读不出「能抓」。 */
 .card-resize::after {
   content: "";
   position: absolute;
-  right: 5px;
-  bottom: 5px;
-  width: 7px;
-  height: 7px;
-  border-right: 2px solid var(--el-text-color-placeholder);
-  border-bottom: 2px solid var(--el-text-color-placeholder);
+  right: 4px;
+  bottom: 4px;
+  width: 9px;
+  height: 9px;
+  border-right: 2px solid var(--el-text-color-secondary);
+  border-bottom: 2px solid var(--el-text-color-secondary);
+  border-bottom-right-radius: var(--radius);
+}
+.card-resize:hover::after {
+  border-color: var(--el-text-color-primary);
+}
+/* 拖动中的实时格数徽标：浮在手柄左上方，不遮挡卡片内容 */
+.card-resize-badge {
+  position: absolute;
+  right: 18px;
+  bottom: 2px;
+  padding: 1px var(--sp-1);
+  border-radius: var(--radius);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  /* 反色实底：拖动时视线在卡片右下角，这个徽标必须是全卡最清楚的一处 */
+  background: var(--el-text-color-primary);
+  color: var(--el-bg-color);
+  pointer-events: none;
 }
 /* 触屏没有 hover，手柄得常驻，否则无从下手 */
 @media (hover: none) {
@@ -1267,14 +1478,11 @@ onBeforeUnmount(() => {
     transition: opacity 160ms ease-out;
   }
 }
-/* 大卡（跨 2 行）：数值放大并下移。
-   卡片只有标签/数值/进度条三个元素，撑到 200px 高时必然空出一大截；
-   给数值加上 auto 上边距后，它与进度条的 auto 上边距平分富余空间，
-   三者就自然分布成「标签顶 / 数值中 / 进度条底」。 */
-.card--lg .card-value {
-  font-size: 30px;
-  margin-top: auto;
-}
+/* 🔴 跨 2 行的「大卡」数值样式（放大字号 + 上移）已整条删除，连同模板里那处
+   已无任何规则命中的绑定类。它是一条死规则：数值卡的高度由 store 的 spanFor
+   固定为 **1 行**，永远不是大卡；而唯一会跨行的 chart / 排行榜卡，其模板里
+   根本没有 .card-value。数值卡的字号与位置统一由下面的 .card-value 给出 ——
+   不再有「大卡字号档」。 */
 /* 入场：自下浮入 + 交错（延迟由模板内联的 animation-delay 给出）。
    只动 opacity / transform，不触发布局；12 张约 400ms 走完。 */
 @media (prefers-reduced-motion: no-preference) {
@@ -1289,15 +1497,26 @@ onBeforeUnmount(() => {
   }
 }
 .card-label {
-  font-size: 13px;
+  font-size: var(--fs-xs);
   color: var(--el-text-color-secondary);
+  /* 行高压到 1.25（11px → 约 14px）：卡内容区只有 64px（行高 88 − 内距 12×2），
+     标签 + 读数 + 明细 + 量度条四段必须挤进去，行高是大头。 */
+  line-height: 1.25;
+  /* 标签单行：长卡片名（「磁盘占用 Top 5 目录」）不该换行把内容挤下去 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .card-value {
-  font-size: 20px;
+  font-size: var(--fs-xl);
   font-weight: 600;
   font-family: var(--panel-mono);
   font-variant-numeric: tabular-nums;
-  margin: var(--sp-1) 0;
+  /* 读数行高固定 1.2（20px → 24px），与标签 / 明细的高度预算对齐（见 .card-label）。
+     上外距给标签一个呼吸（--sp-1）；下外距归零 —— 明细用 margin-top: auto
+     吸走自由空间，读数与明细之间不再叠一份固定外距，四段才放得进 64px。 */
+  line-height: 1.2;
+  margin: var(--sp-1) 0 0;
   /* 单行 + 省略号：卡片值里既有短值（62%）也有长值（读 2.1M/s 写 480K/s、
      发行版 · 内核），允许换行会让卡片高度参差不齐、三行栅格对不齐 */
   white-space: nowrap;
@@ -1310,6 +1529,30 @@ onBeforeUnmount(() => {
   /* 占满标签下方的剩余高度，进度条的 margin-top:auto 才有东西可推 */
   flex: 1;
   min-height: 0;
+  /* 矮卡片里内容放不下时裁掉，而不是溢出到卡片外 */
+  overflow: hidden;
+}
+/* 数值下方的次级说明（系统卡里的 CPU 规格、内存卡里的「已用 / 总量」等）。
+ * 与标题同档（--fs-xs）：说明不该抢主读数，也不该比卡片名还大。
+ * flex:none 让它不被压扁；行高压到 1.2 省出纵向空间。
+ * margin-top: auto 把它沉到下沿 —— 自由空间全由这个上外距吸收，
+ * 明细因此与量度条一起贴卡片底边，同排卡片下沿自然对齐。 */
+.card-hint {
+  font-size: var(--fs-xs);
+  line-height: 1.2;
+  color: var(--el-text-color-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: none;
+  margin-top: auto;
+  margin-bottom: var(--sp-1);
+}
+/* 明细与量度条同处底部组：条不能再抢一次自由空间（否则空白在两者之间
+ * 对半分、明细浮不到底，见 .card-hint 的说明），只留一个 --sp-1 的缝。 */
+.card-hint + .bar {
+  margin-top: 0;
 }
 /* 排行榜：名次 + 名称 + 数值 三列。
  * 名称列必须 min-width:0 才能被省略号截断（flex 子项默认 min-width:auto，
@@ -1325,7 +1568,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: baseline;
   gap: var(--sp-2);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.5;
   min-width: 0;
 }
@@ -1350,17 +1593,22 @@ onBeforeUnmount(() => {
   color: var(--el-text-color-regular);
 }
 .rank-empty {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
 }
-/* 波形占位：高度固定 28px，贴卡片底部（与进度条同一位置语言）。
- * 不设 min-height 让内容撑开 —— 卡片高度由栅格决定，波形只负责填满
- * 数值下方剩下的那块空间。 */
+/* 波形占位：**吃掉「读数」剩下的高度**，不是一个固定尺寸的挂件。
+ * 早先写死 height: 28px，而 net / diskio 在 spanFor 下是 **1 行卡**（可用高度
+ *   = 行高 88 − 内距 12×2 = 64px），
+ *   13.75(标签 11×1.25) + 4(读数上外距) + 24(读数 20×1.2) + 28 = 69.75 > 64，
+ * 波形被挤出卡片 5.75px。改成 flex 抢占剩余高度后：
+ *   1 行卡里它拿到 64 − 13.75 − 4 − 24 = 22.25px（≥ min-height 18），不再溢出；
+ *   2 行卡里它长满多出来的空间，波形反而更可读。
+ * 🔴 别再写回固定高度：卡片高度由栅格决定，波形只负责填满它。 */
 .spark-box {
   position: relative;
+  flex: 1 1 auto;
   margin-top: auto;
-  height: 28px;
-  min-height: 0;
+  min-height: 18px;
 }
 /* 量程标注：右上角小字。波形按 P90 定标、尖峰会被削顶，
  * 不标出量程的话「波形顶到边」会被误读成「到达上限了」。 */
@@ -1368,7 +1616,8 @@ onBeforeUnmount(() => {
   position: absolute;
   right: 0;
   top: -2px;
-  font-size: 10px;
+  /* 用最小档：这是量程标注，不能和它会标注的波形抢视觉 */
+  font-size: var(--fs-xs);
   line-height: 1;
   color: var(--el-text-color-secondary);
   pointer-events: none;
@@ -1446,26 +1695,15 @@ onBeforeUnmount(() => {
   opacity: 0.85;
 }
 
-/* 4.2 卡片自定义弹窗 */
-.mini-btn {
-  border: none;
-  background: var(--el-fill-color-light);
-  color: var(--el-text-color-primary);
-  border-radius: var(--radius);
-  padding: var(--sp-1) var(--sp-3);
-  font-size: 12px;
-  cursor: pointer;
-}
-.mini-btn:hover {
-  background: var(--el-fill-color);
-}
-.mini-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.mini-btn--sm {
-  padding: var(--sp-1) var(--sp-2);
-}
+/* 4.2 卡片自定义弹窗
+ *
+ * 🔴 这里**故意不再定义 .mini-btn / :hover / :disabled / --sm**。
+ * 它们原先在本 scoped 块里又定义了一遍（12px、无投影、:disabled 0.5），
+ * 与 theme.css 的全局定义（13px、有 --panel-shadow-1、0.55）冲突 ——
+ * 同一个按钮类两处定义、字号与投影都不同，仪表盘上的按钮就与
+ * 「系统调优」页等页面长得不一样。scoped 属性选择器权重更高，
+ * 所以这一份一直在赢，等于全站的 mini-btn 在仪表盘里被悄悄改了。
+ * 统一由 theme.css 提供（那里是唯一来源）。 */
 .custom-list {
   display: flex;
   flex-direction: column;
@@ -1487,7 +1725,7 @@ onBeforeUnmount(() => {
 }
 .custom-hint {
   margin-top: var(--sp-3);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
 }
 /* 弹窗底部按钮组 */

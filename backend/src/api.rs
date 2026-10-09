@@ -2397,7 +2397,7 @@ const DASHBOARD_MAX_BYTES: usize = 4 * 1024;
 /// 🔴 **新增卡片一律追加到末尾**：前端用「保存时的卡片数量」判断哪些是新增的
 /// （见 stores/dashboard.ts 的 normalize），插在中间会把已保存布局里的卡片
 /// 全部错位。
-const DASHBOARD_CARDS: [&str; 16] = [
+const DASHBOARD_CARDS: [&str; 18] = [
     "cpu",
     "mem",
     "disk",
@@ -2414,7 +2414,10 @@ const DASHBOARD_CARDS: [&str; 16] = [
     "topcpu",
     "topmem",
     "topdisk",
+    // 趋势图卡：一组指标一张卡（负载 / 网络 / 磁盘），各自量程与单位
     "chart",
+    "chartnet",
+    "chartdisk",
 ];
 
 /// 卡片可跨的最大列数 / 行数。
@@ -2422,30 +2425,46 @@ const DASHBOARD_CARDS: [&str; 16] = [
 /// 列上限是栅格整宽（4 列）—— 趋势图这类需要横向空间的卡片要占满一行；
 /// 行上限 3：行高固定 88px，3 行约 288px，数值卡再多出来的只是空白。
 /// 🔴 必须与前端 `stores/dashboard.ts` 的栅格常量保持一致。
-const MAX_CARD_W: u64 = 4;
-const MAX_CARD_H: u64 = 3;
+/// 卡片几何的**量级上限**。语义已从「跨几格」变成实际单位：
+///   w / x → 容器宽度的**百分数**（0–100）
+///   h / y → **像素**
+/// 仪表盘现在是绝对定位的自由布局（用户拖动得到的就是这些数），校验只做量级兜底、
+/// 不再表达任何布局语义 —— 从前那套「4 列 / 3 行」的整数格把像素尺寸挡在门外
+/// （报「卡片宽度超出范围（1–4）」），所以上限必须一起放宽。
+/// 🔴 前端 `stores/dashboard.ts` 的 min/max 是另一套更细的约束，别在两边重复实现。
+const MAX_CARD_W: u64 = 100;
+const MAX_CARD_H: u64 = 4096;
 
 /// 排行榜（列表）卡的高度上限：与数值卡同为 3 行 —— 卡里是 5 行列表，
 /// 高度需求正好落在「2 行不够、3 行正好」。
 /// 🔴 与前端 `stores/dashboard.ts` 的 `MAX_CARD_H_LIST` 同源。
-const MAX_CARD_H_LIST: u64 = 3;
+const MAX_CARD_H_LIST: u64 = 4096;
 
 /// 排行榜卡片 id（高度上限取 MAX_CARD_H_LIST 而不是 MAX_CARD_H 的那几张）
 const LIST_CARDS: [&str; 3] = ["topcpu", "topmem", "topdisk"];
 
 /// 趋势图卡单独放宽的高度上限（行）：折线图越高越好读，3 行太局促。
 /// 🔴 与前端 `stores/dashboard.ts` 的 `MAX_CARD_H_CHART` 同源。
-const MAX_CARD_H_CHART: u64 = 6;
+const MAX_CARD_H_CHART: u64 = 4096;
 
 /// 某张卡的高度上限：趋势图 6 行、排行榜走列表档、其余数值卡 3 行
 fn max_card_h(id: &str) -> u64 {
-    if id == "chart" {
+    if is_chart_card(id) {
         MAX_CARD_H_CHART
     } else if LIST_CARDS.contains(&id) {
         MAX_CARD_H_LIST
     } else {
         MAX_CARD_H
     }
+}
+
+/// 趋势图卡片 id（高度上限取 MAX_CARD_H_CHART）。
+/// 🔴 与前端 `stores/dashboard.ts` 的 `chartKindOf` / `CARD_META` 同源 ——
+/// 那边新增一张趋势卡，这里必须同时加，否则保存布局时会被判成未知卡片。
+const CHART_CARDS: [&str; 3] = ["chart", "chartnet", "chartdisk"];
+
+fn is_chart_card(id: &str) -> bool {
+    CHART_CARDS.contains(&id)
 }
 
 /// 仪表盘配置校验（复用 P1-2 主题校验思路：白名单 + 类型 + 长度）：
@@ -2487,13 +2506,15 @@ fn validate_dashboard_config(cfg: &serde_json::Value) -> Result<(), String> {
     }
     let mut seen = std::collections::HashSet::new();
     for c in cards {
-        // 卡片项兼容两种写法：字符串（最老格式）、{id,w,h}。尺寸是后加的，
-        // 老配置必须一直有效；布局由数组顺序决定，不接受显式坐标。
+        // 卡片项兼容两种写法：字符串（最老格式）、{id,x,y,w,h}。
+        // 🔴 布局从 2026-10-09 起改成**绝对定位的自由布局**，所以现在接受显式坐标：
+        // x 是容器宽度的百分数（0–100）、y 是像素；缺省（老配置）由前端的
+        // autoLayout 统一补上。从前那句「布局由数组顺序决定，不接受显式坐标」已作废。
         let id = match c {
             serde_json::Value::String(s) => s.as_str(),
             serde_json::Value::Object(o) => {
                 for k in o.keys() {
-                    if k != "id" && k != "w" && k != "h" {
+                    if k != "id" && k != "x" && k != "y" && k != "w" && k != "h" {
                         return Err(format!("卡片项含未知字段：{k}"));
                     }
                 }
@@ -2519,6 +2540,24 @@ fn validate_dashboard_config(cfg: &serde_json::Value) -> Result<(), String> {
                 let max_h = max_card_h(id);
                 if !(1..=max_h).contains(&h) {
                     return Err(format!("卡片高度超出范围（1–{max_h}）：{id}"));
+                }
+                // 绝对坐标（可缺省）。只做「是整数 + 量级兜底」，与 w/h 同一口径：
+                // 类型不对属客户端 bug，静默放过会把错误藏起来。
+                if let Some(v) = o.get("x") {
+                    let n = v
+                        .as_u64()
+                        .ok_or_else(|| "卡片横坐标必须是整数".to_string())?;
+                    if n > MAX_CARD_W {
+                        return Err(format!("卡片横坐标超出范围（0–{MAX_CARD_W}）：{id}"));
+                    }
+                }
+                if let Some(v) = o.get("y") {
+                    let n = v
+                        .as_u64()
+                        .ok_or_else(|| "卡片纵坐标必须是整数".to_string())?;
+                    if n > MAX_CARD_H {
+                        return Err(format!("卡片纵坐标超出范围（0–{MAX_CARD_H}）：{id}"));
+                    }
                 }
                 id
             }
@@ -4147,20 +4186,25 @@ mod tests {
         assert!(validate_dashboard_config(&json!({ "cards": ["cpu"], "known": "13" })).is_err());
         assert!(validate_dashboard_config(&json!({ "cards": ["cpu"], "known": 0 })).is_err());
         assert!(validate_dashboard_config(&json!({ "cards": ["cpu"], "known": 99 })).is_err());
-        // 尺寸相关：超范围 / 类型错 / 缺 id / 对象里有未知字段。
-        // 宽度上限 4 —— 这不是人为限制，是栅格本身只有 4 列，跨 5 列会溢出；
-        // 高度上限按卡片类型：数值卡 3 行、趋势图卡 6 行
-        assert!(validate_dashboard_config(&json!({ "cards": [{ "id": "cpu", "w": 5 }] })).is_err());
-        assert!(validate_dashboard_config(&json!({ "cards": [{ "id": "cpu", "h": 4 }] })).is_err());
+        // 尺寸 / 坐标：类型错 / 缺 id / 对象里有未知字段 / 量级越界。
+        // 自由布局下 w/x 是容器宽度百分数（0–100）、h/y 是像素，上限只做量级兜底，
+        // 不再表达布局语义 —— 从前的「宽度上限 4 / 高度上限 3 或 6」随栅格作废。
         assert!(
-            validate_dashboard_config(&json!({ "cards": [{ "id": "chart", "h": 7 }] })).is_err()
+            validate_dashboard_config(
+                &json!({ "cards": [{ "id": "cpu", "x": 10, "y": 0, "w": 50, "h": 88 }] })
+            )
+            .is_ok()
         );
+        assert!(validate_dashboard_config(&json!({ "cards": [{ "id": "cpu", "w": 101 }] })).is_err());
+        assert!(validate_dashboard_config(&json!({ "cards": [{ "id": "cpu", "x": 101 }] })).is_err());
+        assert!(validate_dashboard_config(&json!({ "cards": [{ "id": "cpu", "h": 4097 }] })).is_err());
+        assert!(validate_dashboard_config(&json!({ "cards": [{ "id": "cpu", "y": 4097 }] })).is_err());
         assert!(validate_dashboard_config(&json!({ "cards": [{ "id": "cpu", "w": 0 }] })).is_err());
         assert!(validate_dashboard_config(&json!({ "cards": [{ "id": "cpu", "w": "2" }] })).is_err());
         assert!(validate_dashboard_config(&json!({ "cards": [{ "w": 2 }] })).is_err());
         assert!(validate_dashboard_config(&json!({ "cards": [{ "id": "evil", "w": 2 }] })).is_err());
-        // 坐标不是合法字段：布局由顺序决定，不接受显式位置
-        assert!(validate_dashboard_config(&json!({ "cards": [{ "id": "cpu", "x": 1 }] })).is_err());
+        // 坐标类型必须为整数，字符串不接受
+        assert!(validate_dashboard_config(&json!({ "cards": [{ "id": "cpu", "x": "1" }] })).is_err());
         assert!(validate_dashboard_config(&json!({ "cards": [{ "id": "cpu", "y": "0" }] })).is_err());
         assert!(
             validate_dashboard_config(&json!({ "cards": [{ "id": "cpu", "w": 2 }, "cpu"] }))
