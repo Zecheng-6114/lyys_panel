@@ -408,7 +408,7 @@ onMounted(async () => {
   gap: var(--sp-2);
   /* 上边负偏移吃掉工具栏下边距的双份留白，属刻意为之，保留 */
   margin: -4px 0 var(--sp-2);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
 }
 
@@ -449,7 +449,7 @@ onMounted(async () => {
   margin-left: var(--sp-2);
   padding: 0 var(--sp-2);
   border-radius: var(--radius);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   line-height: 18px;
   vertical-align: middle;
 }

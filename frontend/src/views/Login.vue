@@ -96,7 +96,7 @@ async function submit() {
   }
 }
 .login-brand {
-  font-size: 18px;
+  font-size: var(--fs-lg);
   font-weight: 600;
   letter-spacing: 0.5px;
 }
@@ -105,7 +105,7 @@ async function submit() {
   color: var(--el-text-color-secondary);
 }
 .login-sub {
-  font-size: 13px;
+  font-size: var(--fs-base);
   color: var(--el-text-color-secondary);
   margin: var(--sp-1) 0 var(--sp-5);
 }

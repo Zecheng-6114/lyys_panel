@@ -661,12 +661,12 @@ onUnmounted(() => {
 }
 
 .hint {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
   margin-left: var(--sp-1);
 }
 .section-title {
-  font-size: 14px;
+  font-size: var(--fs-md);
   font-weight: 600;
   /* 原来 20px 上下外距，在 flex 列里会和 gap 叠成双倍间距，故上外距归 0；
      下外距按区块标题统一口径取标尺的 --sp-2。 */

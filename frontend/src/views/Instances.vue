@@ -439,7 +439,7 @@ onMounted(async () => {
   margin-bottom: var(--sp-4);
 }
 .panel-title {
-  font-size: 14px;
+  font-size: var(--fs-md);
   font-weight: 600;
   margin-bottom: var(--sp-2);
 }
@@ -450,7 +450,7 @@ onMounted(async () => {
 }
 .hint-inline {
   color: var(--el-text-color-secondary);
-  font-size: 13px;
+  font-size: var(--fs-base);
   margin-left: var(--sp-2);
 }
 .empty {
@@ -491,7 +491,7 @@ onMounted(async () => {
 }
 .inst-detail {
   color: var(--el-text-color-secondary);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -500,7 +500,7 @@ onMounted(async () => {
   display: flex;
   flex-wrap: wrap;
   gap: var(--sp-3);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-regular);
 }
 .meta-ports {

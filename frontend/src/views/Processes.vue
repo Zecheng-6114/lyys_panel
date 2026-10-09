@@ -166,6 +166,6 @@ onBeforeUnmount(() => {
 <style scoped>
 .dim {
   color: var(--el-text-color-secondary);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 </style>

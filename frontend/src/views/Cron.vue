@@ -407,7 +407,7 @@ onMounted(() => {
 
 <style scoped>
 .hint {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
   margin-left: var(--sp-1);
 }
@@ -420,12 +420,12 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
   padding-left: 64px;
 }
 .section-title {
-  font-size: 14px;
+  font-size: var(--fs-md);
   font-weight: 600;
   /* 父容器不是带 gap 的 flex，标题上方留白得自己带（R4） */
   margin: var(--sp-4) 0 var(--sp-2);
@@ -468,7 +468,7 @@ onMounted(() => {
   overflow: auto;
   font-family: var(--panel-mono);
   font-variant-numeric: tabular-nums;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-all;

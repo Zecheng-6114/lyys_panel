@@ -185,7 +185,7 @@ async function upload() {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  font-size: 13px;
+  font-size: var(--fs-base);
 }
 .label {
   color: var(--el-text-color-secondary);
@@ -194,7 +194,7 @@ async function upload() {
 }
 .err {
   color: var(--el-text-color-secondary);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 .dot-wrap {
   display: inline-flex;
@@ -207,7 +207,7 @@ async function upload() {
   gap: var(--sp-2);
 }
 .section-title {
-  font-size: 14px;
+  font-size: var(--fs-md);
   font-weight: 600;
   /* 父容器不是带 gap 的 flex，标题上方留白得自己带（R4） */
   margin: var(--sp-4) 0 var(--sp-2);
@@ -219,7 +219,7 @@ async function upload() {
   margin-bottom: var(--sp-3);
 }
 .filename {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
   max-width: 320px;
   overflow: hidden;
@@ -227,7 +227,7 @@ async function upload() {
   white-space: nowrap;
 }
 .hint {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
 }
 </style>

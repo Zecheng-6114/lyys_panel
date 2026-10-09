@@ -1018,7 +1018,7 @@ onMounted(() => {
 
 .card {
   background: var(--panel-card-bg, var(--el-bg-color));
-  border-radius: var(--radius, 8px);
+  border-radius: var(--radius);
   /* 纵向内距比全局卡片再紧一档：设置页两列卡片里总有一列特别长，
      这里省下的 8px 直接决定底部那颗按钮落不落在折线上。 */
   padding: var(--sp-3) var(--sp-5);
@@ -1055,12 +1055,12 @@ onMounted(() => {
   margin-bottom: var(--sp-1);
 }
 .card-title {
-  font-size: 14px;
+  font-size: var(--fs-md);
   font-weight: 600;
   margin-bottom: var(--sp-3);
 }
 .card-sub {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
   margin-bottom: var(--sp-2);
   line-height: 1.6;
@@ -1073,7 +1073,7 @@ onMounted(() => {
   max-width: 480px;
 }
 .key-hint {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
   margin-top: var(--sp-1);
   display: flex;
@@ -1092,7 +1092,7 @@ onMounted(() => {
 .settings .form .row > label {
   flex: none;
   width: 96px;
-  font-size: 13px;
+  font-size: var(--fs-base);
   color: var(--el-text-color-secondary);
 }
 .settings .form .row > .el-slider,
@@ -1106,13 +1106,13 @@ onMounted(() => {
   gap: var(--sp-2);
 }
 .group {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 500;
   color: var(--el-text-color-primary);
   margin: var(--sp-1) 0 var(--sp-3);
 }
 .hint {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
   margin-bottom: var(--sp-3);
 }
@@ -1129,7 +1129,7 @@ onMounted(() => {
   align-items: center;
   gap: var(--sp-3);
   padding: var(--sp-2) var(--sp-3);
-  border-radius: var(--radius, 6px);
+  border-radius: var(--radius);
   /* 与面板同一种玻璃：摊开主题的不透明度 + 同一份模糊（缺省 100% 时等价原值） */
   background: color-mix(
     in srgb,
@@ -1138,7 +1138,7 @@ onMounted(() => {
   );
   -webkit-backdrop-filter: var(--panel-card-blur, blur(0px));
   backdrop-filter: var(--panel-card-blur, blur(0px));
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 .face-row + .face-row {
   margin-top: var(--sp-1);
@@ -1168,7 +1168,7 @@ onMounted(() => {
   margin-top: var(--sp-1);
 }
 .bg-adjust-item > span {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
   font-variant-numeric: tabular-nums;
 }

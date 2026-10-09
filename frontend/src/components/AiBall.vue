@@ -780,11 +780,11 @@ function applyTool(m: Msg, t: any) {
   background: var(--el-color-primary);
 }
 .title {
-  font-size: 13px;
+  font-size: var(--fs-base);
   font-weight: 600;
 }
 .model {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--el-text-color-secondary);
   max-width: 132px;
   overflow: hidden;
@@ -841,12 +841,12 @@ function applyTool(m: Msg, t: any) {
   text-align: center;
 }
 .welcome-title {
-  font-size: 14px;
+  font-size: var(--fs-md);
   font-weight: 600;
   margin-bottom: var(--sp-2);
 }
 .welcome-sub {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.6;
   color: var(--el-text-color-secondary);
 }
@@ -871,7 +871,7 @@ function applyTool(m: Msg, t: any) {
   backdrop-filter: var(--panel-card-blur, blur(0px));
   color: var(--el-text-color-primary);
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   padding: var(--sp-1) var(--sp-3);
   border-radius: var(--radius);
   box-shadow: var(--panel-card-shadow);
@@ -927,7 +927,7 @@ function applyTool(m: Msg, t: any) {
 }
 .notice {
   margin-top: var(--sp-4);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.6;
   color: var(--el-text-color-regular);
   background: var(--el-bg-color);
@@ -951,7 +951,7 @@ function applyTool(m: Msg, t: any) {
   max-width: 86%;
   padding: var(--sp-2) var(--sp-3);
   border-radius: var(--radius);
-  font-size: 13px;
+  font-size: var(--fs-base);
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
@@ -959,7 +959,7 @@ function applyTool(m: Msg, t: any) {
   color: var(--el-bg-color);
 }
 .answer {
-  font-size: 13px;
+  font-size: var(--fs-base);
   line-height: 1.7;
   word-break: break-word;
 }
@@ -981,7 +981,7 @@ function applyTool(m: Msg, t: any) {
   background: transparent;
   color: var(--el-text-color-secondary);
   font: inherit;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   cursor: pointer;
   padding: 2px var(--sp-1);
   border-radius: var(--radius);
@@ -991,7 +991,7 @@ function applyTool(m: Msg, t: any) {
   color: var(--el-text-color-primary);
 }
 .err {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.6;
   color: var(--el-text-color-primary);
   background: var(--el-bg-color);
@@ -1014,7 +1014,7 @@ function applyTool(m: Msg, t: any) {
   padding: var(--sp-1) 0;
   cursor: pointer;
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
   text-align: left;
 }
@@ -1035,7 +1035,7 @@ function applyTool(m: Msg, t: any) {
 .row-meta {
   flex: none;
   color: var(--el-text-color-placeholder);
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 /* 承载实义内容的次要文本用 regular，不用 secondary：
    EP 默认 secondary 在 fill-color-light 上只有 2.87:1（浅色）/ 4.13:1（深色），
@@ -1047,7 +1047,7 @@ function applyTool(m: Msg, t: any) {
   background: var(--el-bg-color);
   box-shadow: var(--panel-card-shadow);
   color: var(--el-text-color-regular);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.7;
   max-height: 220px;
   overflow-y: auto;
@@ -1073,7 +1073,7 @@ function applyTool(m: Msg, t: any) {
 }
 /* 结果首行预览是实义内容（如"搜索结果（通道 bing，共 6 条）"），用 secondary 而非 placeholder */
 .tpreview {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   line-height: 1.6;
   color: var(--el-text-color-secondary);
   overflow: hidden;
@@ -1085,7 +1085,7 @@ function applyTool(m: Msg, t: any) {
   padding-top: var(--sp-1);
 }
 .tlabel {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--el-text-color-placeholder);
   margin: var(--sp-2) 0 var(--sp-1);
 }
@@ -1094,7 +1094,7 @@ function applyTool(m: Msg, t: any) {
   padding: var(--sp-2);
   background: var(--el-fill-color-light);
   border-radius: var(--radius);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   line-height: 1.6;
   color: var(--el-text-color-regular);
   max-height: 180px;
@@ -1128,7 +1128,7 @@ function applyTool(m: Msg, t: any) {
 .md :deep(h5),
 .md :deep(h6) {
   margin: var(--sp-3) 0 var(--sp-2);
-  font-size: 13px;
+  font-size: var(--fs-base);
   font-weight: 600;
 }
 .md :deep(ul),
@@ -1144,9 +1144,9 @@ function applyTool(m: Msg, t: any) {
    只有深一档才能在两处都成形，fill-color-light 落在页底色上等于没底。 */
 .md :deep(code) {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   background: var(--el-fill-color);
-  border-radius: 3px;
+  border-radius: var(--radius);
   padding: 1px var(--sp-1);
 }
 .md :deep(.md-pre) {
@@ -1161,7 +1161,7 @@ function applyTool(m: Msg, t: any) {
 .md :deep(.md-pre code) {
   background: none;
   padding: 0;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.6;
   white-space: pre;
 }
@@ -1170,7 +1170,7 @@ function applyTool(m: Msg, t: any) {
   position: absolute;
   top: 2px;
   right: var(--sp-2);
-  font-size: 10px;
+  font-size: var(--fs-xs);
   color: var(--el-text-color-placeholder);
 }
 .md :deep(blockquote) {
@@ -1206,7 +1206,7 @@ function applyTool(m: Msg, t: any) {
   background: var(--el-bg-color-overlay);
   color: var(--el-text-color-regular);
   font: inherit;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   padding: var(--sp-1) var(--sp-3);
   border-radius: var(--radius);
   /* 浮在消息区之上的按钮，用浮层档（同一个面板里，芯片等贴面块才用 1 档） */
@@ -1228,7 +1228,7 @@ function applyTool(m: Msg, t: any) {
   gap: var(--sp-2);
 }
 .hint {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--el-text-color-placeholder);
 }
 

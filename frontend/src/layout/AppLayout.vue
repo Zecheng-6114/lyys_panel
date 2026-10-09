@@ -443,7 +443,7 @@ async function logout() {
 }
 /* 侧栏与内容区之间不再有内凹圆角：两块各成圆角面板，中间隔着外框那条缝 */
 .brand {
-  font-size: 15px;
+  font-size: var(--fs-md);
   font-weight: 600;
   letter-spacing: 0.5px;
   padding: 0 var(--sp-2) var(--sp-3);
@@ -480,7 +480,7 @@ async function logout() {
    所以不用分隔线，分组感由标题留白承担 */
 .side-menu :deep(.el-menu-item-group__title) {
   padding: var(--sp-3) var(--sp-3) var(--sp-1);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   letter-spacing: 0.08em;
   line-height: 1.4;
@@ -497,7 +497,7 @@ async function logout() {
   margin: var(--sp-1) 0;
   padding: 0 var(--sp-3);
   border-radius: var(--radius);
-  font-size: 13px;
+  font-size: var(--fs-base);
   transition: background-color 160ms ease-out;
 }
 .side-menu :deep(.el-menu-item:hover) {
@@ -532,7 +532,7 @@ async function logout() {
 .version {
   flex: none;
   padding: var(--sp-2) 0 0 var(--sp-3);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
   user-select: none;
 }
@@ -560,7 +560,7 @@ async function logout() {
   padding: 0;
   width: 32px;
   height: 32px;
-  font-size: 16px;
+  font-size: var(--fs-lg);
   line-height: 1;
   color: var(--el-text-color-primary);
   background: transparent;
@@ -580,7 +580,7 @@ async function logout() {
   width: 16px;
   height: 2px;
   background: currentColor;
-  border-radius: 1px;
+  border-radius: var(--radius);
 }
 .menu-btn .bars::before,
 .menu-btn .bars::after {
@@ -590,7 +590,7 @@ async function logout() {
   width: 16px;
   height: 2px;
   background: currentColor;
-  border-radius: 1px;
+  border-radius: var(--radius);
 }
 .menu-btn .bars::before {
   top: -6px;
@@ -718,7 +718,7 @@ async function logout() {
   /* 纵向只有 4：这枚小标签要和顶栏文字贴在一起读，给它 12 就把标题顶下去一截
      （横向仍取标尺的 8）。2px 那个裸数是漏在标尺外的，改回 4 的倍数。 */
   padding: var(--sp-1) var(--sp-2);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 500;
   letter-spacing: 0.04em;
   color: var(--el-text-color-secondary);
@@ -728,7 +728,7 @@ async function logout() {
   white-space: nowrap;
 }
 .page-title {
-  font-size: 16px;
+  font-size: var(--fs-lg);
   font-weight: 500;
   /* 顶栏是横向 flex，宽度不够时默认会把文字折行 —— 标题会当场断成「系统设/置」
      两行、把顶栏撑高。改成整行不换行、超出用省略号：收缩的压力落在标题自己

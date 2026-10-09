@@ -575,7 +575,7 @@ onMounted(() => {
 
 <style scoped>
 .pathbar {
-  font-size: 13px;
+  font-size: var(--fs-base);
   font-family: var(--panel-mono);
   font-variant-numeric: tabular-nums;
   display: flex;
@@ -606,7 +606,7 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
   white-space: nowrap;
 }
@@ -637,7 +637,7 @@ onMounted(() => {
   align-items: center;
   gap: var(--sp-2);
   margin-top: var(--sp-2);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
 }
 .statusbar .dot {
@@ -653,11 +653,11 @@ onMounted(() => {
 .editor :deep(.el-textarea__inner) {
   font-family: var(--panel-mono);
   font-variant-numeric: tabular-nums;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.6;
 }
 .perm-hint {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
   padding-left: 72px;
 }

@@ -211,6 +211,33 @@
   --sp-5: 20px;
   --sp-6: 24px;
 
+  /* ---------- 字号标尺 ----------
+     与间距标尺同一个病、同一个治法：此前全前端有 111 处 font-size 硬编码、
+     散成 8 个值（10 / 11 / 12 / 13 / 14 / 15 / 16 / 18 / 20），其中 12px 用了
+     60 次、13px 用了 20 次 —— 这两档肉眼几乎分不出，混着用就读不出层级，
+     这正是「界面不统一」的直接来源。
+
+     收敛到 7 档，每档用途固定、相邻档至少差 1px 且语义不同：
+       xs   11px  角标 / 次要说明（最小的可读字号，再小就不该出现）
+       sm   12px  表单标签 / 表格单元 / 卡片列表行 —— 全站最常用的一档
+       base 13px  正文默认
+       md   14px  强调正文（工具栏按钮、对话框标题）
+       lg   16px  区块标题
+       xl   20px  页面标题
+     数值另有一档 28px（大号读数），由卡片自己按格高插值给出，不在此列。
+
+     改字号先来这里换档位，别在页面里写裸像素。 */
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-base: 13px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 20px;
+  /* 大号读数（跨 2 行以上的卡片数值）。单列一档而不是让卡片自己按格高插值：
+     插值会让同一排相邻卡片各拿一个字号（20/23/26/28px），一排看过去像几种
+     组件拼在一起 —— 这正是「卡片乱」的原因之一。两档之后同排必同号。 */
+  --fs-2xl: 28px;
+
   /* 顶栏高度提到全局：列表页表格的高度要用它反推（见 --panel-table-height），
      而表格高度的定义在全局样式里，读不到 AppLayout scoped 块里的局部变量。 */
   --panel-topbar-h: 52px;
@@ -392,6 +419,23 @@ body {
 .el-picker-panel,
 .el-select-dropdown,
 .el-dropdown-menu {
+  border-radius: var(--radius);
+}
+/* 上一条兜底的「第二批」：EP 对用得少的组件直接写死像素，没走任何圆角变量，
+ * 于是一律漏在上面那串清单之外。清单是按构建产物逐条核出来的（不是凭印象列的）：
+ *   表格筛选浮层 2px / 页签「+」按钮 3px / 页签键盘焦点圈 3px /
+ *   取色器触发器 4px 与它的面板 4px / 色相与透明度滑杆的滑块 1px
+ * —— 1–4px 落在 6px 的体系里，读起来就是方角；它们又都在本面板的页面里真的出现
+ * （实例页有页签、设置页有取色器、文件页有表格）。
+ * 🔴 只在「暴露在外的角」上改：分组控件中间那些 border-radius:0 是同心裁切，
+ * 外圈的角已经由 --el-border-radius-base（= --radius）给过了，别去动。 */
+.el-table-filter,
+.el-tabs__new-tab,
+.el-tabs__item:focus-visible,
+.el-color-picker__trigger,
+.el-color-picker-panel.is-border,
+.el-color-hue-slider__thumb,
+.el-color-alpha-slider__thumb {
   border-radius: var(--radius);
 }
 
@@ -846,7 +890,7 @@ body {
   /* 字号：EP 的 size="small" 给的是 12px，中文在这个字号下笔画糊成一团，
      整张表比旁边的卡片「轻」一档 —— 列表页的主内容反而最不清楚。
      抬到 13px，列内距不动（仍是 8px 纵向），一屏照样 20 行上下。 */
-  font-size: 13px;
+  font-size: var(--fs-base);
 }
 /* 表格是同一种「页面面板块」：7 个列表页的主内容都是它，若它不透明，
    上面那条外壳规则在这些页面上等于白做（实测就是这个现象：日志页看得见磨砂，
@@ -1129,7 +1173,7 @@ body {
 /* 通用小按钮（顶栏操作、cron 预设等）：浅灰底、无边框 */
 .mini-btn {
   font: inherit;
-  font-size: 13px;
+  font-size: var(--fs-base);
   color: var(--el-text-color-primary);
   /* 与默认按钮同一档：摊开主题的不透明度（缺省 100% = 原值）。
      !important 的理由同 .el-button--default —— EP 样式块在后面。 */
@@ -1156,7 +1200,7 @@ body {
 }
 /* 紧凑尺寸（趋势图时间窗、对话框内等空间受限场景） */
 .mini-btn--sm {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   padding: var(--sp-1) var(--sp-2);
 }
 

@@ -258,7 +258,7 @@ onMounted(load);
 /* .dot / .dot-on / .dot-off 走全局工具类（styles/theme.css），
    本地这份与全局逐条重复，删掉以免两处各自漂移 */
 .hint {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
 }
 </style>

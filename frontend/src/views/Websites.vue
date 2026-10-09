@@ -408,12 +408,12 @@ onMounted(load);
 
 <style scoped>
 .backend {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
 }
 .mono {
   font-family: var(--panel-mono);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 .target {
   display: inline-block;
@@ -436,17 +436,17 @@ onMounted(load);
   text-align: center;
 }
 .empty-title {
-  font-size: 14px;
+  font-size: var(--fs-md);
   margin-bottom: var(--sp-2);
 }
 .empty-desc {
-  font-size: 13px;
+  font-size: var(--fs-base);
   color: var(--el-text-color-secondary);
   line-height: 1.7;
   margin-bottom: var(--sp-4);
 }
 .hint {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
   line-height: 1.7;
 }
@@ -461,11 +461,11 @@ onMounted(load);
   -webkit-backdrop-filter: var(--panel-card-blur, blur(0px));
   backdrop-filter: var(--panel-card-blur, blur(0px));
   padding: 1px var(--sp-1);
-  border-radius: 4px;
+  border-radius: var(--radius);
 }
 .inline-hint {
   margin-left: var(--sp-3);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
 }
 </style>

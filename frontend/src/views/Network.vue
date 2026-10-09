@@ -160,7 +160,7 @@ onMounted(load);
 
 <style scoped>
 .fam {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--el-text-color-secondary);
   margin-left: var(--sp-1);
 }
@@ -172,11 +172,11 @@ onMounted(load);
 .dnsrow {
   font-family: var(--panel-mono);
   font-variant-numeric: tabular-nums;
-  font-size: 13px;
+  font-size: var(--fs-base);
   padding: var(--sp-1) 0;
 }
 .empty {
   color: var(--el-text-color-secondary);
-  font-size: 13px;
+  font-size: var(--fs-base);
 }
 </style>

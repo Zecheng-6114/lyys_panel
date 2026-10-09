@@ -323,7 +323,7 @@ onBeforeUnmount(() => {
   margin-bottom: var(--sp-2);
 }
 .section-title {
-  font-size: 14px;
+  font-size: var(--fs-md);
   font-weight: 600;
   margin: 0 0 var(--sp-2);
 }
@@ -350,7 +350,7 @@ onBeforeUnmount(() => {
   color: var(--el-text-color-primary);
   border-radius: var(--radius);
   /* 内距不在这里覆写：统一走全局 .mini-btn 的 --sp-1/--sp-3 口径（R9） */
-  font-size: 12px;
+  font-size: var(--fs-sm);
   cursor: pointer;
   flex: none;
 }
@@ -371,7 +371,7 @@ onBeforeUnmount(() => {
   border-radius: var(--radius);
   /* 与 .log-pane 同款：白 panel 内的浅灰输出块，靠同一档投影与父块分层 */
   box-shadow: var(--panel-shadow-1);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.6;
   overflow: auto;
   max-height: 420px;
@@ -388,7 +388,7 @@ onBeforeUnmount(() => {
   border-radius: var(--radius);
   /* 与 .unit-pre 同款：白 panel 内的浅灰输出块，靠同一档投影与父块分层 */
   box-shadow: var(--panel-shadow-1);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.6;
 }
 .log-line {
@@ -397,7 +397,7 @@ onBeforeUnmount(() => {
 }
 .hint {
   margin-top: var(--sp-2);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
 }
 .dot-wrap {

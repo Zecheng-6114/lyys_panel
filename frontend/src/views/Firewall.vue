@@ -200,12 +200,12 @@ onMounted(load);
 
 <style scoped>
 .backend {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
 }
 .act {
   font-family: var(--panel-mono);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 .act-allow {
   color: var(--el-color-success);
@@ -214,7 +214,7 @@ onMounted(load);
   color: var(--el-color-danger);
 }
 .notice {
-  font-size: 13px;
+  font-size: var(--fs-base);
   color: var(--el-color-warning);
   padding: var(--sp-2) 2px;
 }
@@ -225,11 +225,11 @@ onMounted(load);
   text-align: center;
 }
 .empty-title {
-  font-size: 14px;
+  font-size: var(--fs-md);
   margin-bottom: var(--sp-2);
 }
 .empty-desc {
-  font-size: 13px;
+  font-size: var(--fs-base);
   color: var(--el-text-color-secondary);
   line-height: 1.7;
 }
@@ -244,10 +244,10 @@ onMounted(load);
   -webkit-backdrop-filter: var(--panel-card-blur, blur(0px));
   backdrop-filter: var(--panel-card-blur, blur(0px));
   padding: 1px var(--sp-1);
-  border-radius: 4px;
+  border-radius: var(--radius);
 }
 .hint {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
   padding-left: 72px;
 }

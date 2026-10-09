@@ -216,7 +216,7 @@ onMounted(async () => {
   overflow: auto;
   font-family: var(--panel-mono);
   font-variant-numeric: tabular-nums;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-all;

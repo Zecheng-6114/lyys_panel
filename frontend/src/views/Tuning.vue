@@ -390,7 +390,7 @@ onMounted(load);
   gap: var(--sp-2);
 }
 .hint {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
 }
 .spacer {
@@ -402,7 +402,7 @@ onMounted(load);
   gap: 2px;
   padding: var(--sp-2) var(--sp-3);
   border-radius: var(--radius);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   background: color-mix(
     in srgb,
     var(--el-fill-color-light) var(--panel-surface-opacity, 100%),
@@ -425,7 +425,7 @@ onMounted(load);
 }
 .panel-title {
   margin: 0 0 var(--sp-2);
-  font-size: 13px;
+  font-size: var(--fs-base);
   font-weight: 600;
   color: var(--el-text-color-primary);
 }
@@ -446,23 +446,23 @@ onMounted(load);
   gap: var(--sp-2);
 }
 .row-title {
-  font-size: 13px;
+  font-size: var(--fs-base);
   color: var(--el-text-color-primary);
 }
 .row-key,
 .row-effect code {
   font-family: var(--panel-mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--el-text-color-secondary);
 }
 .row-cur {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-regular);
   font-variant-numeric: tabular-nums;
 }
 .row-effect {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.6;
   color: var(--el-text-color-secondary);
 }
@@ -479,7 +479,7 @@ onMounted(load);
   width: 240px;
 }
 .row-tip {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--el-text-color-secondary);
 }
 .swap-list {
@@ -489,7 +489,7 @@ onMounted(load);
   display: flex;
   flex-direction: column;
   gap: 2px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-variant-numeric: tabular-nums;
 }
 .swap-list li {
@@ -502,7 +502,7 @@ onMounted(load);
 .empty {
   padding: var(--sp-4);
   text-align: center;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
 }
 </style>

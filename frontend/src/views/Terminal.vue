@@ -408,7 +408,7 @@ onBeforeUnmount(() => {
 }
 .tip {
   color: var(--el-text-color-secondary);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 .tabbar {
   display: flex;
@@ -452,7 +452,7 @@ onBeforeUnmount(() => {
   -webkit-backdrop-filter: var(--panel-card-blur, blur(0px));
   backdrop-filter: var(--panel-card-blur, blur(0px));
   color: var(--el-text-color-regular);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
@@ -502,7 +502,7 @@ onBeforeUnmount(() => {
   width: 18px;
   height: 18px;
   border-radius: var(--radius);
-  font-size: 14px;
+  font-size: var(--fs-md);
   line-height: 1;
   color: var(--el-text-color-secondary);
 }

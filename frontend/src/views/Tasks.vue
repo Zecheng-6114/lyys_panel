@@ -245,7 +245,7 @@ onBeforeUnmount(() => {
    这里不再局部覆写 —— 局部改法会让同一类工具栏在页面之间松紧不一致。 */
 .hint {
   color: var(--el-text-color-secondary);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 .detail {
   display: flex;
@@ -257,7 +257,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: var(--sp-3);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
 }
 .output {
@@ -265,11 +265,11 @@ onBeforeUnmount(() => {
   margin: 0;
   overflow: auto;
   padding: var(--sp-3) var(--sp-4);
-  border-radius: 6px;
+  border-radius: var(--radius);
   background: var(--el-fill-color-light);
   color: var(--el-text-color-primary);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-all;

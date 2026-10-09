@@ -359,7 +359,7 @@ onMounted(() => {
 
 <style scoped>
 .hint {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--el-text-color-secondary);
   margin-left: var(--sp-1);
 }
