@@ -18,7 +18,11 @@ pub struct Db {
     pool: Pool<SqliteConnectionManager>,
 }
 
-/// 监控历史采样点
+/// 监控历史采样点。
+///
+/// `disk_read/disk_write` 是 `Option`：迁移（0014）之前的历史行没有落库过磁盘
+/// I/O，读出来是 NULL。**不能退化成 0** —— 那会把「没有采集」伪装成
+/// 「当时磁盘 I/O 为零」。序列化成 null，前端据此断开折线。
 #[derive(Serialize)]
 pub struct MetricPoint {
     pub ts: i64,
@@ -26,6 +30,8 @@ pub struct MetricPoint {
     pub mem_used: i64,
     pub net_in: i64,
     pub net_out: i64,
+    pub disk_read: Option<i64>,
+    pub disk_write: Option<i64>,
 }
 
 /// 用户行（登录校验用，含密码字段，绝不外泄给 API 响应）
@@ -210,6 +216,11 @@ impl Db {
             "0013_ai_trace.sql",
             include_str!("../migrations/0013_ai_trace.sql"),
         ),
+        (
+            14,
+            "0014_metrics_disk_io.sql",
+            include_str!("../migrations/0014_metrics_disk_io.sql"),
+        ),
     ];
 
     /// 按版本号升序执行未应用的迁移。
@@ -247,6 +258,52 @@ impl Db {
             tx.commit()
                 .with_context(|| format!("提交迁移 {name} 失败"))?;
             tracing::info!("已应用数据库迁移 {name}（版本 {ver}）");
+        }
+        Self::repair_columns(&conn)?;
+        Ok(())
+    }
+
+    /// 结构自愈：确保「某版本之后应当存在的列」真的在表里。
+    ///
+    /// 为什么需要：版本号是迁移事务里独立写入的一行，而 `ALTER TABLE` 是 DDL。
+    /// 一旦库文件被换掉 / 回滚成更早的快照而 `schema_version` 仍保留较新的版本
+    /// （实测 3800 测试库就出现过：版本记到 14，`metrics` 却没有 `disk_read`），
+    /// 启动时版本号对得上就跳过迁移，而新代码每 2 秒写一次新列 → 采样全部失败，
+    /// 日志被 `table metrics has no column named disk_read` 刷屏。
+    ///
+    /// 这里按「列是否真的存在」补齐，与迁移是否被跳过无关。代价是启动时
+    /// 每条 6 次 `PRAGMA table_info`，可忽略；换来的是一条自愈路径，
+    /// 不必再靠人工 `ALTER TABLE` 救场。
+    fn repair_columns(conn: &rusqlite::Connection) -> Result<()> {
+        /// (表, 列, 类型) —— 只列「加了之后必须存在」的列，与迁移文件一一对应
+        const EXPECTED: &[(&str, &str, &str)] = &[
+            ("metrics", "disk_read", "INTEGER"),
+            ("metrics", "disk_write", "INTEGER"),
+            ("metrics_hourly", "disk_read_avg", "INTEGER"),
+            ("metrics_hourly", "disk_read_max", "INTEGER"),
+            ("metrics_hourly", "disk_write_avg", "INTEGER"),
+            ("metrics_hourly", "disk_write_max", "INTEGER"),
+        ];
+        for (table, column, ty) in EXPECTED {
+            // 表本身不存在（老库还没建过）时交给迁移处理，这里跳过
+            let exists: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                [table],
+                |r| r.get(0),
+            )?;
+            if exists == 0 {
+                continue;
+            }
+            let has_col: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                rusqlite::params![table, column],
+                |r| r.get(0),
+            )?;
+            if has_col == 0 {
+                conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {ty}"))
+                    .with_context(|| format!("补齐缺失的列 {table}.{column} 失败"))?;
+                tracing::warn!("已补齐缺失的列 {table}.{column}（库结构曾与版本号不一致）");
+            }
         }
         Ok(())
     }
@@ -692,8 +749,17 @@ impl Db {
     pub fn insert_metric(&self, p: &crate::monitor::Snapshot) -> Result<()> {
         let conn = self.pool.get().context("获取数据库连接失败")?;
         conn.execute(
-            "INSERT INTO metrics (ts, cpu, mem_used, net_in, net_out) VALUES (?1, ?2, ?3, ?4, ?5)",
-            (p.ts, p.cpu, p.mem_used, p.net_in_per_sec, p.net_out_per_sec),
+            "INSERT INTO metrics (ts, cpu, mem_used, net_in, net_out, disk_read, disk_write)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            (
+                p.ts,
+                p.cpu,
+                p.mem_used,
+                p.net_in_per_sec,
+                p.net_out_per_sec,
+                p.disk_read_per_sec,
+                p.disk_write_per_sec,
+            ),
         )?;
         Ok(())
     }
@@ -702,7 +768,7 @@ impl Db {
     pub fn recent_metrics(&self, limit: i64) -> Result<Vec<MetricPoint>> {
         let conn = self.pool.get().context("获取数据库连接失败")?;
         let mut stmt = conn.prepare(
-            "SELECT ts, cpu, mem_used, net_in, net_out FROM metrics
+            "SELECT ts, cpu, mem_used, net_in, net_out, disk_read, disk_write FROM metrics
              ORDER BY ts DESC LIMIT ?1",
         )?;
         let mut rows = stmt
@@ -713,6 +779,8 @@ impl Db {
                     mem_used: row.get(2)?,
                     net_in: row.get(3)?,
                     net_out: row.get(4)?,
+                    disk_read: row.get(5)?,
+                    disk_write: row.get(6)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -729,15 +797,33 @@ impl Db {
         let conn = self.pool.get().context("获取数据库连接失败")?;
         conn.execute_batch("BEGIN")?;
         let r = (|| -> Result<()> {
+            // 磁盘两列用 COALESCE 兜住：迁移前的小时桶这两列是 NULL，
+            // 而 INSERT OR REPLACE 会把整行换成新值 —— 若新聚合里磁盘是 NULL，
+            // 就会把已经回填好的数字抹回 NULL。COALESCE(新, 旧) 保证只前进不后退。
+            // MAX() 的 NULL 语义正好合用：SQLite 的 MAX 忽略 NULL、
+            // 全为 NULL 时才返回 NULL，故「聚合里无磁盘数据」不会污染已有值。
             conn.execute(
                 "INSERT OR REPLACE INTO metrics_hourly
                      (hour_ts, cpu_avg, cpu_max, mem_used_avg, mem_used_max,
-                      net_in_avg, net_in_max, net_out_avg, net_out_max)
+                      net_in_avg, net_in_max, net_out_avg, net_out_max,
+                      disk_read_avg, disk_read_max, disk_write_avg, disk_write_max)
                  SELECT ts - (ts % 3600),
                         AVG(cpu), MAX(cpu),
                         AVG(mem_used), MAX(mem_used),
                         AVG(net_in), MAX(net_in),
-                        AVG(net_out), MAX(net_out)
+                        AVG(net_out), MAX(net_out),
+                        COALESCE(CAST(AVG(disk_read) AS INTEGER),
+                                 (SELECT m.disk_read_avg FROM metrics_hourly m
+                                   WHERE m.hour_ts = metrics.ts - (metrics.ts % 3600))),
+                        COALESCE(MAX(disk_read),
+                                 (SELECT m.disk_read_max FROM metrics_hourly m
+                                   WHERE m.hour_ts = metrics.ts - (metrics.ts % 3600))),
+                        COALESCE(CAST(AVG(disk_write) AS INTEGER),
+                                 (SELECT m.disk_write_avg FROM metrics_hourly m
+                                   WHERE m.hour_ts = metrics.ts - (metrics.ts % 3600))),
+                        COALESCE(MAX(disk_write),
+                                 (SELECT m.disk_write_max FROM metrics_hourly m
+                                   WHERE m.hour_ts = metrics.ts - (metrics.ts % 3600)))
                  FROM metrics WHERE ts < ?1 GROUP BY 1",
                 [raw_before],
             )?;
@@ -756,6 +842,44 @@ impl Db {
             }
         }
         Ok(())
+    }
+
+    /// 一次性回填：把**仍然留在原始表里**的采样按小时重新聚合出磁盘 I/O，
+    /// 补进 metrics_hourly 的 disk_* 四列。
+    ///
+    /// 为什么需要：0014 只加了列，此前的小时桶磁盘列是 NULL，而原始数据只保留
+    /// 7 天 —— 那段仍在本地的历史若不在被 prune 之前补一次，就会永久空着。
+    /// 只能补「现在还在原始表里」的部分，更早的已经在历史滚动的过程中删掉了，
+    /// 物理上无法重建（前端对 NULL 断线，正好表达这一点）。
+    ///
+    /// 幂等：可重复执行；每次启动调一次，代价是一条按小时聚合的 SQL。
+    /// 返回被更新的行数，便于日志与测试断言。
+    pub fn backfill_disk_hourly(&self) -> Result<usize> {
+        let conn = self.pool.get().context("获取数据库连接失败")?;
+        // 用 UPDATE 而不是 INSERT OR REPLACE：回填只该补磁盘四列，不得顺手把
+        // cpu / mem / net 按「磁盘有效行的子集」重算一遍 —— 那是在改历史数据，
+        // 中间那些磁盘为 NULL 的旧样本会被丢掉。只动该动的那四列。
+        // 子查询限定在「原始表里仍有磁盘数据的小时」，避免白扫一遍全表。
+        let n = conn.execute(
+            "WITH disk_hours AS (
+                 SELECT ts - (ts % 3600) AS hour_ts,
+                        CAST(AVG(disk_read)  AS INTEGER) AS read_avg,
+                        MAX(disk_read)  AS read_max,
+                        CAST(AVG(disk_write) AS INTEGER) AS write_avg,
+                        MAX(disk_write) AS write_max
+                 FROM metrics
+                 WHERE disk_read IS NOT NULL
+                 GROUP BY 1
+             )
+             UPDATE metrics_hourly
+                SET disk_read_avg  = (SELECT d.read_avg  FROM disk_hours d WHERE d.hour_ts = metrics_hourly.hour_ts),
+                    disk_read_max  = (SELECT d.read_max  FROM disk_hours d WHERE d.hour_ts = metrics_hourly.hour_ts),
+                    disk_write_avg = (SELECT d.write_avg FROM disk_hours d WHERE d.hour_ts = metrics_hourly.hour_ts),
+                    disk_write_max = (SELECT d.write_max FROM disk_hours d WHERE d.hour_ts = metrics_hourly.hour_ts)
+              WHERE hour_ts IN (SELECT hour_ts FROM disk_hours)",
+            [],
+        )?;
+        Ok(n)
     }
 
     /// 历史查询（1.2：自动按时间跨度选表）。
@@ -781,14 +905,18 @@ impl Db {
         let sql = if from >= raw_from {
             // 平均是 REAL，整数字段要 CAST 回 INTEGER —— rusqlite 不做隐式转换，
             // 直接把 REAL 读成 i64 会报 InvalidColumnType。
+            // 磁盘两列同样要 CAST（AVG 返回 REAL），且保持 NULL 可空：老行为 NULL，
+            // 序列化成 null 让前端断线，而不是画成 0。
             "SELECT MIN(ts), AVG(cpu), CAST(AVG(mem_used) AS INTEGER),
-                    CAST(AVG(net_in) AS INTEGER), CAST(AVG(net_out) AS INTEGER)
+                    CAST(AVG(net_in) AS INTEGER), CAST(AVG(net_out) AS INTEGER),
+                    CAST(AVG(disk_read) AS INTEGER), CAST(AVG(disk_write) AS INTEGER)
              FROM metrics
              WHERE ts >= ?1 AND ts <= ?2
              GROUP BY (ts - ?1) / ?3 ORDER BY 1"
         } else {
             "SELECT MIN(hour_ts), AVG(cpu_avg), CAST(AVG(mem_used_avg) AS INTEGER),
-                    CAST(AVG(net_in_avg) AS INTEGER), CAST(AVG(net_out_avg) AS INTEGER)
+                    CAST(AVG(net_in_avg) AS INTEGER), CAST(AVG(net_out_avg) AS INTEGER),
+                    CAST(AVG(disk_read_avg) AS INTEGER), CAST(AVG(disk_write_avg) AS INTEGER)
              FROM metrics_hourly
              WHERE hour_ts >= ?1 AND hour_ts <= ?2
              GROUP BY (hour_ts - ?1) / ?3 ORDER BY 1"
@@ -802,6 +930,8 @@ impl Db {
                     mem_used: row.get(2)?,
                     net_in: row.get(3)?,
                     net_out: row.get(4)?,
+                    disk_read: row.get(5)?,
+                    disk_write: row.get(6)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1329,6 +1459,11 @@ impl Db {
         blocking(move || db.rollup_and_prune(raw_before, hourly_before)).await
     }
 
+    pub async fn backfill_disk_hourly_async(&self) -> Result<usize> {
+        let db = self.clone();
+        blocking(move || db.backfill_disk_hourly()).await
+    }
+
     pub async fn history_async(
         &self,
         from: i64,
@@ -1484,7 +1619,19 @@ mod tests {
                  -- v8 库本来就该有 audit_log（0004 建出）。这里补一张最小同名的表：
                  -- 否则后续任何引用该表的迁移都会在这个「最小复现」库上直接炸掉，
                  -- 报出的却是与本次迁移无关的错误。
-                 CREATE TABLE audit_log (id INTEGER PRIMARY KEY, ts INTEGER);",
+                 CREATE TABLE audit_log (id INTEGER PRIMARY KEY, ts INTEGER);
+                 -- 同理，metrics / metrics_hourly（0001、0002 建出）也要在。
+                 -- 0014 对它们做 ALTER TABLE，缺表时会报「no such table: metrics」，
+                 -- 与 0009 要验证的事情毫无关系。
+                 CREATE TABLE metrics (
+                     ts INTEGER NOT NULL, cpu REAL NOT NULL, mem_used INTEGER NOT NULL,
+                     net_in INTEGER NOT NULL, net_out INTEGER NOT NULL);
+                 CREATE TABLE metrics_hourly (
+                     hour_ts INTEGER PRIMARY KEY,
+                     cpu_avg REAL NOT NULL, cpu_max REAL NOT NULL,
+                     mem_used_avg INTEGER NOT NULL, mem_used_max INTEGER NOT NULL,
+                     net_in_avg INTEGER NOT NULL, net_in_max INTEGER NOT NULL,
+                     net_out_avg INTEGER NOT NULL, net_out_max INTEGER NOT NULL);",
             )
             .unwrap();
             // 标记已应用 1~8，让 Db::open 只跑 0009
@@ -1526,6 +1673,69 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    /// 结构自愈：版本号已是 14、但列实际缺失时，开库要自动补上。
+    /// 复现的是 3800 测试库那次「版本记了 14、DDL 却不在」的不一致 ——
+    /// 没有这道自愈，采样会每 2 秒失败一次，只能靠人工 ALTER 救场。
+    #[test]
+    fn missing_columns_are_repaired_on_open() {
+        let path = temp_db_path("repair");
+        {
+            let db = Db::open(&path).unwrap();
+            let conn = db.pool.get().unwrap();
+            // 退回到「列不存在」的状态：重建表（丢掉磁盘两列）、保留数据，
+            // 且**不动 schema_version**（它仍是 14）——正是出问题的那个组合
+            conn.execute_batch(
+                "INSERT INTO metrics (ts, cpu, mem_used, net_in, net_out) VALUES (5, 1, 2, 3, 4);
+                 CREATE TABLE metrics_old AS
+                     SELECT ts, cpu, mem_used, net_in, net_out FROM metrics;
+                 DROP TABLE metrics;
+                 CREATE TABLE metrics (
+                     ts INTEGER NOT NULL, cpu REAL NOT NULL, mem_used INTEGER NOT NULL,
+                     net_in INTEGER NOT NULL, net_out INTEGER NOT NULL);
+                 INSERT INTO metrics SELECT * FROM metrics_old;
+                 DROP TABLE metrics_old;",
+            )
+            .unwrap();
+            let cols: Vec<String> = conn
+                .prepare("SELECT name FROM pragma_table_info('metrics')")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert!(
+                !cols.iter().any(|c| c == "disk_read"),
+                "前置条件：此时不该有 disk_read"
+            );
+        }
+
+        // 再开一次：迁移会因版本已是 14 全部跳过，只能靠 repair_columns 补列
+        {
+            let db = Db::open(&path).unwrap();
+            let conn = db.pool.get().unwrap();
+            let has: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('metrics') WHERE name='disk_read'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(has, 1, "缺失的列应被自动补齐");
+            // 原有数据必须还在
+            let n: i64 = conn
+                .query_row("SELECT COUNT(*) FROM metrics WHERE ts = 5", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 1, "补列不得丢数据");
+            // 新列可写
+            conn.execute(
+                "UPDATE metrics SET disk_read = 42 WHERE ts = 5",
+                [],
+            )
+            .unwrap();
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
     /// 迁移失败必须整体回滚：事务内半途失败时，已建表不得残留、版本不得推进
     #[test]
     fn failed_migration_rolls_back() {
@@ -1559,10 +1769,10 @@ mod tests {
             let conn = db.pool.get().unwrap();
             // 第 0 小时：两条 (cpu 10/20 → avg15 max20)；第 1 小时：一条 cpu 30
             conn.execute_batch(
-                "INSERT INTO metrics (ts, cpu, mem_used, net_in, net_out) VALUES
-                 (0,    10, 100, 1, 2),
-                 (1800, 20, 200, 3, 4),
-                 (3600, 30, 300, 5, 6);",
+                "INSERT INTO metrics (ts, cpu, mem_used, net_in, net_out, disk_read, disk_write) VALUES
+                 (0,    10, 100, 1, 2, 100, 200),
+                 (1800, 20, 200, 3, 4, 300, 400),
+                 (3600, 30, 300, 5, 6, NULL, NULL);",
             )
             .unwrap();
             // raw_before=3600：仅前两行聚合；hourly_before=0：聚合行不被清
@@ -1583,12 +1793,93 @@ mod tests {
             assert_eq!(n, 1);
             assert_eq!(avg, 15.0);
             assert_eq!(max, 20.0);
+            // 磁盘两列同口径：AVG(100,300)=200、MAX(100,300)=300
+            let (dra, drm, dwa, dwm): (i64, i64, i64, i64) = conn
+                .query_row(
+                    "SELECT disk_read_avg, disk_read_max, disk_write_avg, disk_write_max
+                     FROM metrics_hourly WHERE hour_ts=0",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .unwrap();
+            assert_eq!((dra, drm, dwa, dwm), (200, 300, 300, 400));
             // 幂等：再跑一次同样参数不新增/不报错（INSERT OR REPLACE）
             db.rollup_and_prune(3600, 0).unwrap();
             let n2: i64 = conn
                 .query_row("SELECT COUNT(*) FROM metrics_hourly", [], |r| r.get(0))
                 .unwrap();
             assert_eq!(n2, 1, "重放聚合不应产生重复小时行");
+            // 重放时磁盘聚合里的 NULL 不得把已有数字抹掉（COALESCE 兜底）
+            let dra2: i64 = conn
+                .query_row(
+                    "SELECT disk_read_avg FROM metrics_hourly WHERE hour_ts=0",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(dra2, 200, "重放聚合不得把已回填的磁盘值抹回 NULL");
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 0014 的历史回填：把**仍在原始表里**的采样按小时补出磁盘 I/O 聚合。
+    /// 更早的原始行已被保留策略删除，物理上无法重建 —— 那种小时桶保持 NULL。
+    #[test]
+    fn backfill_disk_hourly_rebuilds_from_live_raw_rows() {
+        let path = temp_db_path("backfill_disk");
+        {
+            let db = Db::open(&path).unwrap();
+            let conn = db.pool.get().unwrap();
+            // 先造一个「迁移前」的小时桶：磁盘列全 NULL，但 cpu 已有值
+            conn.execute_batch(
+                "INSERT INTO metrics_hourly
+                     (hour_ts, cpu_avg, cpu_max, mem_used_avg, mem_used_max,
+                      net_in_avg, net_in_max, net_out_avg, net_out_max)
+                 VALUES (0, 7.5, 9, 111, 222, 1, 1, 2, 2);",
+            )
+            .unwrap();
+            // 原始表里还有该小时的两条采样，带磁盘值；另有两条磁盘为 NULL（旧行）
+            conn.execute_batch(
+                "INSERT INTO metrics (ts, cpu, mem_used, net_in, net_out, disk_read, disk_write) VALUES
+                 (60,  1, 10, 1, 1, 1000, 2000),
+                 (120, 2, 20, 1, 1, 3000, 4000),
+                 (600, 3, 30, 1, 1, NULL, NULL);",
+            )
+            .unwrap();
+
+            db.backfill_disk_hourly().unwrap();
+
+            // 磁盘聚合只统计非 NULL 的采样：读 AVG(1000,3000)=2000、MAX=3000；
+            // 写 AVG(2000,4000)=3000、MAX=4000
+            let (dra, drm, dwa, dwm): (i64, i64, i64, i64) = conn
+                .query_row(
+                    "SELECT disk_read_avg, disk_read_max, disk_write_avg, disk_write_max
+                     FROM metrics_hourly WHERE hour_ts=0",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .unwrap();
+            assert_eq!((dra, drm, dwa, dwm), (2000, 3000, 3000, 4000));
+            // 回填只动磁盘四列：cpu_avg 必须保持迁移前的 7.5，
+            // 不能被「磁盘有效行」的子集重算成 AVG(1,2)=1.5
+            let cpu_avg: f64 = conn
+                .query_row(
+                    "SELECT cpu_avg FROM metrics_hourly WHERE hour_ts=0",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(cpu_avg, 7.5, "回填不得重算非磁盘列");
+            // 幂等：再跑一次结果不变
+            db.backfill_disk_hourly().unwrap();
+            let again: i64 = conn
+                .query_row(
+                    "SELECT disk_read_avg FROM metrics_hourly WHERE hour_ts=0",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(again, 2000);
         }
         let _ = std::fs::remove_file(path);
     }
@@ -1601,24 +1892,35 @@ mod tests {
             let db = Db::open(&path).unwrap();
             let conn = db.pool.get().unwrap();
             conn.execute_batch(
-                "INSERT INTO metrics (ts, cpu, mem_used, net_in, net_out) VALUES
-                 (1000, 1, 1, 1, 1),
-                 (2000, 2, 2, 2, 2);",
+                "INSERT INTO metrics (ts, cpu, mem_used, net_in, net_out, disk_read, disk_write) VALUES
+                 (1000, 1, 1, 1, 1, 500, 600),
+                 (2000, 2, 2, 2, 2, NULL, NULL);",
             )
             .unwrap();
             conn.execute_batch(
-                "INSERT INTO metrics_hourly (hour_ts, cpu_avg, cpu_max, mem_used_avg, mem_used_max, net_in_avg, net_in_max, net_out_avg, net_out_max)
-                 VALUES (0, 5, 5, 5, 5, 5, 5, 5, 5);",
+                "INSERT INTO metrics_hourly (hour_ts, cpu_avg, cpu_max, mem_used_avg, mem_used_max, net_in_avg, net_in_max, net_out_avg, net_out_max, disk_read_avg, disk_read_max, disk_write_avg, disk_write_max)
+                 VALUES (0, 5, 5, 5, 5, 5, 5, 5, 5, 700, 900, 1100, 1300);",
             )
             .unwrap();
             // raw_from=100000：起点 0 早于保留期 → 查聚合表，返回 hour_ts=0 那条
             let old = db.history(0, 100000, 100000, 100).unwrap();
             assert_eq!(old.len(), 1);
             assert_eq!(old[0].cpu, 5.0, "应命中小时聚合表的值");
+            assert_eq!(
+                old[0].disk_read,
+                Some(700),
+                "小时表要能读出磁盘读速率"
+            );
             // 起点 1000 在保留期内（raw_from=500 ≤ 1000）→ 查原始表，返回两条
             let fresh = db.history(1000, 100000, 500, 100).unwrap();
             assert_eq!(fresh.len(), 2);
             assert_eq!(fresh[0].ts, 1000, "结果按时间升序");
+            assert_eq!(fresh[0].disk_read, Some(500), "原始表带磁盘值");
+            // 该行磁盘列为 NULL → 必须是 None（前端断线），不能退化成 0
+            assert_eq!(
+                fresh[1].disk_read, None,
+                "迁移前的老行没有磁盘数据，应保持 None 而不是 0"
+            );
         }
         let _ = std::fs::remove_file(path);
     }

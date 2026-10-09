@@ -10,6 +10,8 @@ mod container_files; // 容器内文件浏览：只读，走 docker exec
 mod crontab;
 mod db;
 mod distro;
+/// 目录体积统计：仪表盘「磁盘空间占用 Top 5 目录」的数据来源（仅 admin）
+mod diskspace;
 mod docker;
 mod embed;
 mod files;
@@ -70,6 +72,9 @@ pub struct AppState {
     pub jobs: Arc<jobs::JobHub>,
     /// 站点探针运行态：后台探针任务推进，接口从这里读（std 锁，临界区极短且不跨 await）
     pub probes: Arc<std::sync::Mutex<probe::ProbeEngine>>,
+    /// 目录体积扫描的结果缓存（仪表盘「磁盘占用 Top 5」卡）：
+    /// 扫描要遍历整个子树，同一路径 10 分钟内直接复用结果
+    pub dir_usage: Arc<diskspace::DirUsageCache>,
 }
 
 #[tokio::main]
@@ -163,6 +168,7 @@ async fn main() -> anyhow::Result<()> {
         db_path: Arc::new(db_path),
         jobs: Arc::new(jobs::JobHub::new()),
         probes: Arc::new(std::sync::Mutex::new(probe::ProbeEngine::default())),
+        dir_usage: Arc::new(diskspace::DirUsageCache::new()),
     };
 
     // 启动后台监控采样任务

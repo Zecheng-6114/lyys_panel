@@ -397,6 +397,13 @@ pub fn spawn_sampler(state: AppState) {
         let mut alert_reload = state.alert_reload.subscribe();
         let mut reload_live = true;
         let mut ticks: u32 = 0;
+        // 迁移 0014 的一次性历史回填：把仍留在原始表里的采样补出磁盘 I/O 聚合。
+        // 只在本任务启动时跑一次；更早的原始行已被保留策略删除，无法重建。
+        match db.backfill_disk_hourly_async().await {
+            Ok(n) if n > 0 => tracing::info!("已回填 {n} 个小时桶的磁盘 I/O 聚合"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("回填磁盘 I/O 小时聚合失败：{e}"),
+        }
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(SAMPLE_PERIOD) => {}

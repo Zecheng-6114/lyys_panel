@@ -831,6 +831,51 @@ async fn system_history(
 }
 
 #[derive(Deserialize)]
+struct DirUsageQuery {
+    /// 扫描起点，缺省 `/`。只允许白名单内的路径（见 diskspace::resolve_root）
+    #[serde(default = "default_dir_root")]
+    path: String,
+    /// 传 1 跳过缓存强制重扫
+    #[serde(default)]
+    refresh: Option<u8>,
+}
+
+fn default_dir_root() -> String {
+    "/".into()
+}
+
+/// 目录体积排名（仪表盘「磁盘空间占用 Top 5 目录」卡）。
+///
+/// 仅 admin：这个接口能枚举目录体积，属于主机信息的横向探测面。
+/// 扫描在阻塞线程池里做，内部有 3 秒时间预算 —— 超时返回已完成的部分并标记
+/// `truncated`，绝不把 HTTP 请求挂着。同一路径 10 分钟内复用缓存。
+async fn dir_usage(
+    State(state): State<AppState>,
+    _: RequireRole<2>,
+    Query(q): Query<DirUsageQuery>,
+) -> Result<Json<crate::diskspace::DirUsageReport>, ApiError> {
+    // 起点不合法是**用户输入问题**，回 400 而不是 500
+    // （ApiError::from(anyhow) 一律映射 500，这里必须显式分流）
+    let root = crate::diskspace::resolve_root(&q.path)
+        .map_err(|e| ApiError::bad(e.to_string()))?;
+    let key = root.to_string_lossy().to_string();
+    if q.refresh != Some(1)
+        && let Some(hit) = state.dir_usage.get(&key)
+    {
+        return Ok(Json(hit));
+    }
+    let report = tokio::task::spawn_blocking(move || crate::diskspace::scan(&root))
+        .await
+        .map_err(|e| {
+            // 与 ApiError::from(anyhow) 同一约定：细节只进日志，响应体是通用文案
+            tracing::error!("目录扫描任务调度失败：{e}");
+            ApiError::internal()
+        })??;
+    state.dir_usage.put(&key, &report);
+    Ok(Json(report))
+}
+
+#[derive(Deserialize)]
 struct ProcessesQuery {
     /// 实例 id（container:<短ID> / service:<单元名>）；给了就只看该实例的进程
     instance: Option<String>,
@@ -2331,9 +2376,27 @@ const DASHBOARD_MAX_BYTES: usize = 4 * 1024;
 ///
 /// 顺序即默认展示顺序，按「占用 / 活动 / 机器」三行排：前三行分别回答
 /// 「还剩多少」「现在在忙什么」「这是台什么机器」。
-const DASHBOARD_CARDS: [&str; 13] = [
-    "cpu", "mem", "disk", "swap", "diskio", "net", "load", "procs", "partitions", "uptime",
-    "cores", "sysinfo", "chart",
+/// 🔴 **新增卡片一律追加到末尾**：前端用「保存时的卡片数量」判断哪些是新增的
+/// （见 stores/dashboard.ts 的 normalize），插在中间会把已保存布局里的卡片
+/// 全部错位。
+const DASHBOARD_CARDS: [&str; 16] = [
+    "cpu",
+    "mem",
+    "disk",
+    "swap",
+    "diskio",
+    "net",
+    "load",
+    "procs",
+    "partitions",
+    "uptime",
+    "cores",
+    "sysinfo",
+    // 排行榜卡：回答「谁在吃资源」，末尾追加（见上面的约定）
+    "topcpu",
+    "topmem",
+    "topdisk",
+    "chart",
 ];
 
 /// 卡片可跨的最大列数 / 行数。
@@ -2344,9 +2407,28 @@ const DASHBOARD_CARDS: [&str; 13] = [
 const MAX_CARD_W: u64 = 4;
 const MAX_CARD_H: u64 = 3;
 
+/// 排行榜（列表）卡的高度上限：与数值卡同为 3 行 —— 卡里是 5 行列表，
+/// 高度需求正好落在「2 行不够、3 行正好」。
+/// 🔴 与前端 `stores/dashboard.ts` 的 `MAX_CARD_H_LIST` 同源。
+const MAX_CARD_H_LIST: u64 = 3;
+
+/// 排行榜卡片 id（高度上限取 MAX_CARD_H_LIST 而不是 MAX_CARD_H 的那几张）
+const LIST_CARDS: [&str; 3] = ["topcpu", "topmem", "topdisk"];
+
 /// 趋势图卡单独放宽的高度上限（行）：折线图越高越好读，3 行太局促。
 /// 🔴 与前端 `stores/dashboard.ts` 的 `MAX_CARD_H_CHART` 同源。
 const MAX_CARD_H_CHART: u64 = 6;
+
+/// 某张卡的高度上限：趋势图 6 行、排行榜走列表档、其余数值卡 3 行
+fn max_card_h(id: &str) -> u64 {
+    if id == "chart" {
+        MAX_CARD_H_CHART
+    } else if LIST_CARDS.contains(&id) {
+        MAX_CARD_H_LIST
+    } else {
+        MAX_CARD_H
+    }
+}
 
 /// 仪表盘配置校验（复用 P1-2 主题校验思路：白名单 + 类型 + 长度）：
 /// - 只允许一个顶层字段 cards；
@@ -2359,8 +2441,18 @@ fn validate_dashboard_config(cfg: &serde_json::Value) -> Result<(), String> {
     let obj = cfg
         .as_object()
         .ok_or_else(|| "配置必须是 JSON 对象".to_string())?;
+    // known：保存时「已知的卡片数量」，用于加载时只补进这之后新增的卡片。
+    // 可缺省（老客户端不懂这个字段，且不受影响）。
+    if let Some(v) = obj.get("known") {
+        let n = v
+            .as_u64()
+            .ok_or_else(|| "known 必须是整数".to_string())?;
+        if !(1..=DASHBOARD_CARDS.len() as u64).contains(&n) {
+            return Err(format!("known 超出范围（1–{}）", DASHBOARD_CARDS.len()));
+        }
+    }
     for k in obj.keys() {
-        if k != "cards" {
+        if k != "cards" && k != "known" {
             return Err(format!("未知字段：{k}"));
         }
     }
@@ -2405,12 +2497,8 @@ fn validate_dashboard_config(cfg: &serde_json::Value) -> Result<(), String> {
                 if !(1..=MAX_CARD_W).contains(&w) {
                     return Err(format!("卡片宽度超出范围（1–{MAX_CARD_W}）：{id}"));
                 }
-                // 高度上限按卡片类型给：趋势图能占更多行
-                let max_h = if id == "chart" {
-                    MAX_CARD_H_CHART
-                } else {
-                    MAX_CARD_H
-                };
+                // 高度上限按卡片类型给：趋势图能占更多行、排行榜走列表档
+                let max_h = max_card_h(id);
                 if !(1..=max_h).contains(&h) {
                     return Err(format!("卡片高度超出范围（1–{max_h}）：{id}"));
                 }
@@ -3676,6 +3764,7 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/kick", post(sessions_kick))
         .route("/system/state", get(system_state))
         .route("/system/history", get(system_history))
+        .route("/system/dir-usage", get(dir_usage))
         .route("/instances", get(instances_list))
         .route("/instances/{id}/files", get(instance_files))
         .route("/instances/{id}/file", get(instance_file_read))
@@ -3886,6 +3975,14 @@ mod tests {
         );
         // 高度到 3 行也合法；趋势图卡另有更高的上限（6 行）
         assert!(validate_dashboard_config(&json!({ "cards": [{ "id": "cpu", "h": 3 }] })).is_ok());
+        // known（保存时已知的卡片数量）可缺省；给出时必须是范围内的整数
+        assert!(validate_dashboard_config(&json!({ "cards": ["cpu"], "known": 13 })).is_ok());
+        assert!(validate_dashboard_config(&json!({ "cards": ["cpu"], "known": 1 })).is_ok());
+        // 排行榜三张新卡在白名单内
+        assert!(validate_dashboard_config(
+            &json!({ "cards": ["topcpu", "topmem", "topdisk"] })
+        )
+        .is_ok());
         assert!(
             validate_dashboard_config(&json!({ "cards": [{ "id": "chart", "w": 4, "h": 6 }] }))
                 .is_ok()
@@ -3904,6 +4001,10 @@ mod tests {
         assert!(validate_dashboard_config(&json!({ "cards": [1] })).is_err());
         assert!(validate_dashboard_config(&json!({ "cards": ["cpu", "cpu"] })).is_err());
         assert!(validate_dashboard_config(&json!({ "cards": ["cpu"], "evil": 1 })).is_err());
+        // known 类型/范围不对一律拒绝（静默忽略会把前端 bug 藏起来）
+        assert!(validate_dashboard_config(&json!({ "cards": ["cpu"], "known": "13" })).is_err());
+        assert!(validate_dashboard_config(&json!({ "cards": ["cpu"], "known": 0 })).is_err());
+        assert!(validate_dashboard_config(&json!({ "cards": ["cpu"], "known": 99 })).is_err());
         // 尺寸相关：超范围 / 类型错 / 缺 id / 对象里有未知字段。
         // 宽度上限 4 —— 这不是人为限制，是栅格本身只有 4 列，跨 5 列会溢出；
         // 高度上限按卡片类型：数值卡 3 行、趋势图卡 6 行

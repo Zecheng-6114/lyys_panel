@@ -54,13 +54,29 @@
           </div>
           <div id="dash-chart" class="chart" />
         </template>
+        <template v-else-if="card.list">
+          <!-- 排行榜卡：标题 + 若干行「名次 / 名称 / 数值」。
+               每行是一条独立的读取路径，不加表格（表格在卡片里会带来自己的
+               行高与边距，反而不好对齐）。 -->
+          <div class="card-label">{{ card.label }}</div>
+          <div class="card-body rank-body">
+            <div v-if="!card.rows?.length" class="rank-empty">暂无数据</div>
+            <div v-for="(row, ri) in card.rows" :key="row.name + ri" class="rank-row">
+              <span class="rank-no">{{ ri + 1 }}</span>
+              <span class="rank-name" :title="row.name">{{ row.name }}</span>
+              <span class="rank-val">{{ row.value }}</span>
+            </div>
+          </div>
+        </template>
         <template v-else>
           <div class="card-label">{{ card.label }}</div>
-          <div class="card-value">{{ card.value }}</div>
-          <!-- 进度条只表达「距离上限还有多少」：有上限的指标才画槽，
-               速率/计数/静态信息不画（详见 .bar--none 的说明） -->
-          <div class="bar" :class="{ 'bar--none': card.bar === null }">
-            <i v-if="card.bar !== null" :style="{ width: card.bar + '%' }" />
+          <div class="card-body">
+            <div class="card-value">{{ card.value }}</div>
+            <!-- 进度条只表达「距离上限还有多少」：有上限的指标才画槽，
+                 速率/计数/静态信息不画（详见 .bar--none 的说明） -->
+            <div class="bar" :class="{ 'bar--none': card.bar === null }">
+              <i v-if="card.bar !== null" :style="{ width: card.bar + '%' }" />
+            </div>
           </div>
         </template>
         <!-- 右下角缩放柄。触摸设备上它也是唯一安全的拖拽起点：
@@ -193,6 +209,10 @@ interface MetricPoint {
   mem_used: number;
   net_in: number;
   net_out: number;
+  /// 迁移 0014 之前的历史行没有磁盘 I/O：后端返回 null。
+  /// 前端必须把它当「无数据」而不是 0 —— 0 会被读成「当时磁盘空闲」。
+  disk_read: number | null;
+  disk_write: number | null;
 }
 
 const auth = useAuthStore();
@@ -261,6 +281,12 @@ function fmtBytes(n: number) {
   return `${v.toFixed(v >= 100 ? 0 : 1)}${units[i]}`;
 }
 
+/// 字节速率的轴刻度：与卡片的 fmtBytes 同一套单位，但固定带 /s 后缀，
+/// 免得把「字节/秒」误读成「累计字节」。
+function fmtRateAxis(n: number) {
+  return `${fmtBytes(n)}/s`;
+}
+
 function fmtUptime(sec: number) {
   const d = Math.floor(sec / 86400);
   const h = Math.floor((sec % 86400) / 3600);
@@ -283,7 +309,21 @@ interface CardView {
   h: number;
   /// 趋势图卡片：渲染 ECharts 容器而不是数值
   isChart?: boolean;
+  /// 排行榜卡片：渲染若干行「名次 / 名称 / 数值」而不是单个数值
+  list?: boolean;
+  rows?: RankRow[];
 }
+
+/// 排行榜（CPU / 内存 Top 5 进程、磁盘占用 Top 5 目录）共用的一行
+interface RankRow {
+  /// 进程名或目录路径（目录只显示末段，完整路径进 title）
+  name: string;
+  /// 已格式化好的数值（CPU% / 内存大小 / 目录体积）
+  value: string;
+}
+
+/// Top 5 排行榜取几行
+const TOP_N = 5;
 
 /// 展示顺序与尺寸都来自配置；未定制时按默认顺序与各自的默认尺寸。
 /// 内容始终取实时快照。
@@ -363,9 +403,50 @@ const visibleCards = computed<CardView[]>(() => {
       case "chart":
         // 图表卡没有数值与进度条，模板会走另一个分支渲染 ECharts 容器
         return { ...base, value: "", bar: null, isChart: true };
+      case "topcpu":
+        return {
+          ...base,
+          value: "",
+          bar: null,
+          list: true,
+          rows: topRows(procs.value, (p) => p.cpu, (p) => `${p.cpu.toFixed(1)}%`),
+        };
+      case "topmem":
+        return {
+          ...base,
+          value: "",
+          bar: null,
+          list: true,
+          rows: topRows(procs.value, (p) => p.mem, (p) => fmtBytes(p.mem)),
+        };
+      case "topdisk": {
+        // 目录名只显示末段（`/var` → `var`）：卡片一行放不下整条路径，
+        // 完整路径留给 title 悬浮查看
+        const rows: RankRow[] = (dirUsage.value?.children ?? [])
+          .slice(0, TOP_N)
+          .map((c) => ({
+            name: c.path.split("/").filter(Boolean).pop() ?? c.path,
+            value: fmtBytes(c.bytes),
+          }));
+        return { ...base, value: "", bar: null, list: true, rows };
+      }
     }
   });
 });
+
+/// 从进程表里取 Top N。两个排行榜共用这一处排序逻辑：
+/// 一次请求取回全表，本地按 CPU / 内存各排一次 —— 比让后端按两种排序
+/// 各查一遍省一次全系统进程扫描（refresh_processes 是整表 /proc 扫描）。
+function topRows(
+  list: ProcRow[],
+  by: (p: ProcRow) => number,
+  fmt: (p: ProcRow) => string,
+): RankRow[] {
+  return [...list]
+    .sort((a, b) => by(b) - by(a))
+    .slice(0, TOP_N)
+    .map((p) => ({ name: p.name, value: fmt(p) }));
+}
 
 // ---------- 4.2 自定义弹窗 ----------
 
@@ -501,8 +582,30 @@ function cellW(c: CardView) {
   const w = resize.id === c.id ? resize.curW : c.w;
   return Math.min(w, cols.value);
 }
+
+/// 卡片主体需要的行数：按**实际渲染出来的内容高度**换算，向上取整。
+///
+/// 排行榜卡里是 5 行列表，行数不再是常量。早先的写法是把「几行」写进每张卡的
+/// 尺寸常量里，加一种卡就要重新量一次、还要和 `.card` 的 CSS 内边距对表 ——
+/// 漏一处就是文字溢出卡片、或底部留一大块空白。改成直接量 `.card-body`：
+/// 内容多少就占多少行，CSS 怎么改都不会失配。
+function neededRows(c: CardView): number {
+  const i = visibleCards.value.findIndex((x) => x.id === c.id);
+  if (i < 0) return 1;
+  const body = gridEl.value?.querySelector<HTMLElement>(
+    `[data-index="${i}"] .card-body`,
+  );
+  const h = body?.offsetHeight ?? 0;
+  if (!h) return 1;
+  // +34：标签行 + 卡片上下内边距 + 列表末行的视觉余量。
+  // 实测 26 时排行榜卡的第 5 行会被卡片下沿压住（body 量到的高度不含
+  // 最后一行的行距），这一档必须留够。
+  return Math.max(1, Math.ceil((h + 34 + GAP) / (ROW_H + GAP)));
+}
 function cellH(c: CardView) {
-  return resize.id === c.id ? resize.curH : c.h;
+  if (resize.id === c.id) return resize.curH;
+  // 只增不减：用户手动放大的高度要保留，内容撑出来的额外高度也要吃下
+  return Math.max(c.h, neededRows(c));
 }
 
 /// 当前生效的配置（未定制时按默认顺序 + 各自默认尺寸现生成一份）
@@ -627,10 +730,71 @@ async function onPointerUp() {
 
 // ---------- 数据刷新 ----------
 
+/// 进程表（CPU / 内存 Top 5 排行榜的数据源）。
+/// 一次取回全表、本地按两种口径各排一次：`/processes` 每次调用都要整表扫描
+/// /proc（内部有 1 秒的最短刷新间隔），按两种排序各查一遍纯属重复劳动。
+interface ProcRow {
+  pid: number;
+  name: string;
+  cpu: number;
+  mem: number;
+}
+const procs = ref<ProcRow[]>([]);
+
+/// 目录体积排名（磁盘占用 Top 5）。后端有 3 秒扫描预算 + 10 分钟缓存，
+/// 所以这里跟着主轮询走不会反复扫盘（命中缓存时只是读一份内存里的结果）。
+interface DirChild {
+  path: string;
+  bytes: number;
+  pct: number;
+  truncated: boolean;
+}
+interface DirReport {
+  root: string;
+  total: number;
+  children: DirChild[];
+  truncated: boolean;
+  cached: boolean;
+}
+const dirUsage = ref<DirReport | null>(null);
+
+/// 排行榜是否需要这些额外数据：卡片隐藏时不必为它发请求
+/// （visibleCards 已经是「配置里勾选中的卡片」，不在其中即隐藏）
+function needsProcesses() {
+  return visibleCards.value.some((c) => c.id === "topcpu" || c.id === "topmem");
+}
+function needsDirUsage() {
+  return visibleCards.value.some((c) => c.id === "topdisk");
+}
+
 async function refresh() {
   const { data } = await http.get("/system/state");
   Object.assign(snap, data);
 }
+
+/// 排行榜数据：各自失败互不影响（磁盘扫描可能因权限/超时失败，
+/// 不该把整个仪表盘的轮询拖断）
+async function refreshRanks() {
+  if (needsProcesses()) {
+    try {
+      const { data } = await http.get("/processes");
+      procs.value = data;
+    } catch {
+      /* 维持上一次的结果 */
+    }
+  }
+  if (needsDirUsage()) {
+    try {
+      const { data } = await http.get("/system/dir-usage", {
+        params: { path: "/" },
+      });
+      dirUsage.value = data;
+    } catch {
+      /* 维持上一次的结果 */
+    }
+  }
+}
+
 async function refreshHistory() {
   const r = RANGES.find((x) => x.key === rangeKey.value) ?? RANGES[0];
   const now = Math.floor(Date.now() / 1000);
@@ -655,11 +819,31 @@ function renderChart() {
   const memData = history.value.map((p) =>
     snap.mem_total > 0 ? Number(((p.mem_used / snap.mem_total) * 100).toFixed(1)) : 0,
   );
+  // 带宽类序列（字节/秒）。磁盘两列在旧行上是 null：ECharts 用空值断线，
+  // 正好表达「那段没有采集」，而不是画成贴着 0 的直线。
+  const netInData = history.value.map((p) => p.net_in ?? null);
+  const netOutData = history.value.map((p) => p.net_out ?? null);
+  const diskReadData = history.value.map((p) => p.disk_read ?? null);
+  const diskWriteData = history.value.map((p) => p.disk_write ?? null);
+  const bwAll = [...netInData, ...netOutData, ...diskReadData, ...diskWriteData].filter(
+    (x): x is number => x !== null,
+  );
   // 两条线量级差得远（CPU 常年个位数、内存几十个百分点），共用一根写死 0–100 的轴时
   // CPU 只能贴着底边走直线 —— 这就是「趋势看不出变化」的主因。各给一根轴、上限按各自
   // 数据自适应（最大值的 1.2 倍），并留一个下限，免得空数据时轴塌成一条线。
   const axisMax = (vals: number[], floor: number) =>
     vals.length ? Math.max(floor, Math.ceil(Math.max(...vals) * 1.2 * 10) / 10) : floor;
+  // 带宽轴的上限取「所有带宽序列」的最大值：各给一根轴的话右侧会叠三套刻度。
+  const bwMax = axisMax(bwAll, 64 * 1024);
+  // 六个序列挤在一张图里，颜色必须可区分，但全站约定「无彩色、只用灰阶」——
+  // 所以靠主/次文本色 × 实线/虚线 × 不透明度分层：CPU 最重（实线、全不透明），
+  // 内存次之，网络与磁盘再淡一档。量级与单位由 tooltip 与轴刻度交代。
+  const muted = (opacity: number) => {
+    const m = sub.match(/\d+/g);
+    return m && m.length >= 3
+      ? `rgba(${m[0]}, ${m[1]}, ${m[2]}, ${opacity})`
+      : sub;
+  };
 
   chart.setOption({
     backgroundColor: "transparent",
@@ -676,13 +860,23 @@ function renderChart() {
       // （默认 10px 与 20% 黑），否则会和 --panel-shadow-2 叠成两层影。
       extraCssText: "box-shadow: var(--panel-shadow-2);",
       shadowBlur: 0,
+      // 百分比与字节/秒混在一张图里，数值必须各自带单位：
+      // 「45」到底是 45% 还是 45 B/s，只有这里能交代清楚。
+      valueFormatter: (val: unknown) =>
+        typeof val === "number" ? fmtBytes(val) : val === null ? "无数据" : String(val),
     },
     // ECharts 6 起 legend 的默认位置由顶部改成了贴底（LegendModel.defaultOption
     // 里 top 被注释、改设 bottom），于是图例会压在 x 轴标签上。这里显式钉回顶部，
     // 正好落在 grid.top 预留的空间里；bottom 保留默认值不影响 top 的解析。
-    legend: { data: ["CPU %", "内存 %"], textStyle: { color: sub }, top: 0 },
-    // 右侧留出第二根轴的刻度（原 20 放不下）
-    grid: { left: 40, right: 36, top: 40, bottom: 30 },
+    legend: {
+      data: ["CPU %", "内存 %", "网络 ↓", "网络 ↑", "磁盘读", "磁盘写"],
+      textStyle: { color: sub },
+      top: 0,
+      itemWidth: 14,
+      itemHeight: 8,
+    },
+    // 顶部要放两行图例（六个序列一行放不下），左右给两根轴留刻度位
+    grid: { left: 40, right: 60, top: 46, bottom: 30 },
     xAxis: {
       type: "category",
       boundaryGap: false,
@@ -692,8 +886,9 @@ function renderChart() {
       axisLine: { lineStyle: { color: grid } },
       axisLabel: { color: sub },
     },
-    // 双轴：左 CPU、右内存。轴刻度色与对应折线一致（CPU=正文色、内存=次要色），
-    // 不加轴名也能看出哪条线读哪根轴；网格线只留一根，免得两套刻度叠成密网。
+    // 三轴：左 CPU、右内存（百分比），以及同为右侧的带宽轴。
+    // 轴刻度色与对应折线一致（CPU=正文色、内存/带宽=次要色），不加轴名也能看出
+    // 哪条线读哪根轴；网格线只留一根，免得几套刻度叠成密网。
     yAxis: [
       {
         type: "value",
@@ -708,6 +903,15 @@ function renderChart() {
         max: axisMax(memData, 10),
         splitLine: { show: false },
         axisLabel: { color: sub, fontSize: 10 },
+      },
+      {
+        // offset 把带宽轴推到内存轴外侧，两根右轴才不重叠
+        type: "value",
+        min: 0,
+        max: bwMax,
+        offset: 30,
+        splitLine: { show: false },
+        axisLabel: { color: muted(0.75), fontSize: 10, formatter: fmtRateAxis },
       },
     ],
     series: [
@@ -731,6 +935,46 @@ function renderChart() {
         data: memData,
         itemStyle: { color: sub },
         lineStyle: { color: sub, width: 2, type: "dashed" },
+      },
+      {
+        name: "网络 ↓",
+        type: "line",
+        yAxisIndex: 2,
+        smooth: true,
+        showSymbol: false,
+        data: netInData,
+        itemStyle: { color: muted(0.75) },
+        lineStyle: { color: muted(0.75), width: 1.5 },
+      },
+      {
+        name: "网络 ↑",
+        type: "line",
+        yAxisIndex: 2,
+        smooth: true,
+        showSymbol: false,
+        data: netOutData,
+        itemStyle: { color: muted(0.75) },
+        lineStyle: { color: muted(0.75), width: 1.5, type: "dashed" },
+      },
+      {
+        name: "磁盘读",
+        type: "line",
+        yAxisIndex: 2,
+        smooth: true,
+        showSymbol: false,
+        data: diskReadData,
+        itemStyle: { color: muted(0.5) },
+        lineStyle: { color: muted(0.5), width: 1.5 },
+      },
+      {
+        name: "磁盘写",
+        type: "line",
+        yAxisIndex: 2,
+        smooth: true,
+        showSymbol: false,
+        data: diskWriteData,
+        itemStyle: { color: muted(0.5) },
+        lineStyle: { color: muted(0.5), width: 1.5, type: "dashed" },
       },
     ],
   });
@@ -765,13 +1009,19 @@ onMounted(async () => {
   await nextTick();
   syncCols();
   initChart();
+  refreshRanks().catch(() => {});
   // 卡片与趋势图同频，都是 2 秒 —— 后端采样同样是 2 秒一条，图表跟着它走即可。
   // 早先采样 5 秒 + 图表降到 15 秒拉一次，叠加落库延迟后最新点能滞后 20 秒，
   // 看上去就是「几十秒才动一下」。120 个点的历史请求开销可以忽略，不值得省。
+  //
+  // 排行榜（进程 / 目录）单独降到 5 秒：进程表要做一次全 /proc 扫描、目录扫描
+  // 更重，而排名变化以秒计已经足够。趋势图仍是 2 秒。
+  let rankTick = 0;
   timer = window.setInterval(() => {
     // 401 时拦截器会跳登录，这里吞掉 rejection 避免轮询抛出未处理错误
     refresh().catch(() => {});
     refreshHistory().catch(() => {});
+    if (++rankTick % 3 === 0) refreshRanks().catch(() => {});
   }, 2000);
   window.addEventListener("resize", onResize);
 });
@@ -941,6 +1191,55 @@ onBeforeUnmount(() => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.card-body {
+  display: flex;
+  flex-direction: column;
+  /* 占满标签下方的剩余高度，进度条的 margin-top:auto 才有东西可推 */
+  flex: 1;
+  min-height: 0;
+}
+/* 排行榜：名次 + 名称 + 数值 三列。
+ * 名称列必须 min-width:0 才能被省略号截断（flex 子项默认 min-width:auto，
+ * 长进程名 / 目录名会把数值列顶出卡片）。 */
+.rank-body {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  margin-top: var(--sp-1);
+}
+.rank-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  font-size: 12px;
+  line-height: 1.5;
+  min-width: 0;
+}
+.rank-no {
+  flex: none;
+  width: 14px;
+  color: var(--el-text-color-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.rank-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--el-text-color-primary);
+}
+.rank-val {
+  flex: none;
+  font-family: var(--panel-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--el-text-color-regular);
+}
+.rank-empty {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 .bar {
   height: 4px;
