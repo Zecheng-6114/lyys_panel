@@ -912,7 +912,6 @@ function renderChart() {
   const line = v("--el-text-color-primary") || "#111111";
   const sub = v("--el-text-color-secondary") || "#777777";
   const grid = v("--el-fill-color-dark") || "#ebebeb";
-  const cardBg = v("--el-bg-color") || "#ffffff";
   const cpuData = history.value.map((p) => Number(p.cpu.toFixed(2)));
   const memData = history.value.map((p) =>
     snap.mem_total > 0 ? Number(((p.mem_used / snap.mem_total) * 100).toFixed(1)) : 0,
@@ -950,8 +949,7 @@ function renderChart() {
   const timeLabels = history.value.map((p) =>
     new Date(p.ts * 1000).toLocaleTimeString("zh-CN", { hour12: false }),
   );
-  // 序列名列表同时给图例与 tooltip 用：tooltip 按**下标**取名字判断单位，
-  // 两处各写一份的话，加序列时很容易漏改一处。
+  // 序列名只给图例用（tooltip 用的是自己 param 里的 seriesName，见下）
   const seriesNames = ["CPU %", "内存 %", "网络 ↓", "网络 ↑", "磁盘读", "磁盘写"];
 
   chart.setOption({
@@ -960,21 +958,41 @@ function renderChart() {
     color: [line, sub],
     tooltip: {
       trigger: "axis",
-      backgroundColor: v("--el-bg-color-overlay") || cardBg,
+      // 挂一个类名给 theme.css 的磨砂规则用（见该处说明）
+      className: "dash-tooltip",
+      // 🔴 底色与投影**不在 JS 里写死**：写了就会盖掉主题的「不透明度 + 模糊」
+      // （内联样式优先级高于样式表，除非处处补 !important）。
+      // 这里只交代文字色，底色、模糊、投影统一由 theme.css 的 .dash-tooltip 规则给，
+      // 于是主题里的不透明度滑块对浮层同样生效 —— 与消息、对话框、抽屉一致。
+      textStyle: { color: line },
       // ECharts 6 的 borderWidth 默认值是 1（见 TooltipModel.js），配上 borderColor
       // 就是一圈可见描边，与全站「不画可见描边」的约定冲突 —— 显式归零。
       borderWidth: 0,
-      textStyle: { color: line },
-      // 用全站统一的浮层档投影，替代 ECharts 自带的 shadowBlur / shadowColor
-      // （默认 10px 与 20% 黑），否则会和 --panel-shadow-2 叠成两层影。
-      extraCssText: "box-shadow: var(--panel-shadow-2);",
-      shadowBlur: 0,
-      // 每条序列各自带单位：百分比是 %，速率是 B/s。
-      // 「25」到底是 25% 还是 25 B/s，只有这里能交代清楚。
-      valueFormatter: (val: unknown, idx: number) => {
-        if (val === null || val === undefined) return "无数据";
-        const name = seriesNames[idx] ?? "";
-        return name.endsWith("%") ? `${val}%` : `${fmtBytes(Number(val))}/s`;
+      // 单位由**序列名**决定（名字以 % 结尾就是百分比）。
+      //
+      // 🔴 不能用 `valueFormatter(val, idx)` 的第二个参数查名字：那是**数据点下标**
+      // （ECharts 的 valueFormatter 签名是 (value, valueIndex, seriesData)），
+      // 拿它当序列下标会取到别的序列名 —— 实测表现为 CPU 显示成 `0.3B`、
+      // 内存显示成 `4.1B`。tooltip 的 formatter 回调里每个 param 自带 seriesName，
+      // 那是权威来源，不需要任何下标推算。
+      formatter: (items: unknown) => {
+        const list = Array.isArray(items) ? items : [items];
+        const head = String(
+          (list[0] as { axisValueLabel?: string })?.axisValueLabel ?? "",
+        );
+        const lines = list.map((it) => {
+          const p = it as { seriesName?: string; value?: unknown; marker?: string };
+          const name = p.seriesName ?? "";
+          const v = p.value;
+          if (v === null || v === undefined || v === "-") {
+            return `${p.marker ?? ""}${name}　无数据`;
+          }
+          const shown = name.endsWith("%")
+            ? `${v}%`
+            : `${fmtBytes(Number(v))}/s`;
+          return `${p.marker ?? ""}${name}　${shown}`;
+        });
+        return [head, ...lines].filter(Boolean).join("<br/>");
       },
     },
     // ECharts 6 起 legend 的默认位置由顶部改成了贴底（LegendModel.defaultOption
@@ -1044,9 +1062,9 @@ function renderChart() {
     ],
     // 十字准线联动：三带共享同一个时间刻度，指针必须一起动 ——
     // 否则读数时要在三条带上分别找同一时刻。联动是拆带去量纲的代价补偿。
+    // 标签底色同样交给样式表（同 tooltip，见 theme.css 的 .dash-tooltip 一带规则）
     axisPointer: {
       link: [{ xAxisIndex: "all" }],
-      label: { backgroundColor: v("--el-bg-color-overlay") || cardBg },
     },
   });
 }

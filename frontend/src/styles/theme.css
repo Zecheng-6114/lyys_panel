@@ -647,6 +647,29 @@ body {
     transparent
   ) !important;
 }
+/* ECharts 的趋势图浮层（十字准线读数框）。
+ *
+ * 🔴 它必须在这里处理：ECharts 的 tooltip 是 `position: absolute` 的浮层
+ * （挂在图表容器内、但不属于任何卡片元素），面板磨砂那一套规则挂在
+ * `.panel / .card` 这类容器上，浮层不在其列 —— 于是全站浮层
+ * （消息、对话框、抽屉）都做了磨砂，唯独它还是纯色。
+ *
+ * 两类节点一起管：`.dash-tooltip` 是 tooltip 本体（Dashboard 在 option 里
+ * 挂的 className），div 选择器兜住十字准线的那个标签（它没有类名）。
+ * 底色**只在这里给**：Dashboard 的 option 里不再写 backgroundColor，
+ * 否则内联样式会盖掉主题的不透明度滑块。 */
+.dash-tooltip,
+.dash-tooltip div {
+  background-color: color-mix(
+    in srgb,
+    var(--el-bg-color-overlay) var(--panel-surface-opacity, 100%),
+    transparent
+  ) !important;
+  -webkit-backdrop-filter: var(--panel-card-blur, blur(0px));
+  backdrop-filter: var(--panel-card-blur, blur(0px));
+  border-radius: var(--radius);
+  box-shadow: var(--panel-shadow-2);
+}
 /* 进度条（仪表盘进度条走的是 el-progress 的槽与内条）：
  * 槽是 --el-fill-color，内条是主色（主色保留实底，同 primary 按钮）。 */
 .el-progress-bar__outer {
