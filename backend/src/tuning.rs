@@ -721,25 +721,9 @@ async fn apply_ntp(
 
     // 重写服务器行：保留其它指令（driftfile、rtcsync 等），只替换 server/pool 行
     let old = std::fs::read_to_string(&conf).unwrap_or_default();
-    let mut out = String::new();
-    for line in old.lines() {
-        let t = line.trim_start();
-        let low = t.to_ascii_lowercase();
-        if low.starts_with("server ") || low.starts_with("pool ") {
-            continue; // 丢掉旧的服务器行，下面统一写新的
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-    // chrony 用 `server`，systemd-timesyncd 用 `NTP=`，ntp 用 `server`
+    // chrony / ntp 用 `server`，systemd-timesyncd 用 `NTP=`
     let is_timesyncd = st.daemon.contains("timesyncd");
-    for s in &servers {
-        if is_timesyncd {
-            out.push_str(&format!("NTP={s}\n"));
-        } else {
-            out.push_str(&format!("server {s} iburst\n"));
-        }
-    }
+    let out = rewrite_ntp_conf(&old, &servers, is_timesyncd);
     std::fs::write(&conf, out).map_err(|e| bad(format!("写入 {conf} 失败：{e}")))?;
     sink(&format!(
         "已写入 {} 个服务器：{}",
@@ -748,16 +732,7 @@ async fn apply_ntp(
     ));
 
     // 让配置生效：优先重启守护进程（比 reload 更可靠，chronyd 对 SIGHUP 支持不一）
-    //
-    // 🔴 判定顺序要紧：`"systemd-timesyncd"` 里**含有** `ntp` 子串，
-    // 先判 ntp 会把 timesyncd 也吃进去、重启错的服务。
-    let unit = if st.daemon.contains("timesyncd") {
-        "systemd-timesyncd"
-    } else if st.daemon.contains("chrony") {
-        "chronyd"
-    } else {
-        "ntpd"
-    };
+    let unit = ntp_unit(&st.daemon);
     // ntpd 的单元名在不同发行版是 ntp / ntpd，两个都试一次
     let restart = if unit == "ntpd" {
         "systemctl restart ntp 2>/dev/null || systemctl restart ntpd".to_string()
@@ -771,6 +746,53 @@ async fn apply_ntp(
 
     sink(&format!("回滚：cp {backup} {conf} && systemctl restart {unit}"));
     Ok(())
+}
+
+/// 重写 NTP 配置文件内容：丢掉旧的服务器行，写入新服务器，其它行保留。
+///
+/// 抽成纯函数是为了能测：真正写文件的那条路径需要系统装了时间同步守护进程，
+/// 而测试机（容器）没有 —— 留在 `apply_ntp` 里就只能靠人工试。
+///
+/// 🔴 三种写法都要过滤：chrony / ntp 的 `server` 与 `pool`，以及
+/// systemd-timesyncd 的 `NTP=`。只滤前两种的话，timesyncd 的旧服务器会留在文件
+/// 里，新旧并存 —— 配置看起来生效了，实际仍在问旧服务器（测试抓到的缺陷）。
+fn rewrite_ntp_conf(old: &str, servers: &[String], timesyncd: bool) -> String {
+    let mut out = String::new();
+    for line in old.lines() {
+        let low = line.trim_start().to_ascii_lowercase();
+        if low.starts_with("server ")
+            || low.starts_with("pool ")
+            || low.starts_with("ntp=")
+            || low.starts_with("fallbackntp=")
+        {
+            continue; // 旧的服务器行丢掉，下面统一写新的
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    for s in servers {
+        if timesyncd {
+            // systemd-timesyncd 用 `NTP=` 键值形式，其余用 chrony/ntp 的 server 指令
+            out.push_str(&format!("NTP={s}\n"));
+        } else {
+            out.push_str(&format!("server {s} iburst\n"));
+        }
+    }
+    out
+}
+
+/// 由守护进程名推出要重启的 systemd 单元名。
+///
+/// 🔴 判定顺序要紧：`"systemd-timesyncd"` 里**含有** `ntp` 子串，
+/// 先判 ntp 会把 timesyncd 也吃进去、去重启一个不存在的服务。
+fn ntp_unit(daemon: &str) -> &'static str {
+    if daemon.contains("timesyncd") {
+        "systemd-timesyncd"
+    } else if daemon.contains("chrony") {
+        "chronyd"
+    } else {
+        "ntpd"
+    }
 }
 
 /// 主机名 / IP 字面量校验：只允许字母数字与 `.:-_`
@@ -992,5 +1014,44 @@ mod tests {
         );
         assert_eq!(title_of("vm.swappiness"), "交换倾向");
         assert_eq!(title_of("unknown.key"), "unknown.key");
+    }
+
+    /// NTP 配置重写：只替换 server/pool 行，其它指令必须原样保留
+    #[test]
+    fn rewrites_ntp_conf_keeping_other_directives() {
+        let old = "\
+# 注释保留
+driftfile /var/lib/chrony/drift
+server old.example.com iburst
+pool pool.example.org iburst
+rtcsync
+";
+        let servers = vec!["ntp.aliyun.com".to_string(), "time.cloudflare.com".to_string()];
+        let out = rewrite_ntp_conf(old, &servers, false);
+        assert!(out.contains("driftfile /var/lib/chrony/drift"), "其它指令应保留");
+        assert!(out.contains("rtcsync"), "其它指令应保留");
+        assert!(out.contains("# 注释保留"), "注释应保留");
+        assert!(!out.contains("old.example.com"), "旧 server 行必须被替换");
+        assert!(!out.contains("pool.example.org"), "旧 pool 行必须被替换");
+        assert!(out.contains("server ntp.aliyun.com iburst"));
+        assert!(out.contains("server time.cloudflare.com iburst"));
+        // 旧行被移到最后追加，不应出现重复的 server 行
+        assert_eq!(out.matches("server ").count(), 2);
+
+        // systemd-timesyncd 用 NTP= 键值形式
+        let out2 = rewrite_ntp_conf("NTP=old\n# 注释\n", &servers, true);
+        assert!(out2.contains("NTP=ntp.aliyun.com"));
+        assert!(!out2.contains("NTP=old"));
+        assert!(out2.contains("# 注释"));
+        assert!(!out2.contains("server ntp.aliyun.com iburst"), "timesyncd 不写 server 行");
+    }
+
+    /// 单元名判定顺序：systemd-timesyncd 含 "ntp" 子串，不能被判成 ntpd
+    #[test]
+    fn ntp_unit_prefers_timesyncd() {
+        assert_eq!(ntp_unit("systemd-timesyncd"), "systemd-timesyncd");
+        assert_eq!(ntp_unit("chrony"), "chronyd");
+        assert_eq!(ntp_unit("ntp"), "ntpd");
+        assert_eq!(ntp_unit("（未安装）"), "ntpd");
     }
 }
