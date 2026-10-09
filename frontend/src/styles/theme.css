@@ -1203,6 +1203,28 @@ body {
   font-size: var(--fs-sm);
   padding: var(--sp-1) var(--sp-2);
 }
+/* 危险操作（结束进程）：危险色实底。
+ *
+ * 底色与文字色都钉住，不跟随半透面板 —— 破坏性操作必须是整屏最醒目的元素。
+ * 文字色用 --panel-on-danger（由 theme.ts 按危险色亮度算出），而不是
+ * --el-bg-color：危险色是**不跟随主题的常量红**，浅色主题下 --el-bg-color
+ * 是浅色，压上去就读不出来了。 */
+.mini-btn--danger {
+  background: var(--el-color-danger) !important;
+  color: var(--panel-on-danger, #ffffff) !important;
+}
+.mini-btn--danger:hover {
+  /* 悬停加深：--el-color-danger 没有现成的 hover 档变量，用 filter 压暗，
+     免得再引入一个与主题不一致的硬编码色 */
+  filter: brightness(1.12);
+}
+.mini-btn:disabled,
+.mini-btn--danger:disabled {
+  /* 禁用态：压暗 + 禁用指针，避免「看起来能点但其实不能」 */
+  opacity: 0.55;
+  cursor: not-allowed;
+  filter: none;
+}
 
 /* ---------- 动效 ---------- */
 

@@ -77,6 +77,21 @@ function luminance(hex: string): number {
   return rgb ? 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2] : 128;
 }
 
+/// 固定的危险色（Element Plus 的默认 --el-color-danger）。
+///
+/// 🔴 不跟主色派生：破坏性操作（结束进程、删除确认）必须与普通操作可分辨，
+/// 定制成浅色主色后若同值，危险按钮就和普通按钮长得一样。
+const DANGER_HEX = "#f56c6c";
+
+/// 压在某个底色上的可读文字色。
+///
+/// 用于危险色这类**不跟随主题**的固定底色：主题固定下来时能选一次
+/// `--el-bg-color`（深色主题的浅底 + 深字），但 danger 是常量红，
+/// 浅色主题下就需要深字、深色主题下需要浅字，凭主题猜不对 —— 直接按亮度算。
+function onColor(hex: string): string {
+  return luminance(hex) > 150 ? "#111111" : "#ffffff";
+}
+
 /// 主题是深色还是浅色：由卡片底色判断。这个判断同时决定了两件事 ——
 /// 所有派生色往哪个方向淡出（这里），以及莫奈取色该展开成深色档还是
 /// 浅色档（设置页）。规则只有一处，所以导出给设置页复用。
@@ -354,12 +369,22 @@ export function buildThemeCss(cfg: ThemeConfig): string {
   }
   if (primary) {
     pushColorVars(lines, "primary", primary, fade);
-    // 语义色默认与主色同值（黑白灰设计），定制主色时一并跟随，
-    // 否则暗色主题下 danger/success 还是近黑，按钮直接隐形
+    // success 仍与主色同值：黑白灰设计里「成功」没有必须区分的语义负担
     pushColorVars(lines, "success", primary, fade);
-    pushColorVars(lines, "danger", primary, fade);
-    pushColorVars(lines, "error", primary, fade);
   }
+  // 🔴 danger / error **不跟主色派生**，固定用真实的红。
+  //
+  // 原先它们与 primary 同值（黑白灰设计）。但破坏性操作的语义必须能一眼分辨：
+  // 定制成浅紫主色后，「结束进程」按钮被染成浅紫，与普通按钮无从区分 ——
+  // 这正是「面板的杀伤力」最需要清楚的地方。用户明确选择全站 danger 用红。
+  //
+  // 红值沿用 Element Plus 的 --el-color-danger（#f56c6c）而不是自造：
+  // 它已通过对比度检验，且与 EP 自带的错误提示风格一致；
+  // light-N 档仍走同一套 mix（暗色主题下混向深底，不会糊成白块）。
+  pushColorVars(lines, "danger", DANGER_HEX, fade);
+  pushColorVars(lines, "error", DANGER_HEX, fade);
+  lines.push(`--panel-on-danger: ${onColor(DANGER_HEX)};`);
+  lines.push(`--panel-on-error: ${onColor(DANGER_HEX)};`);
   // warning/info 默认是中灰（文本色向背景混合约 0.4），定制时同样派生
   if (text && bgCard) {
     const mid = mix(text, bgCard, 0.4);
