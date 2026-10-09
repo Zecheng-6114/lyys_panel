@@ -876,6 +876,24 @@ async fn dir_usage(
 }
 
 #[derive(Deserialize)]
+struct ProcessDetailQuery {
+    pid: u32,
+}
+
+/// 单个进程的详情（仪表盘 Top 5 点开的抽屉用）。只读。
+///
+/// 进程随时可能退出，所以查不到时返回 404 而不是 500 ——
+/// 客户端据此提示「进程已退出」更准确。
+async fn process_detail(
+    _user: AuthUser,
+    Query(q): Query<ProcessDetailQuery>,
+) -> Result<Json<crate::rprocess::ProcessDetail>, ApiError> {
+    crate::rprocess::detail(q.pid)
+        .map(Json)
+        .ok_or_else(|| ApiError::bad("进程不存在或已退出"))
+}
+
+#[derive(Deserialize)]
 struct ProcessesQuery {
     /// 实例 id（container:<短ID> / service:<单元名>）；给了就只看该实例的进程
     instance: Option<String>,
@@ -3892,6 +3910,7 @@ pub fn router(state: AppState) -> Router {
         .route("/instances/{id}/files", get(instance_files))
         .route("/instances/{id}/file", get(instance_file_read))
         .route("/processes", get(processes_list).post(processes_kill))
+        .route("/processes/detail", get(process_detail))
         .route("/services", get(services_list).post(services_action))
         .route("/power", post(power_action))
         .route("/logs/journal", get(logs_journal))
