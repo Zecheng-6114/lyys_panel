@@ -72,9 +72,21 @@
           <div class="card-label">{{ card.label }}</div>
           <div class="card-body">
             <div class="card-value">{{ card.value }}</div>
+            <!-- 速率类指标用波形代替进度条（见 .bar--none 的说明） -->
+            <div v-if="card.spark" class="spark-box">
+              <Sparkline
+                :up="card.spark.up"
+                :down="card.spark.down"
+                :label="card.spark.label"
+                :peak="sparkPeakBytes(card.id)"
+              />
+              <!-- 量程标注：波形按 P90 定标（否则一次尖峰会把正常波动压成平线），
+                   所以必须把「画布顶端代表多少」写出来，读数才不会被误判 -->
+              <span class="spark-peak">{{ sparkPeaks[card.id] }}</span>
+            </div>
             <!-- 进度条只表达「距离上限还有多少」：有上限的指标才画槽，
-                 速率/计数/静态信息不画（详见 .bar--none 的说明） -->
-            <div class="bar" :class="{ 'bar--none': card.bar === null }">
+                 速率/计数/静态信息不画 -->
+            <div v-else class="bar" :class="{ 'bar--none': card.bar === null }">
               <i v-if="card.bar !== null" :style="{ width: card.bar + '%' }" />
             </div>
           </div>
@@ -148,6 +160,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onBeforeUnmount, reactive, ref, watch } from "vue";
+import Sparkline from "../components/Sparkline.vue";
 // 按需引入 echarts：全量引入会让本页 chunk 多出约 700KB
 import * as echarts from "echarts/core";
 import { LineChart } from "echarts/charts";
@@ -312,6 +325,8 @@ interface CardView {
   /// 排行榜卡片：渲染若干行「名次 / 名称 / 数值」而不是单个数值
   list?: boolean;
   rows?: RankRow[];
+  /// 实时波形卡片：在数值下方渲染镜像面积图
+  spark?: SparkData;
 }
 
 /// 排行榜（CPU / 内存 Top 5 进程、磁盘占用 Top 5 目录）共用的一行
@@ -321,6 +336,18 @@ interface RankRow {
   /// 已格式化好的数值（CPU% / 内存大小 / 目录体积）
   value: string;
 }
+
+/// 实时波形：卡片上的镜像面积图（上半=入/读，下半=出/写）
+interface SparkData {
+  up: (number | null)[];
+  down: (number | null)[];
+  label: string;
+}
+
+/// 波形保留的采样点数。主轮询 2 秒一次 → 60 点 ≈ 2 分钟。
+/// 只存内存、刷新即重新累积：这是「实时」读数，历史趋势由折线图负责，
+/// 两者职责不重叠，也就不需要为它落库。
+const SPARK_POINTS = 60;
 
 /// Top 5 排行榜取几行
 const TOP_N = 5;
@@ -351,8 +378,13 @@ const visibleCards = computed<CardView[]>(() => {
         return {
           ...base,
           value: `↓${fmtBytes(snap.net_in_per_sec)}/s ↑${fmtBytes(snap.net_out_per_sec)}/s`,
-          // 速率没有上限，进度条无从表达
+          // 速率没有上限，进度条无从表达；改用波形表达「最近两分钟怎么走的」
           bar: null,
+          spark: {
+            up: netInTrace.value,
+            down: netOutTrace.value,
+            label: "网络实时波形（上半入、下半出）",
+          },
         };
       case "load":
         return {
@@ -378,8 +410,13 @@ const visibleCards = computed<CardView[]>(() => {
         return {
           ...base,
           value: `读 ${fmtBytes(snap.disk_read_per_sec)}/s 写 ${fmtBytes(snap.disk_write_per_sec)}/s`,
-          // 同网络：速率无上限
+          // 同网络：速率无上限，用波形代替进度条
           bar: null,
+          spark: {
+            up: diskReadTrace.value,
+            down: diskWriteTrace.value,
+            label: "磁盘 I/O 实时波形（上半读、下半写）",
+          },
         };
       case "partitions":
         return {
@@ -767,9 +804,70 @@ function needsDirUsage() {
   return visibleCards.value.some((c) => c.id === "topdisk");
 }
 
+/// 实时波形的环形缓冲：每轮采样把一个点推进去，超长即从头丢。
+/// 用独立数组而不是从 `history` 里截尾巴：`history` 是 ECharts 用的降采样历史
+/// （窗口可到 2 小时、点数 120），跟「最近两分钟的原始速率」不是一回事。
+const netInTrace = ref<(number | null)[]>([]);
+const netOutTrace = ref<(number | null)[]>([]);
+const diskReadTrace = ref<(number | null)[]>([]);
+const diskWriteTrace = ref<(number | null)[]>([]);
+
+/// 推入一个采样点（就地修改，避免每 2 秒重建四个数组触发整页重渲染）
+function pushTrace(buf: (number | null)[], v: number) {
+  buf.push(v);
+  if (buf.length > SPARK_POINTS) buf.splice(0, buf.length - SPARK_POINTS);
+}
+
+/// 波形量程（字节/秒）与卡片上的量程标注。
+///
+/// 🔴 量程取**P90 分位数**而不是最大值：速率类读数尖峰极高（实测磁盘写入平常
+/// 50K–230K/s、偶尔一次 7.7M/s），按最大值定标会把整段正常波动压到贴着零线，
+/// 看上去就是一条平线。取 P90 让常见区间铺满画布，尖峰被削顶 ——
+/// 所以必须同时把量程标出来（`.spark-peak`），否则「顶到边」会被误读成到上限。
+///
+/// 在父组件算、通过 props 传给 Sparkline：父子两处各算一次的话，
+/// 一旦分位数实现有出入，标注的量程就会与画出来的波形不是同一个刻度。
+const sparkPeaks = computed<Record<string, string>>(() => {
+  const out: Record<string, string> = {};
+  for (const c of visibleCards.value) {
+    if (!c.spark) continue;
+    const vals: number[] = [];
+    for (const v of [...c.spark.up, ...c.spark.down]) {
+      if (v !== null && v > 0) vals.push(v);
+    }
+    out[c.id] = fmtBytes(sparkScale(vals));
+  }
+  return out;
+});
+
+/// 同上的数值形式（传给 Sparkline 当刻度），与标注同源
+function sparkPeakBytes(id: string): number {
+  const c = visibleCards.value.find((x) => x.id === id);
+  if (!c?.spark) return 1;
+  const vals: number[] = [];
+  for (const v of [...c.spark.up, ...c.spark.down]) {
+    if (v !== null && v > 0) vals.push(v);
+  }
+  return sparkScale(vals);
+}
+
+/// 线性插值分位数（p ∈ 0..1）；空数组给 1，避免除零
+function sparkScale(values: number[], p = 0.9): number {
+  if (!values.length) return 1;
+  const sorted = [...values].sort((a, b) => a - b);
+  const pos = (sorted.length - 1) * p;
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  return Math.max(1, sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo));
+}
+
 async function refresh() {
   const { data } = await http.get("/system/state");
   Object.assign(snap, data);
+  pushTrace(netInTrace.value, snap.net_in_per_sec);
+  pushTrace(netOutTrace.value, snap.net_out_per_sec);
+  pushTrace(diskReadTrace.value, snap.disk_read_per_sec);
+  pushTrace(diskWriteTrace.value, snap.disk_write_per_sec);
 }
 
 /// 排行榜数据：各自失败互不影响（磁盘扫描可能因权限/超时失败，
@@ -1240,6 +1338,26 @@ onBeforeUnmount(() => {
 .rank-empty {
   font-size: 12px;
   color: var(--el-text-color-secondary);
+}
+/* 波形占位：高度固定 28px，贴卡片底部（与进度条同一位置语言）。
+ * 不设 min-height 让内容撑开 —— 卡片高度由栅格决定，波形只负责填满
+ * 数值下方剩下的那块空间。 */
+.spark-box {
+  position: relative;
+  margin-top: auto;
+  height: 28px;
+  min-height: 0;
+}
+/* 量程标注：右上角小字。波形按 P90 定标、尖峰会被削顶，
+ * 不标出量程的话「波形顶到边」会被误读成「到达上限了」。 */
+.spark-peak {
+  position: absolute;
+  right: 0;
+  top: -2px;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--el-text-color-secondary);
+  pointer-events: none;
 }
 .bar {
   height: 4px;
