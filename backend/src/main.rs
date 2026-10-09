@@ -31,6 +31,8 @@ mod security; // 安全入口：访问路径前缀 + IP 白名单，登录前的
 mod terminal; // 交互式终端：浏览器 ↔ 本机 PTY 的双向 WebSocket 桥（仅 admin）
 mod timers; // systemd 定时器：计划任务的另一种承载 + journald 执行日志
 mod tls;
+/// 系统底层调优：swap / 内核参数 / 时间同步（读写分离，写操作走作业，仅 admin）
+mod tuning;
 mod update;
 mod websearch; // AI 助手联网：搜索多通道 + 网页正文抓取（含 SSRF 闸门）
 mod websites; // 网站管理：Nginx 站点（静态托管 / 反向代理，可选 HTTPS）生成与启停

@@ -128,6 +128,7 @@ export const KIND_LABEL: Record<string, string> = {
   backup_create: "创建备份",
   docker_pull: "拉取镜像",
   docker_install: "安装 Docker",
+  tuning: "系统调优",
 };
 
 type TagType = "info" | "primary" | "success" | "danger" | "warning";

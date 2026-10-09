@@ -273,6 +273,8 @@ const navGroups: NavGroup[] = [
       { path: "/backups", title: "备份管理", icon: CopyDocument },
       { path: "/alerts", title: "告警通知", icon: Bell },
       { path: "/settings", title: "系统设置", icon: Setting },
+      // 系统调优改的是内核参数 / swap / 时间同步：分组本就 admin-only
+      { path: "/tuning", title: "系统调优", icon: Tools },
       { path: "/update", title: "面板更新", icon: Download },
     ],
   },

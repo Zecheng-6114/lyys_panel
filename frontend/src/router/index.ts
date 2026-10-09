@@ -132,6 +132,13 @@ const routes: RouteRecordRaw[] = [
         component: () => import("../views/Settings.vue"),
         meta: { adminOnly: true },
       },
+      {
+        // 系统调优：直接改宿主机的内核参数 / swap / 时间同步，仅 admin
+        path: "tuning",
+        name: "tuning",
+        component: () => import("../views/Tuning.vue"),
+        meta: { adminOnly: true },
+      },
     ],
   },
 ];

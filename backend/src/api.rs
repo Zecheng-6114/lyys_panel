@@ -3539,6 +3539,128 @@ async fn jobs_submit(
 }
 
 #[derive(Deserialize)]
+struct TuningApplyReq {
+    /// 动作：sysctl / ntp / swapfile
+    action: String,
+    /// 参数名（sysctl）
+    key: Option<String>,
+    /// 目标值（sysctl）
+    value: Option<String>,
+    /// NTP 服务器列表（逗号分隔）
+    servers: Option<String>,
+    /// swap 操作：enable / disable / remove
+    op: Option<String>,
+    /// swap 文件路径
+    path: Option<String>,
+    /// swap 文件大小（MB）
+    size_mb: Option<u64>,
+}
+
+/// 系统调优现状（只读，仅 admin）
+async fn tuning_status(
+    _: RequireRole<2>,
+) -> Result<Json<crate::tuning::Status>, ApiError> {
+    Ok(Json(crate::tuning::status().await))
+}
+
+/// 提交一次调优写入（仅 admin）。
+///
+/// 同步校验 + 异步执行：参数合法性在这里当场判（用户立刻看到 400 而不是
+/// 提交完作业再看到失败），真正动宿主机的部分丢进作业队列 —— 建 swapfile
+/// 可能跑几十秒，放在请求里会撞上前端 15 秒超时。
+///
+/// 🔴 这个接口**不注册进 AI 工具**（见 `ai_tools.rs`）：一句话就能改内核参数的
+/// 通道必须由人显式点击。
+async fn tuning_apply(
+    State(state): State<AppState>,
+    RequireRole(actor): RequireRole<2>,
+    SafeJson(req): SafeJson<TuningApplyReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // 先做只读能力检查：非 root / 容器只读挂载时直接拒绝，别让用户白等一个作业
+    let cap = crate::tuning::capability().await;
+    if !cap.can_write {
+        return Err(ApiError::forbidden(cap.reason));
+    }
+
+    // 参数校验（与执行体共用同一套判断）
+    let (kind_hint, payload) = match req.action.as_str() {
+        "sysctl" => {
+            let key = req
+                .key
+                .clone()
+                .ok_or_else(|| ApiError::bad("缺少参数 key"))?;
+            let value = req
+                .value
+                .clone()
+                .ok_or_else(|| ApiError::bad("缺少参数 value"))?;
+            // 两道闸门：先确认该参数在可写白名单里（明确拒绝未知参数），
+            // 再校验取值（枚举 / 区间）。validate_value 本身也会查表，
+            // 这里显式写出来是为了让「不在白名单」的错误信息更直白。
+            if !crate::tuning::is_writable(&key) {
+                return Err(ApiError::bad(format!("该参数不允许通过面板修改：{key}")));
+            }
+            crate::tuning::validate_value(&key, &value).map_err(ApiError::bad)?;
+            (
+                crate::tuning::preview_set(&key, &value),
+                serde_json::json!({ "action": "sysctl", "key": key, "value": value }),
+            )
+        }
+        "ntp" => {
+            let servers = req
+                .servers
+                .clone()
+                .ok_or_else(|| ApiError::bad("缺少参数 servers"))?;
+            if servers.trim().is_empty() {
+                return Err(ApiError::bad("servers 不能为空"));
+            }
+            (
+                format!("NTP 服务器：{servers}"),
+                serde_json::json!({ "action": "ntp", "servers": servers }),
+            )
+        }
+        "swapfile" => {
+            let op = req
+                .op
+                .clone()
+                .ok_or_else(|| ApiError::bad("缺少参数 op"))?;
+            if !["enable", "disable", "remove"].contains(&op.as_str()) {
+                return Err(ApiError::bad("op 只能是 enable / disable / remove"));
+            }
+            if op == "enable" && req.size_mb.unwrap_or(0) == 0 {
+                return Err(ApiError::bad("创建 swap 文件必须给出 size_mb"));
+            }
+            let path = req.path.clone().unwrap_or_else(|| "/swapfile".into());
+            (
+                format!("swap {op} {path}"),
+                serde_json::json!({
+                    "action": "swapfile", "op": op, "path": path,
+                    "size_mb": req.size_mb.unwrap_or(0)
+                }),
+            )
+        }
+        other => return Err(ApiError::bad(format!("未知的动作：{other}"))),
+    };
+
+    // 审计由审计层按路径与请求体记录（P1-3），这里补一条带操作者与摘要的日志
+    tracing::warn!(
+        "系统调优写入：{}（操作者 {}）",
+        kind_hint,
+        actor.username
+    );
+
+    let id = crate::jobs::submit(&state, crate::jobs::JobKind::Tuning, payload)
+        .await
+        .map_err(ApiError::file_err)?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "id": id,
+        "summary": kind_hint,
+        "container": cap.container,
+        "note": cap.reason,
+    })))
+}
+
+#[derive(Deserialize)]
 struct JobListQuery {
     limit: Option<i64>,
     offset: Option<i64>,
@@ -3765,6 +3887,7 @@ pub fn router(state: AppState) -> Router {
         .route("/system/state", get(system_state))
         .route("/system/history", get(system_history))
         .route("/system/dir-usage", get(dir_usage))
+        .route("/system/tuning", get(tuning_status).post(tuning_apply))
         .route("/instances", get(instances_list))
         .route("/instances/{id}/files", get(instance_files))
         .route("/instances/{id}/file", get(instance_file_read))

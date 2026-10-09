@@ -42,6 +42,9 @@ pub enum JobKind {
     BackupCreate,
     DockerPull,
     DockerInstall,
+    /// 系统调优（swap / 内核参数 / NTP）：动的是宿主机本身，
+    /// 参数校验与白名单在 `tuning::run_action` 里，这里只负责排队与输出
+    Tuning,
 }
 
 impl JobKind {
@@ -56,6 +59,7 @@ impl JobKind {
             Self::BackupCreate => "backup_create",
             Self::DockerPull => "docker_pull",
             Self::DockerInstall => "docker_install",
+            Self::Tuning => "tuning",
         }
     }
 
@@ -70,6 +74,7 @@ impl JobKind {
             Self::BackupCreate => "创建备份",
             Self::DockerPull => "拉取镜像",
             Self::DockerInstall => "安装 Docker",
+            Self::Tuning => "系统调优",
         }
     }
 
@@ -84,6 +89,7 @@ impl JobKind {
             "backup_create" => Self::BackupCreate,
             "docker_pull" => Self::DockerPull,
             "docker_install" => Self::DockerInstall,
+            "tuning" => Self::Tuning,
             _ => return None,
         })
     }
@@ -103,6 +109,9 @@ impl JobKind {
             Self::DockerPull => LockGroup::Docker,
             // 备份执行体直调 spawn_blocking，不经 cmd 的分组锁
             Self::BackupCreate => LockGroup::None,
+            // 调优：改的是 /proc/sys 与 swap，与包管理器/docker 无争用；
+            // 同类调优作业之间由前端串行发起，这里不额外排队
+            Self::Tuning => LockGroup::None,
         }
     }
 }
@@ -357,6 +366,9 @@ async fn execute(
         }
         JobKind::DockerInstall => {
             crate::docker::install(&mut *sink).await?;
+        }
+        JobKind::Tuning => {
+            crate::tuning::run_action(&params, &mut *sink).await?;
         }
         _ => {
             let names = names_param(&params);
