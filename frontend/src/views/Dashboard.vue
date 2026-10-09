@@ -923,25 +923,36 @@ function renderChart() {
   const netOutData = history.value.map((p) => p.net_out ?? null);
   const diskReadData = history.value.map((p) => p.disk_read ?? null);
   const diskWriteData = history.value.map((p) => p.disk_write ?? null);
-  const bwAll = [...netInData, ...netOutData, ...diskReadData, ...diskWriteData].filter(
-    (x): x is number => x !== null,
-  );
   // 两条线量级差得远（CPU 常年个位数、内存几十个百分点），共用一根写死 0–100 的轴时
-  // CPU 只能贴着底边走直线 —— 这就是「趋势看不出变化」的主因。各给一根轴、上限按各自
-  // 数据自适应（最大值的 1.2 倍），并留一个下限，免得空数据时轴塌成一条线。
-  const axisMax = (vals: number[], floor: number) =>
-    vals.length ? Math.max(floor, Math.ceil(Math.max(...vals) * 1.2 * 10) / 10) : floor;
-  // 带宽轴的上限取「所有带宽序列」的最大值：各给一根轴的话右侧会叠三套刻度。
-  const bwMax = axisMax(bwAll, 64 * 1024);
-  // 六个序列挤在一张图里，颜色必须可区分，但全站约定「无彩色、只用灰阶」——
-  // 所以靠主/次文本色 × 实线/虚线 × 不透明度分层：CPU 最重（实线、全不透明），
-  // 内存次之，网络与磁盘再淡一档。量级与单位由 tooltip 与轴刻度交代。
-  const muted = (opacity: number) => {
-    const m = sub.match(/\d+/g);
-    return m && m.length >= 3
-      ? `rgba(${m[0]}, ${m[1]}, ${m[2]}, ${opacity})`
-      : sub;
+  // CPU 只能贴着底边走直线 —— 这就是「趋势看不出变化」的主因。各带按**自己那组数据**
+  // 定上限（最大值的 1.2 倍），并留一个下限，免得空数据时轴塌成一条线。
+  //
+  // 接收可空序列：磁盘两列在迁移前的历史行上是 null（断线语义），
+  // 这里跳过它们即可，不能因为一个 null 就让整根轴退回下限。
+  const axisMax = (vals: (number | null)[], floor: number) => {
+    const nums = vals.filter((x): x is number => x !== null);
+    return nums.length
+      ? Math.max(floor, Math.ceil(Math.max(...nums) * 1.2 * 10) / 10)
+      : floor;
   };
+
+  // ---------- 三横带的布局与数据 ----------
+  //
+  // 每带各占三分之一高度，带间留 10px；图例两行占 38px，底部留 22px 给 X 轴标签。
+  // 高度取容器的实际渲染高度而不是写死像素：这张卡可以从 2 行拖到 6 行，
+  // 写死的话放大后三带之间会留一大片空白。
+  const chartH = chartEl.value?.clientHeight || 0;
+  const legendH = 38;
+  const bottomH = 22;
+  const bandGap = 10;
+  const usable = Math.max(120, chartH - legendH - bottomH);
+  const bandH = Math.max(40, (usable - bandGap * 2) / 3);
+  const timeLabels = history.value.map((p) =>
+    new Date(p.ts * 1000).toLocaleTimeString("zh-CN", { hour12: false }),
+  );
+  // 序列名列表同时给图例与 tooltip 用：tooltip 按**下标**取名字判断单位，
+  // 两处各写一份的话，加序列时很容易漏改一处。
+  const seriesNames = ["CPU %", "内存 %", "网络 ↓", "网络 ↑", "磁盘读", "磁盘写"];
 
   chart.setOption({
     backgroundColor: "transparent",
@@ -958,126 +969,111 @@ function renderChart() {
       // （默认 10px 与 20% 黑），否则会和 --panel-shadow-2 叠成两层影。
       extraCssText: "box-shadow: var(--panel-shadow-2);",
       shadowBlur: 0,
-      // 百分比与字节/秒混在一张图里，数值必须各自带单位：
-      // 「45」到底是 45% 还是 45 B/s，只有这里能交代清楚。
-      valueFormatter: (val: unknown) =>
-        typeof val === "number" ? fmtBytes(val) : val === null ? "无数据" : String(val),
+      // 每条序列各自带单位：百分比是 %，速率是 B/s。
+      // 「25」到底是 25% 还是 25 B/s，只有这里能交代清楚。
+      valueFormatter: (val: unknown, idx: number) => {
+        if (val === null || val === undefined) return "无数据";
+        const name = seriesNames[idx] ?? "";
+        return name.endsWith("%") ? `${val}%` : `${fmtBytes(Number(val))}/s`;
+      },
     },
     // ECharts 6 起 legend 的默认位置由顶部改成了贴底（LegendModel.defaultOption
     // 里 top 被注释、改设 bottom），于是图例会压在 x 轴标签上。这里显式钉回顶部，
     // 正好落在 grid.top 预留的空间里；bottom 保留默认值不影响 top 的解析。
     legend: {
-      data: ["CPU %", "内存 %", "网络 ↓", "网络 ↑", "磁盘读", "磁盘写"],
+      data: seriesNames,
       textStyle: { color: sub },
       top: 0,
       itemWidth: 14,
       itemHeight: 8,
     },
-    // 顶部要放两行图例（六个序列一行放不下），左右给两根轴留刻度位
-    grid: { left: 40, right: 60, top: 46, bottom: 30 },
-    xAxis: {
-      type: "category",
+    // ---------- 三横带：每类指标独占一带 ----------
+    //
+    // 🔴 为什么不是「一张图 + 多根 Y 轴」（先前那版，实测被反馈为意大利面条）：
+    // 单位不同只是表层问题，真正致命的是**同类指标之间量级也差得远** ——
+    // 磁盘写入偶发 7.7M/s，网络常年 0，两者共用一个字节/秒的轴时只能贴地板；
+    // 而 CPU 6.6% 与内存 7.2% 在百分比轴上又挤成一条线。
+    // 拆成三带后每带各自定标（自己那组数据的 1.2 倍上限），
+    // 每条线的起伏都占满自己那一带的高度，读数才有意义。
+    grid: [
+      { left: 46, right: 20, top: legendH, height: bandH },
+      { left: 46, right: 20, top: legendH + bandH + bandGap, height: bandH },
+      { left: 46, right: 20, top: legendH + (bandH + bandGap) * 2, height: bandH },
+    ],
+    // 三条 X 轴共用一个时间刻度：只留最下面那条显示标签，上面两条留空
+    xAxis: [0, 1, 2].map((i) => ({
+      type: "category" as const,
+      gridIndex: i,
       boundaryGap: false,
-      data: history.value.map((p) =>
-        new Date(p.ts * 1000).toLocaleTimeString("zh-CN", { hour12: false }),
-      ),
+      data: timeLabels,
       axisLine: { lineStyle: { color: grid } },
-      axisLabel: { color: sub },
-    },
-    // 三轴：左 CPU、右内存（百分比），以及同为右侧的带宽轴。
-    // 轴刻度色与对应折线一致（CPU=正文色、内存/带宽=次要色），不加轴名也能看出
-    // 哪条线读哪根轴；网格线只留一根，免得几套刻度叠成密网。
-    yAxis: [
-      {
-        type: "value",
-        min: 0,
-        max: axisMax(cpuData, 1),
-        splitLine: { lineStyle: { color: grid } },
-        axisLabel: { color: line, fontSize: 10 },
+      axisLabel: { color: sub, show: i === 2, fontSize: 10 },
+      axisTick: { show: i === 2 },
+    })),
+    // 每带一根 Y 轴，各自定标、各自带单位（左带 %、另两带 字节/秒）。
+    // 不带单位的刻度在这张图里无法解读 —— 三带的单位并不相同。
+    yAxis: [0, 1, 2].map((i) => ({
+      type: "value" as const,
+      gridIndex: i,
+      min: 0,
+      max: axisMax(
+        i === 0
+          ? [...cpuData, ...memData]
+          : i === 1
+            ? [...netInData, ...netOutData]
+            : [...diskReadData, ...diskWriteData],
+        i === 0 ? 10 : 64 * 1024,
+      ),
+      splitNumber: 2,
+      splitLine: { lineStyle: { color: grid } },
+      axisLabel: {
+        color: i === 0 ? line : sub,
+        fontSize: 10,
+        formatter: (val: number) => (i === 0 ? `${Math.round(val)}%` : fmtRateAxis(val)),
       },
-      {
-        type: "value",
-        min: 0,
-        max: axisMax(memData, 10),
-        splitLine: { show: false },
-        axisLabel: { color: sub, fontSize: 10 },
-      },
-      {
-        // offset 把带宽轴推到内存轴外侧，两根右轴才不重叠
-        type: "value",
-        min: 0,
-        max: bwMax,
-        offset: 30,
-        splitLine: { show: false },
-        axisLabel: { color: muted(0.75), fontSize: 10, formatter: fmtRateAxis },
-      },
-    ],
+    })),
     series: [
-      {
-        name: "CPU %",
-        type: "line",
-        yAxisIndex: 0,
-        smooth: true,
-        showSymbol: false,
-        data: cpuData,
-        itemStyle: { color: line },
-        lineStyle: { color: line, width: 2 },
-        areaStyle: { color: line, opacity: 0.08 },
-      },
-      {
-        name: "内存 %",
-        type: "line",
-        yAxisIndex: 1,
-        smooth: true,
-        showSymbol: false,
-        data: memData,
-        itemStyle: { color: sub },
-        lineStyle: { color: sub, width: 2, type: "dashed" },
-      },
-      {
-        name: "网络 ↓",
-        type: "line",
-        yAxisIndex: 2,
-        smooth: true,
-        showSymbol: false,
-        data: netInData,
-        itemStyle: { color: muted(0.75) },
-        lineStyle: { color: muted(0.75), width: 1.5 },
-      },
-      {
-        name: "网络 ↑",
-        type: "line",
-        yAxisIndex: 2,
-        smooth: true,
-        showSymbol: false,
-        data: netOutData,
-        itemStyle: { color: muted(0.75) },
-        lineStyle: { color: muted(0.75), width: 1.5, type: "dashed" },
-      },
-      {
-        name: "磁盘读",
-        type: "line",
-        yAxisIndex: 2,
-        smooth: true,
-        showSymbol: false,
-        data: diskReadData,
-        itemStyle: { color: muted(0.5) },
-        lineStyle: { color: muted(0.5), width: 1.5 },
-      },
-      {
-        name: "磁盘写",
-        type: "line",
-        yAxisIndex: 2,
-        smooth: true,
-        showSymbol: false,
-        data: diskWriteData,
-        itemStyle: { color: muted(0.5) },
-        lineStyle: { color: muted(0.5), width: 1.5, type: "dashed" },
-      },
+      // 主序列（实线 + 面积）与次序列（虚线）成对出现，配色沿用全站灰阶约定：
+      // 同一带内两条线靠实/虚与主/次文本色区分，不引入彩色。
+      sparkSeries("CPU %", cpuData, 0, line, false),
+      sparkSeries("内存 %", memData, 0, sub, true),
+      sparkSeries("网络 ↓", netInData, 1, line, false),
+      sparkSeries("网络 ↑", netOutData, 1, sub, true),
+      sparkSeries("磁盘读", diskReadData, 2, line, false),
+      sparkSeries("磁盘写", diskWriteData, 2, sub, true),
     ],
+    // 十字准线联动：三带共享同一个时间刻度，指针必须一起动 ——
+    // 否则读数时要在三条带上分别找同一时刻。联动是拆带去量纲的代价补偿。
+    axisPointer: {
+      link: [{ xAxisIndex: "all" }],
+      label: { backgroundColor: v("--el-bg-color-overlay") || cardBg },
+    },
   });
 }
 
+/// 一条趋势线。抽成工厂函数是为了让上面六个 series 保持一行一条 ——
+/// 六个对象的字面量写下来有七十多行，读的时候看不出它们其实只有两处差异
+/// （数据、所在带），反而容易写错 yAxisIndex。
+function sparkSeries(
+  name: string,
+  data: (number | null)[],
+  band: number,
+  color: string,
+  dashed: boolean,
+) {
+  return {
+    name,
+    type: "line" as const,
+    xAxisIndex: band,
+    yAxisIndex: band,
+    smooth: true,
+    showSymbol: false,
+    data,
+    itemStyle: { color },
+    lineStyle: { color, width: 2, type: dashed ? ("dashed" as const) : ("solid" as const) },
+    ...(dashed ? {} : { areaStyle: { color, opacity: 0.08 } }),
+  };
+}
 function onResize() {
   // 跨过断点时列数会变（4 ↔ 2 ↔ 1），跨度钳制与卡片宽度都要跟着重算
   syncCols();
